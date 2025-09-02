@@ -21,10 +21,12 @@ class MultiHeadAttentionBlock(nn.Module):
     def attention(query, key, value, mask):
         # this can be replaced
         d_k = query.shape[-1]
+        # transpose matmul
         attention_scores = einsum("bhqd, bhkd->bhqk", query, key) / math.sqrt(d_k)
         if mask is not None:
             attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
         attention_scores = attention_scores.softmax(dim=-1)
+        # matmul
         x = einsum("bhqk, bhkd->bhqd", attention_scores, value)
         return x, attention_scores
 
