@@ -7,6 +7,7 @@ import torch
 from pandas.core.groupby.generic import DataFrameGroupBy
 
 SPECIAL_TOKENS = ["[PAD]", "[UNK]", "[CLS]", "[MASK]"]
+SPECIAL_TOKEN_IDS = [0, 1, 2, 3]
 
 
 def get_all_records(grouped_dataset: DataFrameGroupBy, token_col: str):

@@ -7,6 +7,9 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import mlflow
+from tokenizers import Tokenizer
+
+from src.utils.data_utils import random_masking
 
 
 class EarlyStopping:
@@ -63,14 +66,12 @@ class Trainer(ABC):
         early_stopping: EarlyStopping | None,
         verbose_period: int,
         device: torch.device,
-        transform=None,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.early_stopping = early_stopping
         self.verbose_period = verbose_period
         self.device = device
-        self.transform = transform
         self.best_score = -float("inf")
 
     def fit(
@@ -104,15 +105,16 @@ class BaseTrainer(Trainer):
     def __init__(
         self,
         model: nn.Module,
+        tokenizer: Tokenizer,
         optimizer: Optimizer,
+        criterion: nn.CrossEntropyLoss,
         early_stopping: EarlyStopping | None,
         verbose_period: int,
         device: torch.device,
-        transform=None,
     ) -> None:
-        super().__init__(
-            model, optimizer, early_stopping, verbose_period, device, transform
-        )
+        super().__init__(model, optimizer, early_stopping, verbose_period, device)
+        self.tokenizer = tokenizer
+        self.criterion = criterion
 
     def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
         model: nn.Module = self.model
@@ -124,7 +126,18 @@ class BaseTrainer(Trainer):
             bar.set_description(f"Epoch {epoch_id}")
             for batch in bar:
                 # TODO: forward pass, mlm loss
-                loss = 0
+                input_ids = batch["input_ids"].to(self.device)
+                attention_mask = batch["attention_mask"].to(self.device)
+                segment_attention_mask = batch["segment_attention_mask"].to(self.device)
+
+                masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
+                logits = model(
+                    input_ids=masked_input_ids,
+                    attention_mask=attention_mask,
+                    segment_attention_mask=segment_attention_mask,
+                )
+
+                loss = self.criterion(logits.view(-1), labels.view(-1))
                 loss.backward()
                 optimizer.step()
 
