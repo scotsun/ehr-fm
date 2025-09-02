@@ -120,15 +120,14 @@ class BaseTrainer(Trainer):
         model: nn.Module = self.model
         model.train()
         optimizer = self.optimizer
-        # device = self.device
+        device = self.device
 
         with tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose) as bar:
             bar.set_description(f"Epoch {epoch_id}")
             for batch in bar:
-                # TODO: forward pass, mlm loss
-                input_ids = batch["input_ids"].to(self.device)
-                attention_mask = batch["attention_mask"].to(self.device)
-                segment_attention_mask = batch["segment_attention_mask"].to(self.device)
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                segment_attention_mask = batch["segment_attention_mask"].to(device)
 
                 masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
                 logits = model(
@@ -144,17 +143,44 @@ class BaseTrainer(Trainer):
                 bar.set_postfix(mlm_loss=float(loss))
         return
 
+    def evaluate(self, dataloader: DataLoader, verbose: bool, epoch_id: int) -> float:
+        model: nn.Module = self.model
+        model.eval()
+        device = self.device
+
+        total_mlm = 0.0
+        total_num_batch = len(dataloader)
+        with torch.no_grad():
+            for batch in tqdm(
+                dataloader, unit="batch", mininterval=0, disable=not verbose
+            ):
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                segment_attention_mask = batch["segment_attention_mask"].to(device)
+
+                masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
+                logits = model(
+                    input_ids=masked_input_ids,
+                    attention_mask=attention_mask,
+                    segment_attention_mask=segment_attention_mask,
+                )
+
+                loss = self.criterion(logits.view(-1), labels.view(-1))
+                total_mlm += loss.item()
+
+        return total_mlm / total_num_batch
+
     def _valid(self, dataloader, verbose, epoch_id):
         """
         log all the metrics in mlflow;
         return the metric for save-best/early-stop.
         """
         if verbose:
-            mse, kl = self.evaluate(dataloader, verbose, epoch_id)
-            mlflow.log_metrics({"val_reconstr_loss": mse, "val_kl": kl}, step=epoch_id)
+            mlm = self.evaluate(dataloader, verbose, epoch_id)
+            mlflow.log_metrics({"val_mlm_loss": mlm}, step=epoch_id)
         if self.early_stopping:
-            self.early_stopping.step(mse, self.model)
-        return mse
+            self.early_stopping.step(mlm, self.model)
+        return mlm
 
 
 def test_logging(
