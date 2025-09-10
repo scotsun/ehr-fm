@@ -83,10 +83,11 @@ class EHRDataset(Dataset):
 
 def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probability=0.15):
     labels = input_ids.clone()
+    device = input_ids.device
 
     # Step 1: Pick mask positions (ignore <bos>, <pad>, <eos>)
-    probability_matrix = torch.full(labels.shape, mlm_probability)
-    special_mask = torch.isin(labels, torch.tensor(SPECIAL_TOKEN_IDS))
+    probability_matrix = torch.full(labels.shape, mlm_probability, device=device)
+    special_mask = torch.isin(labels, torch.tensor(SPECIAL_TOKEN_IDS, device=device))
     probability_matrix.masked_fill_(special_mask, value=0.0)
 
     masked_indices = torch.bernoulli(probability_matrix).bool()
@@ -95,18 +96,19 @@ def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probabilit
     # Step 2: Apply 80/10/10
     # 80% -> [MASK]
     indices_replaced = (
-        torch.bernoulli(torch.full(labels.shape, 0.8)).bool() & masked_indices
+        torch.bernoulli(torch.full(labels.shape, 0.8, device=device)).bool()
+        & masked_indices
     )
     input_ids[indices_replaced] = tokenizer.token_to_id("[MASK]")
 
     # 10% -> random token
     indices_random = (
-        torch.bernoulli(torch.full(labels.shape, 0.5)).bool()
+        torch.bernoulli(torch.full(labels.shape, 0.5, device=device)).bool()
         & masked_indices
         & ~indices_replaced
     )
     random_words = torch.randint(
-        tokenizer.get_vocab_size(), labels.shape, dtype=torch.int64
+        tokenizer.get_vocab_size(), labels.shape, dtype=torch.int64, device=device
     )
     input_ids[indices_random] = random_words[indices_random]
 

@@ -14,13 +14,19 @@ from src.utils.data_utils import random_masking
 
 class EarlyStopping:
     def __init__(
-        self, patience: int, min_delta: int = 0, mode: str = "min", model_signature=None
+        self,
+        patience: int,
+        min_delta: int = 0,
+        mode: str = "min",
+        model_signature=None,
+        local_rank: int = 0,
     ) -> None:
         self.patience = patience
         self.counter = 0
         self.best_score = None
         self.early_stop = False
         self.model_signature = model_signature
+        self.local_rank = local_rank
 
         match mode:
             case "min":
@@ -32,12 +38,13 @@ class EarlyStopping:
 
     def _log_best_model(self, model):
         """helper function to log model."""
-        mlflow.pytorch.log_model(
-            model,
-            "best_model",
-            pip_requirements=["torch==2.7.1+cu128"],
-            signature=self.model_signature,
-        )
+        if self.local_rank == 0:
+            mlflow.pytorch.log_model(
+                model,
+                "best_model",
+                pip_requirements=["torch==2.7.1+cu128"],
+                signature=self.model_signature,
+            )
 
     def step(self, metric_val, model):
         # save the first chkpt
@@ -66,12 +73,14 @@ class Trainer(ABC):
         early_stopping: EarlyStopping | None,
         verbose_period: int,
         device: torch.device,
+        local_rank: int = 0,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.early_stopping = early_stopping
         self.verbose_period = verbose_period
         self.device = device
+        self.local_rank = local_rank
         self.best_score = -float("inf")
 
     def fit(
@@ -83,7 +92,7 @@ class Trainer(ABC):
         for epoch in range(epochs):
             verbose = (epoch % self.verbose_period) == 0
             self._train(train_loader, verbose, epoch)
-            if valid_loader is not None:
+            if valid_loader is not None and self.local_rank == 0:
                 self._valid(valid_loader, verbose, epoch)
                 if self.early_stopping and self.early_stopping.early_stop:
                     break
@@ -111,8 +120,11 @@ class BaseTrainer(Trainer):
         early_stopping: EarlyStopping | None,
         verbose_period: int,
         device: torch.device,
+        local_rank: int,
     ) -> None:
-        super().__init__(model, optimizer, early_stopping, verbose_period, device)
+        super().__init__(
+            model, optimizer, early_stopping, verbose_period, device, local_rank
+        )
         self.tokenizer = tokenizer
         self.criterion = criterion
 
@@ -124,7 +136,7 @@ class BaseTrainer(Trainer):
 
         with tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose) as bar:
             bar.set_description(f"Epoch {epoch_id}")
-            for batch in bar:
+            for batch_id, batch in enumerate(bar):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 segment_attention_mask = batch["segment_attention_mask"].to(device)
@@ -136,11 +148,16 @@ class BaseTrainer(Trainer):
                     segment_attention_mask=segment_attention_mask,
                 )
 
-                loss = self.criterion(logits.view(-1), labels.view(-1))
+                loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+                optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
                 bar.set_postfix(mlm_loss=float(loss))
+
+                cur_step = epoch_id * len(dataloader) + batch_id
+                if self.local_rank == 0 and cur_step % 100 == 0:
+                    mlflow.log_metrics({"train_mlm_loss": float(loss)}, step=cur_step)
         return
 
     def evaluate(self, dataloader: DataLoader, verbose: bool, epoch_id: int) -> float:
@@ -165,7 +182,7 @@ class BaseTrainer(Trainer):
                     segment_attention_mask=segment_attention_mask,
                 )
 
-                loss = self.criterion(logits.view(-1), labels.view(-1))
+                loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
                 total_mlm += loss.item()
 
         return total_mlm / total_num_batch
@@ -176,11 +193,11 @@ class BaseTrainer(Trainer):
         return the metric for save-best/early-stop.
         """
         if verbose:
-            mlm = self.evaluate(dataloader, verbose, epoch_id)
-            mlflow.log_metrics({"val_mlm_loss": mlm}, step=epoch_id)
+            valid_mlm = self.evaluate(dataloader, verbose, epoch_id)
+            mlflow.log_metrics({"val_mlm_loss": valid_mlm}, step=epoch_id)
         if self.early_stopping:
-            self.early_stopping.step(mlm, self.model)
-        return mlm
+            self.early_stopping.step(valid_mlm, self.model)
+        return valid_mlm
 
 
 def test_logging(

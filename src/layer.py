@@ -47,7 +47,7 @@ class RoPE(nn.Module):
 
 
 class MultiHeadAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, h: int, with_rope: bool):
+    def __init__(self, d_model: int, h: int, with_rope: bool, attn_backend: str):
         super().__init__()
         self.d_model = d_model
         self.h = h
@@ -62,6 +62,11 @@ class MultiHeadAttentionBlock(nn.Module):
         if self.with_rope:
             self.rope_q = RoPE(self.d_k)
             self.rope_k = RoPE(self.d_k)
+        match attn_backend:
+            case "base":
+                self._attn_func = self.attention
+            case "flash_attention":
+                self._attn_func = self.flash_attention
 
     @staticmethod
     def attention(query, key, value, mask):
@@ -173,13 +178,16 @@ class TransformerBlock(nn.Module):
         dropout: float = 0,
         norm_type: str = "layer",
         ffn_type: str = "swiglu",
+        attn_backend: str = "base",
     ):
         """
         d_ff = 4 * d_model
         but *GLU typically scale down by 2/3 to previous parameter size
         """
         super().__init__()
-        self.self_attn_block = MultiHeadAttentionBlock(d_model, h, with_rope)
+        self.self_attn_block = MultiHeadAttentionBlock(
+            d_model, h, with_rope, attn_backend
+        )
         self.ffn_block = (
             FFNSwiGLUBlock(d_model, d_ff)
             if ffn_type == "swiglu"
@@ -202,15 +210,16 @@ class HierarchicalTransformerBlock(nn.Module):
         dropout=0,
         norm_type="layer",
         ffn_type="swiglu",
+        attn_backend: str = "base",
     ):
         super().__init__()
         # segment-wise encoder
         self.swe = TransformerBlock(
-            d_model, d_ff, h, False, dropout, norm_type, ffn_type
+            d_model, d_ff, h, False, dropout, norm_type, ffn_type, attn_backend
         )
         # cross-segment encoder
         self.cse = TransformerBlock(
-            d_model, d_ff, h, True, dropout, norm_type, ffn_type
+            d_model, d_ff, h, True, dropout, norm_type, ffn_type, attn_backend
         )
 
     def forward(self, x, token_mask, seg_mask):
@@ -220,20 +229,20 @@ class HierarchicalTransformerBlock(nn.Module):
 
         # therefore, x is truncated at both seg and seq_len level
         # segment-wise encoding
-        seg_hidden_state = self.swe(
+        hidden_state = self.swe(
             x.reshape(-1, x.shape[2], x.shape[3]).contiguous(),
             token_mask.reshape(-1, token_mask.shape[2]).contiguous(),
         )
-        seg_hidden_state = seg_hidden_state.reshape(
+        hidden_state = hidden_state.reshape(
             x.shape[0], x.shape[1], x.shape[2], x.shape[3]
         ).contiguous()
 
         # cross-segment encoding
         # cls embeddings from all seg: (batch, max_seg, d_model)
-        seg_cls_hidden_state = seg_hidden_state[:, :, 0, :].clone()
-        seg_cls_hidden_state = self.cse(seg_cls_hidden_state, seg_mask)
+        cls_hidden_state = hidden_state[:, :, 0, :].clone()
+        cls_hidden_state = self.cse(cls_hidden_state, seg_mask)
 
         # combine
-        seg_hidden_state[:, :, 0, :] = seg_cls_hidden_state
+        hidden_state[:, :, 0, :] = cls_hidden_state
 
-        return seg_hidden_state
+        return hidden_state
