@@ -52,20 +52,21 @@ class MultiHeadAttentionBlock(nn.Module):
             )
         return mh_out
 
-    def forward(self, q, k, v, mask):
-        query = self.w_q(q)  # (batch, seq_len, d_model)
-        key = self.w_k(k)  # (batch, seq_len, d_model)
-        value = self.w_v(v)  # (batch, seq_len, d_model)
+    def forward(self, x, mask, time):
+        query = self.w_q(x)  # (batch, seq_len, d_model)
+        key = self.w_k(x)  # (batch, seq_len, d_model)
+        value = self.w_v(x)  # (batch, seq_len, d_model)
         # chunk d_model from to h * d_k
         # (batch, seq_len, d_model) -> (batch, seq_len, h, d_k) -> (batch, h, seq_len, d_k)
         query = self._reshape(query)
         key = self._reshape(key)
         value = self._reshape(value)
+        mh_out = self._attn_func(query, key, value, mask)
 
         if self.with_rope:
-            query, key = self.rope_k(key), self.rope_q(query)
+            query, key = self.rope_k(key, time), self.rope_q(query, time)
+        print(query.shape, key.shape, value.shape)
 
-        mh_out = self._attn_func(query, key, value, mask)
         # (batch, h, seq_len, d_k) -> (batch, seq_len, h, d_k) -> (batch, seq_len, d_model)
         mh_out = (
             mh_out.transpose(1, 2).contiguous().view(mh_out.shape[0], -1, self.d_model)

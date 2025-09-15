@@ -32,7 +32,7 @@ class TransformerBlock(nn.Module):
         )
         self.residual_connection = ResidualConnection(d_model, dropout, norm_type)
 
-    def forward(self, x, mask):
-        x = self.residual_connection(x, lambda x: self.self_attn_block(x, x, x, mask))
+    def forward(self, x, time, mask):
+        x = self.residual_connection(x, lambda x: self.self_attn_block(x, time, mask))
         x = self.residual_connection(x, self.ffn_block)
         return x

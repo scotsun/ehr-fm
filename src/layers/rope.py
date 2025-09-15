@@ -17,27 +17,68 @@ class RoPE(nn.Module):
         self.cos_cached = None
         self.sin_cached = None
 
-    def _build_cache(self, seq_len: int, device: torch.device):
+    def encode_time(self, time: torch.Tensor):
+        # time: (b, seq_len)
+        device = time.device
         # (seq_len, d/2)
         theta = 1.0 / (self.base ** (torch.arange(0, self.d, 2).float() / self.d)).to(
             device
         )
-        # (seq_len, d/2)
-        position = torch.arange(seq_len, device=device).float()
 
-        angle = einsum("i,j -> ij", position, theta)
-        angle = torch.cat([angle, angle], dim=-1)  # (seq_len, d)
+        angle = einsum("bi,j -> bij", time, theta)  # shape: (b, seq_len, d/2)
+        angle = torch.cat([angle, angle], dim=-1)  # shape: (b, seq_len, d)
 
-        # (1, 1, seq_len, d)
-        self.cos_cached = torch.cos(angle)[None, None, :, :]
-        self.sin_cached = torch.sin(angle)[None, None, :, :]
+        # (b, 1, seq_len, d)
+        return torch.cos(angle)[:, None, :, :], torch.sin(angle)[:, None, :, :]
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, time: torch.Tensor | None = None):
         # x: (batch, h, seq_len, d)
-        self._build_cache(seq_len=x.shape[-2], device=x.device)
+        if time is None:
+            time = torch.arange(x.shape[2], device=x.device).float()
+            time = time.repeat(x.shape[0], 1)
+
+        cos_rotery, sin_rotery = self.encode_time(time=time)
         x_rope, x_pass = x[..., : self.d], x[..., self.d :]
         neg_half = torch.cat(
             [-x_rope[..., self.d // 2 :], x_rope[..., : self.d // 2]], dim=-1
         )
-        x_rope = x_rope * self.cos_cached + neg_half * self.sin_cached
+        x_rope = x_rope * cos_rotery + neg_half * sin_rotery
         return torch.cat([x_rope, x_pass], dim=-1)
+
+
+class T2V(nn.Module):
+    """
+    Time2Vec (T2V)
+    Input shape: (batch, seq_len)
+    Output shape: (batch, seq_len, d)
+    """
+
+    def __init__(self, d, scale, f=torch.sin):
+        super().__init__()
+        self.scale = scale
+        self.f = f
+        self.w0 = nn.Parameter(torch.rand(1, 1))
+        self.b0 = nn.Parameter(torch.rand(1, 1))
+        self.w = nn.Parameter(torch.rand(1, d - 1))
+        self.b = nn.Parameter(torch.rand(1, d - 1))
+        self.register_parameter("w0", self.w0)
+        self.register_parameter("b0", self.b0)
+        self.register_parameter("w", self.w)
+        self.register_parameter("b", self.b)
+
+    def forward(self, t):
+        # x: (batch, 1)
+        v0 = self.scale * t @ self.w0 + self.b0
+        v = self.f(self.scale * t @ self.w + self.b)
+        return torch.cat([v0, v], dim=-1)
+
+
+def main():
+    t2v = T2V(5, 1.0)
+    x = torch.rand(2, 1)
+    print(t2v(x).shape)
+    print(t2v(x))
+
+
+if __name__ == "__main__":
+    main()
