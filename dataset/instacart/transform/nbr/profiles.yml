@@ -1,0 +1,7 @@
+nbr:
+  outputs:
+    dev:
+      type: duckdb
+      path: '{{ env_var("DATA_PROJECT_ROOT") }}/data/instacart.duckdb'
+
+  target: dev

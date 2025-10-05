@@ -480,6 +480,19 @@ wheels = [
 ]
 
 [[package]]
+name = "dagster-duckdb"
+version = "0.27.13"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "dagster" },
+    { name = "duckdb" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/97/08/6c17372f08000aeab02465782982d5e5698e1eccef0ea016d01d7405b0f8/dagster_duckdb-0.27.13.tar.gz", hash = "sha256:259c5605dbcc48c88d6014798caef41515db9b6280d38833a7e02549d9a0aec2", size = 9392, upload-time = "2025-10-02T18:07:09.254Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f3/7f/965a4b44957613ec02e5d6480b672922e2a2a6733b9a9d748d409b8145ee/dagster_duckdb-0.27.13-py3-none-any.whl", hash = "sha256:1d6b161ffd3ed3e7cb70561954e108ec9a1d2431d9958e7f5cc343af917b77f7", size = 10594, upload-time = "2025-10-02T18:07:08.406Z" },
+]
+
+[[package]]
 name = "dagster-graphql"
 version = "1.11.13"
 source = { registry = "https://pypi.org/simple" }
@@ -1067,6 +1080,7 @@ source = { editable = "." }
 dependencies = [
     { name = "dagster" },
     { name = "dagster-dbt" },
+    { name = "dagster-duckdb" },
     { name = "dbt-duckdb" },
 ]
 
@@ -1080,6 +1094,7 @@ dev = [
 requires-dist = [
     { name = "dagster", specifier = "==1.11.13" },
     { name = "dagster-dbt", specifier = ">=0.27.13" },
+    { name = "dagster-duckdb", specifier = ">=0.27.13" },
     { name = "dbt-duckdb", specifier = ">=1.9.6" },
 ]
 

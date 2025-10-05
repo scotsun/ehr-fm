@@ -1,0 +1,5 @@
+sources:
+  - name: main
+    tables:
+      - name: raw_orders
+      - name: raw_order_products
