@@ -49,12 +49,12 @@ def raw_order_products(duckdb: DuckDBResource) -> None:
 
 @dg.asset(
     kinds={"duckdb"},
-    key=["main", "user"],
+    key=["main", "users"],
     deps=[
         dg.AssetKey(["main", "stg"]),
     ],
 )
-def user(duckdb: DuckDBResource) -> None:
+def users(duckdb: DuckDBResource) -> None:
     """
     Export the stg table to parquet files partitioned by user_id.
     """
@@ -70,9 +70,9 @@ def user(duckdb: DuckDBResource) -> None:
             TO '{str(EXPORT_DIR)}'
             (
                 format parquet,
-                partition_by user_id,
-                write_partition_columns true
-                overwrite true 
+                partition_by (user_id),
+                write_partition_columns true,
+                overwrite true
             )
             """
         )
