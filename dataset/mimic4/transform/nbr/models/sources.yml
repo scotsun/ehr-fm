@@ -1,0 +1,12 @@
+sources:
+  - name: main
+    tables:
+      - name: raw_admissions
+      - name: raw_diagnoses_icd
+      - name: raw_prescriptions
+      - name: raw_procedures_icd
+      - name: raw_labevents
+      - name: top_200_labs
+      - name: lab_quantiles
+      - name: events_merged
+

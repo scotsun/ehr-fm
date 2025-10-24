@@ -1,0 +1,8 @@
+nbr:
+  outputs:
+    dev:
+      type: duckdb
+      path: '{{ env_var("DATA_PROJECT_ROOT") }}/data/mimic4.duckdb'
+
+  target: dev
+
