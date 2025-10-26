@@ -61,11 +61,13 @@ class MultiHeadAttentionBlock(nn.Module):
         query = self._reshape(query)
         key = self._reshape(key)
         value = self._reshape(value)
-        mh_out = self._attn_func(query, key, value, mask)
-
+        
+        # Apply RoPE BEFORE attention (following your teammate's implementation)
         if self.with_rope:
-            query, key = self.rope_k(key, time), self.rope_q(query, time)
-        print(query.shape, key.shape, value.shape)
+            query = self.rope_q(query, time)
+            key = self.rope_k(key, time)
+        
+        mh_out = self._attn_func(query, key, value, mask)
 
         # (batch, h, seq_len, d_k) -> (batch, seq_len, h, d_k) -> (batch, seq_len, d_model)
         mh_out = (

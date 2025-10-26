@@ -70,9 +70,9 @@ class FMTransformerEncoder(nn.Module):
             ]
         )
 
-    def forward(self, h, attention_mask, segment_attention_mask):
+    def forward(self, h, attention_mask, segment_attention_mask, segment_time=None, token_time=None):
         for block in self.blocks:
-            h = block(h, attention_mask, segment_attention_mask)
+            h = block(h, attention_mask, segment_attention_mask, segment_time, token_time)
         return h
 
 
@@ -88,14 +88,14 @@ class FMBase(PreTrainedModel):
         if config.weight_tying:
             self.lm_head.weight = self.embeddings.embeddings.weight
 
-    def forward(self, input_ids, attention_mask, segment_attention_mask):
-        h = self.encode(input_ids, attention_mask, segment_attention_mask)
+    def forward(self, input_ids, attention_mask, segment_attention_mask, segment_time=None, token_time=None):
+        h = self.encode(input_ids, attention_mask, segment_attention_mask, segment_time, token_time)
         logits = self.lm_head(h)
         # (batch, max_seg, max_seq_len, vocab)
         return logits
 
-    def encode(self, input_ids, attention_mask, segment_attention_mask):
+    def encode(self, input_ids, attention_mask, segment_attention_mask, segment_time=None, token_time=None):
         h = self.embeddings(input_ids)
-        h = self.transformer_encoder(h, attention_mask, segment_attention_mask)
+        h = self.transformer_encoder(h, attention_mask, segment_attention_mask, segment_time, token_time)
         # (batch, max_seg, max_seq_len, d_model)
         return h

@@ -45,6 +45,7 @@ events_with_time as (
         e.code,
         e.code_type,
         e.event_time,
+        e.seq_num,
         
         -- Calculate time offset (hours)
         -- Strategy: diagnoses have no time, place at front (-0.001 hours)
@@ -66,7 +67,8 @@ events_sorted as (
             partition by subject_id, hadm_id 
             order by 
                 time_offset_hours,  -- First by time
-                code                -- When time is same, by code lexicographically (deterministic)
+                seq_num,            -- Then by seq_num (for diagnoses/procedures priority)
+                code                -- Finally by code (deterministic for same time/seq_num)
         ) as event_seq
     from events_with_time
 )

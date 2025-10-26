@@ -1,0 +1,83 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Data files
+*.db
+*.duckdb
+*.parquet/
+data/
+dataset/*/data/
+*.csv
+*.tsv
+
+# Temporary files
+*.tmp
+*.log
+.cache/
+.tmp_*
+.tmp_dagster_home_*/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
+
+# Environment files
+.env
+.env.local
+
+# Test files
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Model checkpoints
+*.ckpt
+*.pth
+*.pt
+checkpoints/
+
+# Lock files (keep for UV projects)
+# uv.lock
+
+# Test outputs
+test_*.py
+test*.json
+test*.ipynb
+
+# Compiled files
+*.pyc
+*.pyo
+
+# OS files
+Thumbs.db
+.directory
+
+# UV / Poetry
+poetry.lock
+.poetry/
+
+# Dagster
+dagster.yaml
+.dagster/
+

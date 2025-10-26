@@ -140,12 +140,20 @@ class BaseTrainer(Trainer):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 segment_attention_mask = batch["segment_attention_mask"].to(device)
+                segment_time = batch.get("segment_time", None)
+                if segment_time is not None:
+                    segment_time = segment_time.to(device)
+                token_time = batch.get("token_time", None)
+                if token_time is not None:
+                    token_time = token_time.to(device)
 
                 masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
                 logits = model(
                     input_ids=masked_input_ids,
                     attention_mask=attention_mask,
                     segment_attention_mask=segment_attention_mask,
+                    segment_time=segment_time,
+                    token_time=token_time,
                 )
 
                 loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
@@ -174,12 +182,20 @@ class BaseTrainer(Trainer):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 segment_attention_mask = batch["segment_attention_mask"].to(device)
+                segment_time = batch.get("segment_time", None)
+                if segment_time is not None:
+                    segment_time = segment_time.to(device)
+                token_time = batch.get("token_time", None)
+                if token_time is not None:
+                    token_time = token_time.to(device)
 
                 masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
                 logits = model(
                     input_ids=masked_input_ids,
                     attention_mask=attention_mask,
                     segment_attention_mask=segment_attention_mask,
+                    segment_time=segment_time,
+                    token_time=token_time,
                 )
 
                 loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))

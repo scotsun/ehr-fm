@@ -71,8 +71,8 @@ def user(duckdb: DuckDBResource) -> None:
             (
                 format parquet,
                 partition_by user_id,
-                write_partition_columns true
-                overwrite true 
+                write_partition_columns true,
+                overwrite_or_ignore true
             )
             """
         )
