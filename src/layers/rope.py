@@ -33,6 +33,7 @@ class RoPE(nn.Module):
 
     def forward(self, x: torch.Tensor, time: torch.Tensor | None = None):
         # x: (batch, h, seq_len, d)
+        # time: (b, seq_len)
         if time is None:
             time = torch.arange(x.shape[2], device=x.device).float()
             time = time.repeat(x.shape[0], 1)

@@ -1,9 +1,11 @@
 from .rope import RoPE
-from .attention import MultiHeadAttentionBlock
-from .residual import ResidualConnection
 from .ffn import FFNSwiGLUBlock, FFNLUBlock
-from .transformer import TransformerBlock
-from .hierarchical import HierarchicalTransformerBlock
+from .transformer import (
+    ResidualConnection,
+    MultiHeadAttentionBlock,
+    TransformerBlock,
+    HierarchicalTransformerBlock,
+)
 
 __all__ = [
     "RoPE",

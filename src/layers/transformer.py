@@ -69,7 +69,7 @@ class MultiHeadAttentionBlock(nn.Module):
         value = self._reshape(value)
 
         if self.with_rope:
-            query, key = self.rope_k(key, time), self.rope_q(query, time)
+            query, key = self.rope_q(query, time), self.rope_k(key, time)
         print(query.shape, key.shape, value.shape)
 
         mh_out = self._attn_func(query, key, value, mask)
