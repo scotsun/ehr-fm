@@ -2,7 +2,7 @@ import torch.nn as nn
 from transformers.modeling_utils import PreTrainedModel
 from transformers import PretrainedConfig
 
-from src.layers.hierarchical import HierarchicalTransformerBlock
+from src.layers import HierarchicalTransformerBlock, T2V
 
 
 class FMConfig(PretrainedConfig):
@@ -70,9 +70,9 @@ class FMTransformerEncoder(nn.Module):
             ]
         )
 
-    def forward(self, h, attention_mask, segment_attention_mask):
+    def forward(self, h, attention_mask, segment_attention_mask, t):
         for block in self.blocks:
-            h = block(h, attention_mask, segment_attention_mask)
+            h = block(h, attention_mask, segment_attention_mask, t)
         return h
 
 
@@ -80,22 +80,24 @@ class FMBase(PreTrainedModel):
     config_class = FMConfig
     base_model_prefix = "fm-base"
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(self, config: FMConfig):
         super().__init__(config)
         self.embeddings = FMEmbeddings(config)
+        self.t2v = T2V(config.d_model, config.t2v_scale)
         self.transformer_encoder = FMTransformerEncoder(config)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size)
         if config.weight_tying:
             self.lm_head.weight = self.embeddings.embeddings.weight
 
-    def forward(self, input_ids, attention_mask, segment_attention_mask):
+    def forward(self, input_ids, attention_mask, segment_attention_mask, t):
         h = self.encode(input_ids, attention_mask, segment_attention_mask)
         logits = self.lm_head(h)
         # (batch, max_seg, max_seq_len, vocab)
         return logits
 
-    def encode(self, input_ids, attention_mask, segment_attention_mask):
+    def encode(self, input_ids, attention_mask, segment_attention_mask, t):
         h = self.embeddings(input_ids)
-        h = self.transformer_encoder(h, attention_mask, segment_attention_mask)
+        h = h + self.t2v(t)
+        h = self.transformer_encoder(h, attention_mask, segment_attention_mask, t)
         # (batch, max_seg, max_seq_len, d_model)
         return h

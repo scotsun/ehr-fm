@@ -1,4 +1,4 @@
-from .rope import RoPE
+from .pe import RoPE, T2V
 from .ffn import FFNSwiGLUBlock, FFNLUBlock
 from .transformer import (
     ResidualConnection,
@@ -9,6 +9,7 @@ from .transformer import (
 
 __all__ = [
     "RoPE",
+    "T2V",
     "MultiHeadAttentionBlock",
     "ResidualConnection",
     "FFNSwiGLUBlock",

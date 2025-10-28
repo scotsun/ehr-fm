@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch import einsum
 from torch.nn.attention import sdpa_kernel, SDPBackend
 
-from .rope import RoPE
+from .pe import RoPE
 from .ffn import FFNSwiGLUBlock, FFNLUBlock
 
 
@@ -58,22 +58,21 @@ class MultiHeadAttentionBlock(nn.Module):
             )
         return mh_out
 
-    def forward(self, q, k, v, mask, time=None):
-        query = self.w_q(q)  # (batch, seq_len, d_model)
-        key = self.w_k(k)  # (batch, seq_len, d_model)
-        value = self.w_v(v)  # (batch, seq_len, d_model)
+    def forward(self, q, k, v, mask, t=None):
+        query = self.w_q(q)  # (-1, seq_len, d_model)
+        key = self.w_k(k)  # (-1, seq_len, d_model)
+        value = self.w_v(v)  # (-1, seq_len, d_model)
         # chunk d_model from to h * d_k
-        # (batch, seq_len, d_model) -> (batch, seq_len, h, d_k) -> (batch, h, seq_len, d_k)
+        # (-1, seq_len, d_model) -> (-1, seq_len, h, d_k) -> (-1, h, seq_len, d_k)
         query = self._reshape(query)
         key = self._reshape(key)
         value = self._reshape(value)
 
         if self.with_rope:
-            query, key = self.rope_q(query, time), self.rope_k(key, time)
-        print(query.shape, key.shape, value.shape)
+            query, key = self.rope_q(query, t), self.rope_k(key, t)
 
         mh_out = self._attn_func(query, key, value, mask)
-        # (batch, h, seq_len, d_k) -> (batch, seq_len, h, d_k) -> (batch, seq_len, d_model)
+        # (-1, h, seq_len, d_k) -> (-1, seq_len, h, d_k) -> (-1, seq_len, d_model)
         mh_out = (
             mh_out.transpose(1, 2).contiguous().view(mh_out.shape[0], -1, self.d_model)
         )
@@ -133,9 +132,9 @@ class TransformerBlock(nn.Module):
         )
         self.residual_connection = ResidualConnection(d_model, dropout, norm_type)
 
-    def forward(self, x, mask, time=None):
+    def forward(self, x, mask, t=None):
         x = self.residual_connection(
-            x, lambda x: self.self_attn_block(x, x, x, mask, time)
+            x, lambda x: self.self_attn_block(x, x, x, mask, t)
         )
         x = self.residual_connection(x, self.ffn_block)
         return x
@@ -164,19 +163,20 @@ class HierarchicalTransformerBlock(nn.Module):
             d_model, d_ff, h, True, dropout, norm_type, ffn_type, attn_backend
         )
 
-    def forward(self, x, token_mask, seg_mask, time):
+    def forward(self, x, token_mask, seg_mask, t):
         # input x'shape: (batch, max_seg, max_seq_len, d_model)
         # token_mask'shape: (batch, max_seg, max_seq_len)
         # seg_mask'shape: (batch, max_seg)
-        x = x.reshape(-1, x.shape[2], x.shape[3]).contiguous()
-        token_mask = token_mask.reshape(-1, token_mask.shape[2]).contiguous()
-        time = time.reshape(-1, time.shape[2]).contiguous()
+        batch, max_seg, max_seq_len, d_model = x.shape
+        x = x.reshape(-1, max_seq_len, d_model).contiguous()
+        token_mask = token_mask.reshape(-1, max_seq_len).contiguous()
+        t = t.reshape(-1, max_seq_len).contiguous()
 
         # therefore, x is truncated at both seg and seq_len level
         # segment-wise encoding
-        seg_hidden_state = self.swe(x, token_mask, time)
+        seg_hidden_state = self.swe(x, token_mask)
         seg_hidden_state = seg_hidden_state.reshape(
-            x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+            batch, max_seg, max_seq_len, d_model
         ).contiguous()
 
         # cross-segment encoding
@@ -185,7 +185,7 @@ class HierarchicalTransformerBlock(nn.Module):
         if self.cs_pe == "pos":
             seg_cls_hidden_state = self.cse(seg_cls_hidden_state, seg_mask)
         elif self.cs_pe == "time":
-            seg_cls_hidden_state = self.cse(seg_cls_hidden_state, seg_mask, time)
+            seg_cls_hidden_state = self.cse(seg_cls_hidden_state, seg_mask, t)
 
         # combine
         seg_hidden_state[:, :, 0, :] = seg_cls_hidden_state
