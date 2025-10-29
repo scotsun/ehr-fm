@@ -20,6 +20,7 @@ class EarlyStopping:
         mode: str = "min",
         model_signature=None,
         local_rank: int = 0,
+        use_mlflow: bool = True,
     ) -> None:
         self.patience = patience
         self.counter = 0
@@ -27,6 +28,7 @@ class EarlyStopping:
         self.early_stop = False
         self.model_signature = model_signature
         self.local_rank = local_rank
+        self.use_mlflow = use_mlflow
 
         match mode:
             case "min":
@@ -38,7 +40,7 @@ class EarlyStopping:
 
     def _log_best_model(self, model):
         """helper function to log model."""
-        if self.local_rank == 0:
+        if self.use_mlflow and self.local_rank == 0:
             mlflow.pytorch.log_model(
                 model,
                 "best_model",
@@ -121,12 +123,18 @@ class BaseTrainer(Trainer):
         verbose_period: int,
         device: torch.device,
         local_rank: int,
+        use_encounter_masking: bool = False,
+        encounter_mask_prob: float = 0.3,
+        use_mlflow: bool = True,
     ) -> None:
         super().__init__(
             model, optimizer, early_stopping, verbose_period, device, local_rank
         )
         self.tokenizer = tokenizer
         self.criterion = criterion
+        self.use_encounter_masking = use_encounter_masking
+        self.encounter_mask_prob = encounter_mask_prob
+        self.use_mlflow = use_mlflow
 
     def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
         model: nn.Module = self.model
@@ -147,7 +155,18 @@ class BaseTrainer(Trainer):
                 if token_time is not None:
                     token_time = token_time.to(device)
 
-                masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
+                # Use encounter masking or token masking
+                if self.use_encounter_masking:
+                    from src.utils.encounter_masking import encounter_masking
+                    masked_input_ids, labels, enc_mask = encounter_masking(
+                        input_ids, segment_attention_mask, self.tokenizer, self.encounter_mask_prob
+                    )
+                    # Skip empty batches
+                    if (labels != -100).sum() == 0:
+                        continue
+                else:
+                    masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
+                
                 logits = model(
                     input_ids=masked_input_ids,
                     attention_mask=attention_mask,
@@ -163,9 +182,10 @@ class BaseTrainer(Trainer):
 
                 bar.set_postfix(mlm_loss=float(loss))
 
-                cur_step = epoch_id * len(dataloader) + batch_id
-                if self.local_rank == 0 and cur_step % 100 == 0:
-                    mlflow.log_metrics({"train_mlm_loss": float(loss)}, step=cur_step)
+                if self.use_mlflow:
+                    cur_step = epoch_id * len(dataloader) + batch_id
+                    if self.local_rank == 0 and cur_step % 100 == 0:
+                        mlflow.log_metrics({"train_mlm_loss": float(loss)}, step=cur_step)
         return
 
     def evaluate(self, dataloader: DataLoader, verbose: bool, epoch_id: int) -> float:
@@ -189,7 +209,18 @@ class BaseTrainer(Trainer):
                 if token_time is not None:
                     token_time = token_time.to(device)
 
-                masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
+                # Use encounter masking or token masking
+                if self.use_encounter_masking:
+                    from src.utils.encounter_masking import encounter_masking
+                    masked_input_ids, labels, enc_mask = encounter_masking(
+                        input_ids, segment_attention_mask, self.tokenizer, self.encounter_mask_prob
+                    )
+                    # Skip empty batches
+                    if (labels != -100).sum() == 0:
+                        continue
+                else:
+                    masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
+                
                 logits = model(
                     input_ids=masked_input_ids,
                     attention_mask=attention_mask,
@@ -210,7 +241,8 @@ class BaseTrainer(Trainer):
         """
         if verbose:
             valid_mlm = self.evaluate(dataloader, verbose, epoch_id)
-            mlflow.log_metrics({"val_mlm_loss": valid_mlm}, step=epoch_id)
+            if self.use_mlflow:
+                mlflow.log_metrics({"val_mlm_loss": valid_mlm}, step=epoch_id)
         if self.early_stopping:
             self.early_stopping.step(valid_mlm, self.model)
         return valid_mlm
