@@ -12,13 +12,13 @@ class EHRDataset(Dataset):
         tokenizer: Tokenizer,
         supervised_task_cohort=None,
         max_seg: int = 32,
-        max_seq_len: int = 512,  # 调整为512以适应MIMIC-IV数据（平均236个事件/就诊）
+        max_seq_len: int = 512,  # adjusted to 512 for MIMIC-IV (avg 236 events/visit)
         patient_id_col: str = "patient_id",
         enc_id_col: str = "visit_id",
         token_col: str = "code",
-        time_col: str = None,  # 时间间隔列（如 days_since_prior_order）需要 cumsum
-        sort_col: str = None,  # 排序列（如 order_number, visit_seq, admittime）
-        token_time_col: str = None,  # token级别时间列（如 time_offset_hours）用于 SWE 的 RoPE
+        time_col: str = None,  # time interval column (e.g., days_since_prior_order) requires cumsum
+        sort_col: str = None,  # sorting column (e.g., order_number, visit_seq, admittime)
+        token_time_col: str = None,  # token-level time column (e.g., time_offset_hours) for SWE RoPE
     ):
         if supervised_task_cohort is not None:
             data = data[
@@ -37,8 +37,8 @@ class EHRDataset(Dataset):
         self.enc_id_col = enc_id_col
         self.token_col = token_col
         self.time_col = time_col
-        self.sort_col = sort_col if sort_col else time_col  # 默认用 time_col 排序
-        self.token_time_col = token_time_col  # token级别时间（time_offset_hours）
+        self.sort_col = sort_col if sort_col else time_col  # default to time_col for sorting
+        self.token_time_col = token_time_col  # token-level time (time_offset_hours)
 
     def __len__(self):
         return self.data.ngroups
@@ -60,40 +60,40 @@ class EHRDataset(Dataset):
         _patid = self.patient_id[index]
         _patid_data = self.data.get_group(_patid)
         
-        # 按就诊/订单分组并提取 tokens 和时间
+        # group by visit/order and extract tokens and times
         grouped = _patid_data.groupby(self.enc_id_col)
         
-        # 提取每个 encounter 的信息
+        # extract information for each encounter
         encounter_data = []
         for enc_id, group in grouped:
             tokens = group[self.token_col].to_list()
             time_val = group[self.time_col].iloc[0] if self.time_col else None
             sort_val = group[self.sort_col].iloc[0] if self.sort_col else None
-            # 提取 token 级别的时间（如 time_offset_hours）
+            # extract token-level time (e.g., time_offset_hours)
             token_times = group[self.token_time_col].to_list() if self.token_time_col else None
             encounter_data.append({
                 'enc_id': enc_id,
                 'tokens': tokens,
                 'time': time_val,
                 'sort_key': sort_val,
-                'token_times': token_times  # token级别时间
+                'token_times': token_times  # token-level time
             })
         
-        # 按 sort_col 排序（如 order_number, visit_seq, admittime）
+        # sort by sort_col (e.g., order_number, visit_seq, admittime)
         if self.sort_col:
             encounter_data.sort(key=lambda x: x['sort_key'] if x['sort_key'] is not None else 0)
         
-        # 提取排序后的 tokens 和 times
+        # extract sorted tokens and times
         _tokens = [enc['tokens'] for enc in encounter_data]
         
-        # Segment级别的时间（cumsum of days_since_prior_admission）
+        # segment-level time (cumsum of days_since_prior_admission)
         if self.time_col:
             _times = [enc['time'] for enc in encounter_data]
-            _times, _ = self.pad_segment_time(_times, do_cumsum=True)  # cumsum 转换为绝对时间
+            _times, _ = self.pad_segment_time(_times, do_cumsum=True)  # cumsum converts to absolute time
         else:
             _times = None
         
-        # Token级别的时间（time_offset_hours within each segment）
+        # token-level time (time_offset_hours within each segment)
         if self.token_time_col:
             _token_times = [enc['token_times'] for enc in encounter_data]
         else:
@@ -106,10 +106,10 @@ class EHRDataset(Dataset):
         item["segment_attention_mask"] = _seg_attn
         
         if _times is not None:
-            item["segment_time"] = _times  # Segment时间（用于CSE的RoPE）
+            item["segment_time"] = _times  # segment time (for CSE RoPE)
         
         if _token_times is not None:
-            item["token_time"] = self.pad_token_time(_token_times)  # Token时间（用于SWE的RoPE）
+            item["token_time"] = self.pad_token_time(_token_times)  # token time (for SWE RoPE)
 
         # TODO: if supervised task cohort is provided, add labels to the item
 
@@ -140,10 +140,10 @@ class EHRDataset(Dataset):
         import torch
         import numpy as np
         
-        # 处理 NaN/None（第一次就诊/订单）
+        # handle NaN/None (first visit/order)
         times_clean = [0.0 if (t is None or np.isnan(t)) else float(t) for t in times]
         
-        # cumsum 转换为绝对时间
+        # cumsum converts to absolute time
         if do_cumsum:
             times_cumsum = np.cumsum(times_clean).tolist()
         else:
@@ -153,7 +153,7 @@ class EHRDataset(Dataset):
         if len(times_cumsum) > self.max_seg:
             times_final = times_cumsum[: self.max_seg]
         else:
-            # 用最后一个时间值填充（表示未来没有新的就诊）
+            # pad with last time value (representing no future visits)
             last_time = times_cumsum[-1] if times_cumsum else 0.0
             times_final = times_cumsum + [last_time] * (self.max_seg - len(times_cumsum))
         
@@ -161,10 +161,10 @@ class EHRDataset(Dataset):
     
     def pad_token_time(self, token_times_list):
         """
-        Pad/truncate token级别的时间（time_offset_hours）到 (max_seg, max_seq_len)
+        Pad/truncate token-level time (time_offset_hours) to (max_seg, max_seq_len)
         
         Args:
-            token_times_list: List of lists, 每个内层list是一个segment的token时间
+            token_times_list: List of lists, each inner list contains token times for one segment
         
         Returns:
             torch.Tensor: shape (max_seg, max_seq_len)
@@ -187,7 +187,7 @@ class EHRDataset(Dataset):
             
             # Add [CLS] token time (use 0.0 or the first token's time)
             if times_clean:
-                cls_time = 0.0  # [CLS] token 没有实际时间，用0
+                cls_time = 0.0  # [CLS] token has no actual time, use 0
                 times_clean = [cls_time] + times_clean
             else:
                 times_clean = [0.0]  # Empty segment

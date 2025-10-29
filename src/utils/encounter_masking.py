@@ -1,6 +1,6 @@
 """
 Encounter-level Masking
-对整个encounter进行mask，预测其中所有类型的事件（DX, MED, LAB, PR等）
+Mask entire encounters and predict all event types (DX, MED, LAB, PR, etc.)
 """
 
 import torch
@@ -13,73 +13,73 @@ def encounter_masking(
     mask_probability: float = 0.3
 ):
     """
-    Encounter-level masking: 随机选择一些encounter，mask掉其中所有tokens
+    Encounter-level masking: randomly select encounters and mask all their tokens
     
     Args:
         input_ids: (batch, max_seg, max_seq_len)
-        segment_attention_mask: (batch, max_seg) - 哪些segment是真实的
-        tokenizer: Tokenizer实例
-        mask_probability: 每个encounter被mask的概率
+        segment_attention_mask: (batch, max_seg) - which segments are valid
+        tokenizer: Tokenizer instance
+        mask_probability: probability of masking each encounter
     
     Returns:
-        masked_input_ids: (batch, max_seg, max_seq_len) - masked后的输入
-        labels: (batch, max_seg, max_seq_len) - 预测目标，-100表示不计算loss
-        encounter_mask: (batch, max_seg) - 哪些encounter被mask了
+        masked_input_ids: (batch, max_seg, max_seq_len) - masked input
+        labels: (batch, max_seg, max_seq_len) - prediction targets, -100 for ignore
+        encounter_mask: (batch, max_seg) - which encounters were masked
     """
     device = input_ids.device
     batch_size, max_seg, max_seq_len = input_ids.shape
     
     masked_input_ids = input_ids.clone()
-    labels = torch.full_like(input_ids, -100)  # -100表示忽略
+    labels = torch.full_like(input_ids, -100)  # -100 means ignore
     
-    # 获取特殊token IDs
+    # get special token IDs
     pad_id = tokenizer.token_to_id("[PAD]")
     cls_id = tokenizer.token_to_id("[CLS]")
     mask_id = tokenizer.token_to_id("[MASK]")
     
-    # 对每个batch中的每个segment，决定是否mask
-    # encounter_mask: (batch, max_seg) - 1表示这个encounter被mask
+    # for each segment in each batch, decide whether to mask
+    # encounter_mask: (batch, max_seg) - 1 means this encounter is masked
     encounter_mask = torch.zeros(batch_size, max_seg, dtype=torch.bool, device=device)
     
     for b in range(batch_size):
         for s in range(max_seg):
-            # 只mask有效的segment（不是padding）
+            # only mask valid segments (not padding)
             if segment_attention_mask[b, s] == 0:
                 continue
             
-            # 以mask_probability的概率mask这个encounter
+            # mask this encounter with mask_probability
             if torch.rand(1).item() < mask_probability:
                 encounter_mask[b, s] = True
                 
-                # 找出这个segment中的所有有效tokens（不是PAD，不是CLS）
+                # find all valid tokens in this segment (not PAD, not CLS)
                 segment_tokens = input_ids[b, s]
                 
-                # Mask策略：
-                # - CLS token不mask
-                # - PAD token不mask
-                # - 其他所有tokens都需要被预测
+                # Masking strategy:
+                # - CLS token: not masked
+                # - PAD token: not masked
+                # - All other tokens: need to be predicted
                 for t in range(max_seq_len):
                     token_id = segment_tokens[t].item()
                     
                     if token_id == cls_id or token_id == pad_id:
-                        # CLS和PAD不mask，也不作为预测目标
+                        # CLS and PAD: not masked, not prediction targets
                         continue
                     else:
-                        # 这个token需要被预测
+                        # this token needs to be predicted
                         labels[b, s, t] = token_id
                         
-                        # 80% 替换为 [MASK]
-                        # 10% 替换为随机token
-                        # 10% 保持不变
+                        # 80% replace with [MASK]
+                        # 10% replace with random token
+                        # 10% keep unchanged
                         rand_val = torch.rand(1).item()
                         if rand_val < 0.8:
                             masked_input_ids[b, s, t] = mask_id
                         elif rand_val < 0.9:
-                            # 随机token（避免特殊tokens）
+                            # random token (avoid special tokens)
                             vocab_size = tokenizer.get_vocab_size()
                             random_id = torch.randint(4, vocab_size, (1,)).item()
                             masked_input_ids[b, s, t] = random_id
-                        # else: 保持不变
+                        # else: keep unchanged
     
     return masked_input_ids, labels, encounter_mask
 
@@ -91,24 +91,24 @@ def evaluate_encounter_prediction(
     tokenizer: Tokenizer
 ):
     """
-    评估encounter-level预测性能
+    Evaluate encounter-level prediction performance
     
     Args:
         logits: (batch, max_seg, max_seq_len, vocab_size)
         labels: (batch, max_seg, max_seq_len)
         encounter_mask: (batch, max_seg)
-        tokenizer: Tokenizer实例
+        tokenizer: Tokenizer instance
     
     Returns:
         metrics: dict with evaluation metrics
     """
     batch_size, max_seg, max_seq_len, vocab_size = logits.shape
     
-    # 获取预测
+    # get predictions
     predictions = logits.argmax(dim=-1)  # (batch, max_seg, max_seq_len)
     
-    # 只计算被mask的encounter中的tokens
-    valid_mask = (labels != -100)  # 哪些位置需要预测
+    # only compute for masked encounter tokens
+    valid_mask = (labels != -100)  # which positions need prediction
     
     # Token-level accuracy
     if valid_mask.sum() > 0:
@@ -118,18 +118,18 @@ def evaluate_encounter_prediction(
         token_accuracy = torch.tensor(0.0)
     
     # Encounter-level accuracy
-    # 一个encounter只有所有tokens都预测对了才算对
+    # an encounter is correct only if all its tokens are correctly predicted
     encounter_accuracies = []
     
     for b in range(batch_size):
         for s in range(max_seg):
             if encounter_mask[b, s]:
-                # 这个encounter被mask了
+                # this encounter was masked
                 segment_valid = valid_mask[b, s]
                 segment_correct = (predictions[b, s] == labels[b, s]) & segment_valid
                 
                 if segment_valid.sum() > 0:
-                    # 所有有效token都对了才算对
+                    # all valid tokens must be correct
                     encounter_correct = segment_correct.sum() == segment_valid.sum()
                     encounter_accuracies.append(encounter_correct.float().item())
     
@@ -138,12 +138,12 @@ def evaluate_encounter_prediction(
     else:
         encounter_accuracy = 0.0
     
-    # 按事件类型统计（如果可能）
-    # 需要从tokenizer中识别不同类型的前缀
+    # statistics by event type (if possible)
+    # identify different types from tokenizer prefixes
     type_stats = {}
     vocab = tokenizer.get_vocab()
     
-    # 识别不同类型的tokens
+    # identify different types of tokens
     for token, token_id in vocab.items():
         if token.startswith('DX:'):
             type_name = 'diagnosis'
@@ -156,18 +156,18 @@ def evaluate_encounter_prediction(
         else:
             continue
         
-        # 统计这个类型的预测准确率
+        # compute accuracy for this type
         if type_name not in type_stats:
             type_stats[type_name] = {'correct': 0, 'total': 0}
         
-        # 找到所有这个token_id的位置
+        # find all positions with this token_id
         target_positions = (labels == token_id)
         if target_positions.sum() > 0:
             pred_correct = (predictions == token_id) & target_positions
             type_stats[type_name]['correct'] += pred_correct.sum().item()
             type_stats[type_name]['total'] += target_positions.sum().item()
     
-    # 计算每个类型的准确率
+    # compute accuracy for each type
     type_accuracies = {}
     for type_name, stats in type_stats.items():
         if stats['total'] > 0:

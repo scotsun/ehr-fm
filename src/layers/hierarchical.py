@@ -15,11 +15,11 @@ class HierarchicalTransformerBlock(nn.Module):
         attn_backend: str = "base",
     ):
         super().__init__()
-        # segment-wise encoder - 现在也使用 RoPE (因为有 TIME_BIN tokens)
+        # segment-wise encoder - now also uses RoPE (due to TIME_BIN tokens)
         self.swe = TransformerBlock(
             d_model, d_ff, h, True, dropout, norm_type, ffn_type, attn_backend
         )
-        # cross-segment encoder - 使用 RoPE 处理跨 segment 的时间
+        # cross-segment encoder - uses RoPE for cross-segment temporal modeling
         self.cse = TransformerBlock(
             d_model, d_ff, h, True, dropout, norm_type, ffn_type, attn_backend
         )
@@ -28,11 +28,11 @@ class HierarchicalTransformerBlock(nn.Module):
         # input x'shape: (batch, max_seg, max_seq_len, d_model)
         # token_mask'shape: (batch, max_seg, max_seq_len)
         # seg_mask'shape: (batch, max_seg)
-        # seg_time'shape: (batch, max_seg) - segment 级别的时间（如 days_since_first_visit）
-        # token_time'shape: (batch, max_seg, max_seq_len) - token 级别的时间（如 time_offset_hours）
+        # seg_time'shape: (batch, max_seg) - segment-level time (e.g., days_since_first_visit)
+        # token_time'shape: (batch, max_seg, max_seq_len) - token-level time (e.g., time_offset_hours)
 
         # therefore, x is truncated at both seg and seq_len level
-        # segment-wise encoding - 使用 token 级别的时间偏移
+        # segment-wise encoding - uses token-level time offset
         if token_time is not None:
             # Reshape token_time: (batch, max_seg, max_seq_len) -> (batch*max_seg, max_seq_len)
             token_time_reshaped = token_time.reshape(-1, token_time.shape[2]).contiguous()
@@ -42,7 +42,7 @@ class HierarchicalTransformerBlock(nn.Module):
         seg_hidden_state = self.swe(
             x.reshape(-1, x.shape[2], x.shape[3]).contiguous(),
             token_mask.reshape(-1, token_mask.shape[2]).contiguous(),
-            time=token_time_reshaped  # 使用 event-level 的时间偏移（time_offset_hours）
+            time=token_time_reshaped  # uses event-level time offset (time_offset_hours)
         )
         seg_hidden_state = seg_hidden_state.reshape(
             x.shape[0], x.shape[1], x.shape[2], x.shape[3]
@@ -54,7 +54,7 @@ class HierarchicalTransformerBlock(nn.Module):
         seg_cls_hidden_state = self.cse(
             seg_cls_hidden_state, 
             seg_mask, 
-            time=seg_time  # 使用 segment 级别的时间（cumsum of days_since_prior_admission）
+            time=seg_time  # uses segment-level time (cumsum of days_since_prior_admission)
         )
 
         # combine
