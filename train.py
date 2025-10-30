@@ -84,6 +84,19 @@ def main():
     # Create output directory
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     
+    # Initialize MLflow if enabled
+    if args.use_mlflow:
+        import mlflow
+        mlflow.set_tracking_uri("file:./mlruns")
+        experiment_name = "HAT_MIMIC_Pretraining"
+        try:
+            mlflow.create_experiment(experiment_name)
+        except:
+            pass  # Experiment already exists
+        mlflow.set_experiment(experiment_name)
+        print(f"✅ MLflow initialized: {experiment_name}")
+        print(f"   Tracking URI: {mlflow.get_tracking_uri()}\n")
+    
     # Load data
     print("Loading data...")
     data_path = Path(args.data_path)
@@ -146,12 +159,17 @@ def main():
         'token_time_col': 'time_offset_hours'
     }
     
+    use_gpu = (args.device == "cuda" and torch.cuda.is_available())
+    
     train_loader = DataLoader(EHRDataset(data=train_df, **common_cfg), 
-                              batch_size=args.batch_size, shuffle=True, num_workers=4)
+                              batch_size=args.batch_size, shuffle=True, num_workers=4,
+                              pin_memory=use_gpu)
     val_loader = DataLoader(EHRDataset(data=val_df, **common_cfg),
-                            batch_size=args.batch_size, shuffle=False, num_workers=4)
+                            batch_size=args.batch_size, shuffle=False, num_workers=4,
+                            pin_memory=use_gpu)
     test_loader = DataLoader(EHRDataset(data=test_df, **common_cfg),
-                             batch_size=args.batch_size, shuffle=False, num_workers=4)
+                             batch_size=args.batch_size, shuffle=False, num_workers=4,
+                             pin_memory=use_gpu)
     
     # Model
     print("Creating model...")
@@ -185,6 +203,30 @@ def main():
         print(f"  - Token mask probability: {args.token_mask_prob}")
     print()
     
+    # Start MLflow run if enabled
+    if args.use_mlflow:
+        import mlflow
+        run_name = f"{args.masking_strategy}_bs{args.batch_size}_lr{args.learning_rate}"
+        mlflow_run = mlflow.start_run(run_name=run_name)
+        
+        # Log all parameters
+        mlflow.log_params({
+            "data_path": args.data_path,
+            "n_patients": df['patient_id'].nunique(),
+            "batch_size": args.batch_size,
+            "learning_rate": args.learning_rate,
+            "num_epochs": args.num_epochs,
+            "masking_strategy": args.masking_strategy,
+            "encounter_mask_prob": args.encounter_mask_prob,
+            "d_model": args.d_model,
+            "n_heads": args.n_heads,
+            "n_blocks": args.n_blocks,
+            "max_seg": args.max_seg,
+            "max_seq_len": args.max_seq_len,
+        })
+        print(f"✅ MLflow run started: {run_name}")
+        print(f"   Run ID: {mlflow_run.info.run_id}\n")
+    
     # Training
     print("="*80)
     print("Training...")
@@ -198,6 +240,12 @@ def main():
     print("="*80)
     test_loss = trainer.evaluate(test_loader, verbose=True, epoch_id=0)
     print(f"Test Loss: {test_loss:.4f}")
+    
+    # Log test loss to MLflow
+    if args.use_mlflow:
+        mlflow.log_metric("test_loss", test_loss)
+        mlflow.end_run()
+        print(f"\n✅ MLflow run completed. View at: http://localhost:5000")
 
 if __name__ == "__main__":
     main()

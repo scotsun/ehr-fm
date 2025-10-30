@@ -128,14 +128,14 @@ class EHRDataset(Dataset):
     
     def pad_segment_time(self, times, do_cumsum=True):
         """
-        Pad/truncate 时间序列到 max_seg
+        Pad/truncate time series to max_seg
         
         Args:
-            times: 相对时间间隔列表（如 days_since_prior_order）
-            do_cumsum: 是否使用 cumsum 转换为绝对时间（time since first visit）
+            times: Relative time interval list (e.g., days_since_prior_order)
+            do_cumsum: Whether to use cumsum to convert to absolute time (time since first visit)
         
         Returns:
-            torch.Tensor: 时间特征张量
+            torch.Tensor: Time feature tensor
         """
         import torch
         import numpy as np

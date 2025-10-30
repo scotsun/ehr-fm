@@ -28,6 +28,11 @@ echo "Starting training..."
 
 python train.py \
     --data_path dataset/mimic4/data/mimic4_tokens.parquet \
+    --output_dir "${OUTPUT_DIR}" \
+    --batch_size 8 \
+    --num_epochs 100 \
+    --masking_strategy encounter \
+    --encounter_mask_prob 0.3 \
     --d_model 768 \
     --n_heads 12 \
     --n_blocks 6 \
@@ -35,13 +40,10 @@ python train.py \
     --dropout 0.1 \
     --max_seg 32 \
     --max_seq_len 512 \
-    --batch_size 8 \
     --learning_rate 1e-4 \
-    --num_epochs 100 \
     --patience 10 \
-    --masking_strategy encounter \
-    --encounter_mask_prob 0.3 \
-    --output_dir "${OUTPUT_DIR}" \
+    --gradient_accumulation_steps 4 \
+    --use_mlflow \
     2>&1 | tee "logs/train_${TIMESTAMP}.log"
 
 echo ""
