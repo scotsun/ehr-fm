@@ -50,6 +50,9 @@ def parse_args():
     parser.add_argument("--d_ff", type=int, default=3072)
     parser.add_argument("--max_seg", type=int, default=32)
     parser.add_argument("--max_seq_len", type=int, default=512)
+    parser.add_argument("--swe_rope", type=lambda x: x.lower() == 'true', 
+                       default=True,
+                       help="Whether to use RoPE in SWE")
     
     # ========================================================================
     # TRAINING PARAMETERS - Good defaults
@@ -178,9 +181,11 @@ def main():
     print("Creating model...")
     model = FMBase(FMConfig(
         vocab_size=vocab_size, d_model=args.d_model, n_blocks=args.n_blocks,
-        n_heads=args.n_heads, d_ff=args.d_ff, dropout=args.dropout
+        n_heads=args.n_heads, d_ff=args.d_ff, dropout=args.dropout,
+        swe_rope=args.swe_rope
     ))
-    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}\n")
+    print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    print(f"SWE RoPE: {'Enabled' if args.swe_rope else 'Disabled'} (CSE RoPE: Always Enabled)\n")
     
     # Trainer
     use_encounter = (args.masking_strategy == "encounter")

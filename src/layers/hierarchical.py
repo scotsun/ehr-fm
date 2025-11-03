@@ -13,13 +13,14 @@ class HierarchicalTransformerBlock(nn.Module):
         norm_type="layer",
         ffn_type="swiglu",
         attn_backend: str = "base",
+        swe_rope: bool = True,
     ):
         super().__init__()
-        # segment-wise encoder - now also uses RoPE (due to TIME_BIN tokens)
+        # segment-wise encoder - RoPE optional
         self.swe = TransformerBlock(
-            d_model, d_ff, h, True, dropout, norm_type, ffn_type, attn_backend
+            d_model, d_ff, h, swe_rope, dropout, norm_type, ffn_type, attn_backend
         )
-        # cross-segment encoder - uses RoPE for cross-segment temporal modeling
+        # cross-segment encoder - always uses RoPE
         self.cse = TransformerBlock(
             d_model, d_ff, h, True, dropout, norm_type, ffn_type, attn_backend
         )
@@ -54,7 +55,7 @@ class HierarchicalTransformerBlock(nn.Module):
         seg_cls_hidden_state = self.cse(
             seg_cls_hidden_state, 
             seg_mask, 
-            time=seg_time  # uses segment-level time (cumsum of days_since_prior_admission)
+            time=seg_time  # uses segment-level time (cumsum)
         )
 
         # combine

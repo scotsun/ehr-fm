@@ -21,6 +21,7 @@ class FMConfig(PretrainedConfig):
         pad_token_id: int = 0,
         weight_tying: bool = False,
         attn_backend: str = "base",
+        swe_rope: bool = True,  # Whether SWE uses RoPE
         **kwargs,
     ):
         super().__init__(pad_token_id=pad_token_id, **kwargs)
@@ -34,6 +35,7 @@ class FMConfig(PretrainedConfig):
         self.ffn_type = ffn_type
         self.weight_tying = weight_tying
         self.attn_backend = attn_backend
+        self.swe_rope = swe_rope
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -65,6 +67,7 @@ class FMTransformerEncoder(nn.Module):
                     dropout=config.dropout,
                     norm_type=config.norm_type,
                     ffn_type=config.ffn_type,
+                    swe_rope=config.swe_rope,
                 )
                 for _ in range(config.n_blocks)
             ]
