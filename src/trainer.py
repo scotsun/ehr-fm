@@ -126,6 +126,8 @@ class BaseTrainer(Trainer):
         use_encounter_masking: bool = False,
         encounter_mask_prob: float = 0.3,
         use_mlflow: bool = True,
+        gradient_accumulation_steps: int = 1,
+        max_grad_norm: float = 1.0,
     ) -> None:
         super().__init__(
             model, optimizer, early_stopping, verbose_period, device, local_rank
@@ -135,6 +137,8 @@ class BaseTrainer(Trainer):
         self.use_encounter_masking = use_encounter_masking
         self.encounter_mask_prob = encounter_mask_prob
         self.use_mlflow = use_mlflow
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.max_grad_norm = max_grad_norm
 
     def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
         model: nn.Module = self.model
@@ -176,16 +180,25 @@ class BaseTrainer(Trainer):
                 )
 
                 loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
-                optimizer.zero_grad()
+                
+                # Gradient accumulation
+                loss = loss / self.gradient_accumulation_steps
                 loss.backward()
-                optimizer.step()
+                
+                # Update weights with gradient accumulation
+                if (batch_id + 1) % self.gradient_accumulation_steps == 0:
+                    # Gradient clipping
+                    if self.max_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), self.max_grad_norm)
+                    optimizer.step()
+                    optimizer.zero_grad()
 
-                bar.set_postfix(mlm_loss=float(loss))
+                bar.set_postfix(mlm_loss=float(loss * self.gradient_accumulation_steps))
 
                 if self.use_mlflow:
                     cur_step = epoch_id * len(dataloader) + batch_id
                     if self.local_rank == 0 and cur_step % 100 == 0:
-                        mlflow.log_metrics({"train_mlm_loss": float(loss)}, step=cur_step)
+                        mlflow.log_metrics({"train_mlm_loss": float(loss * self.gradient_accumulation_steps)}, step=cur_step)
         return
 
     def evaluate(self, dataloader: DataLoader, verbose: bool, epoch_id: int) -> float:

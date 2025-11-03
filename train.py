@@ -58,7 +58,10 @@ def parse_args():
     parser.add_argument("--encounter_mask_prob", type=float, default=0.3)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4)
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
+                       help="Gradient accumulation steps (1=disabled, >1=enabled)")
+    parser.add_argument("--max_grad_norm", type=float, default=0.0,
+                       help="Max gradient norm for clipping (0=disabled, >0=enabled)")
     
     # ========================================================================
     # OPTIONAL - For debugging/testing
@@ -193,7 +196,9 @@ def main():
         local_rank=0,
         use_encounter_masking=use_encounter,
         encounter_mask_prob=args.encounter_mask_prob,
-        use_mlflow=args.use_mlflow
+        use_mlflow=args.use_mlflow,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        max_grad_norm=args.max_grad_norm
     )
     
     print(f"Masking strategy: {args.masking_strategy}")
