@@ -1,18 +1,34 @@
 #!/bin/bash
+#SBATCH --job-name=hat_mimic4
+#SBATCH --output=logs/train_%j.log
+#SBATCH --error=logs/train_%j.err
+#SBATCH --partition=gpu-common
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=80G
+#SBATCH --time=48:00:00
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=hg176@duke.edu
 
-# HAT Model Training Launch Script
+# HAT Model Training - MIMIC-IV on DCC
 
 echo "=========================================="
 echo "HAT Model Training - MIMIC-IV"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
 echo "=========================================="
 
-# Activate conda environment
-source /opt/miniconda3/etc/profile.d/conda.sh
+# Load conda
+source /hpc/group/rekerlab/apps/miniforge3/etc/profile.d/conda.sh
+
+# Activate the existing hat environment
 conda activate hat
+echo "Activated hat environment"
 
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
-export CUDA_VISIBLE_DEVICES=0
+export TOKENIZERS_PARALLELISM=false  # Disable tokenizer parallelism to avoid warnings with multiprocessing DataLoader
+cd /hpc/home/hg176/work/ehr-fm/ehr-fm
 
 # Create output directories
 mkdir -p checkpoints
@@ -23,13 +39,14 @@ TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 OUTPUT_DIR="checkpoints/run_${TIMESTAMP}"
 
 echo "Output directory: ${OUTPUT_DIR}"
+echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
 echo ""
 echo "Starting training..."
 
 python train.py \
     --data_path dataset/mimic4/data/mimic4_tokens.parquet \
     --output_dir "${OUTPUT_DIR}" \
-    --batch_size 8 \
+    --batch_size 2 \
     --num_epochs 100 \
     --masking_strategy encounter \
     --encounter_mask_prob 0.3 \
@@ -40,15 +57,16 @@ python train.py \
     --dropout 0.1 \
     --max_seg 32 \
     --max_seq_len 512 \
+    --swe_rope True \
     --learning_rate 1e-4 \
     --patience 10 \
-    --gradient_accumulation_steps 4 \
-    --use_mlflow \
-    2>&1 | tee "logs/train_${TIMESTAMP}.log"
+    --gradient_accumulation_steps 16 \
+    --max_patients 5000 \
+    --use_mlflow
 
 echo ""
 echo "=========================================="
 echo "Training completed!"
-echo "Log file: logs/train_${TIMESTAMP}.log"
+echo "Log file: logs/train_${SLURM_JOB_ID}.log"
 echo "Model files: ${OUTPUT_DIR}"
-echo "==========================================" 
+echo "=========================================="

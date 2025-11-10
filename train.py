@@ -184,8 +184,14 @@ def main():
         n_heads=args.n_heads, d_ff=args.d_ff, dropout=args.dropout,
         swe_rope=args.swe_rope
     ))
+    
+    # Move model to device (GPU if available)
+    device = torch.device(args.device)
+    model = model.to(device)
+    
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
-    print(f"SWE RoPE: {'Enabled' if args.swe_rope else 'Disabled'} (CSE RoPE: Always Enabled)\n")
+    print(f"SWE RoPE: {'Enabled' if args.swe_rope else 'Disabled'} (CSE RoPE: Always Enabled)")
+    print(f"Device: {device}\n")
     
     # Trainer
     use_encounter = (args.masking_strategy == "encounter")
@@ -197,7 +203,7 @@ def main():
         criterion=nn.CrossEntropyLoss(ignore_index=-100),
         early_stopping=EarlyStopping(patience=args.patience, min_delta=0.001, mode="min", use_mlflow=args.use_mlflow),
         verbose_period=1,
-        device=torch.device(args.device),
+        device=device,
         local_rank=0,
         use_encounter_masking=use_encounter,
         encounter_mask_prob=args.encounter_mask_prob,
