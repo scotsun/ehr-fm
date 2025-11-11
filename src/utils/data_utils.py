@@ -1,84 +1,124 @@
 import torch
+import pandas as pd
+import pyarrow.parquet as pq
+
+from typing import Callable
 from torch.utils.data import Dataset
 from tokenizers import Tokenizer
 
 from src.tokenizer import get_batch_encoding, SPECIAL_TOKEN_IDS
 
 
-class EHRDataset(Dataset):
+class SeqSet(Dataset):
     def __init__(
         self,
-        data,
         tokenizer: Tokenizer,
-        supervised_task_cohort=None,
-        max_seg: int = 32,
-        max_seq_len: int = 64,
-        patient_id_col: str = "patient_id",
-        enc_id_col: str = "visit_id",
-        token_col: str = "code",
+        data_folder: str,
+        max_seq: int,
+        max_set_size: int,
+        downstream_task_cohort: None | pd.DataFrame,
+        outcome_vars: None | list[str],
+        time_operation: Callable[[pd.DataFrame], pd.Series],
+        seq_id_col: str,  # "patient_id", "user_id"
+        set_id_col: str,  # "enc_id", "order_id"
+        token_col: str,  # "code", "product_id"
+        additional_cols: list[str] = [],
     ):
-        if supervised_task_cohort is not None:
-            data = data[
-                data[patient_id_col].isin(supervised_task_cohort[patient_id_col])
-            ]
-
-        self.data = data.groupby(patient_id_col)
-        self.patient_id = list(self.data.groups.keys())
-
+        self.data_folder = data_folder
+        self.downstream_task_cohort = downstream_task_cohort
+        if self.downstream_task_cohort is not None:
+            self.seq_ids = downstream_task_cohort[seq_id_col]
+        else:
+            self.seq_ids = pd.read_csv(f"{self.data_folder}/metadata.csv")
         self.tokenizer = tokenizer
-        self.tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=max_seq_len)
-        self.tokenizer.enable_truncation(max_length=max_seq_len)
+        self.tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=max_set_size)
+        self.tokenizer.enable_truncation(max_length=max_set_size)
 
-        self.max_seg = max_seg
-        self.max_seq_len = max_seq_len
-        self.enc_id_col = enc_id_col
+        self.max_seq = max_seq
+        self.max_set_size = max_set_size
+        self.outcome_vars = outcome_vars
+        self.time_operation = time_operation
+        self.seq_id_col = seq_id_col
+        self.set_id_col = set_id_col
         self.token_col = token_col
+        self.addtional_cols = additional_cols
 
     def __len__(self):
         return self.data.ngroups
 
     def __getitem__(self, index):
         """
-        Get a patient's EHR data.
+        Get a Sequence of Sets of Tokens (i.e., patient's EHR) data.
 
         Args:
             index (int): The index of the patient.
 
         Returns:
-            dict: A dictionary containing the patient's EHR data.
+            dict: A dictionary containing the SeqSet data.
             Keys:
-                input_ids (torch.Tensor): The input IDs of the patient's EHR data.
-                attention_mask (torch.Tensor): The attention mask of the patient's EHR data.
-                segment_attention_mask (torch.Tensor): The segment attention mask of the patient's EHR data.
+                input_ids (torch.Tensor): The input token IDs of the SeqSet data.
+                attention_mask (torch.Tensor): The token-level attention mask of the SeqSet data.
+                set_attention_mask (torch.Tensor): The set-level attention mask of the SeqSet data.
         """
-        _patid = self.patient_id[index]
-        _patid_data = self.data.get_group(_patid)
-        _tokens = list(
-            map(
-                lambda x: x[1].to_list(),
-                _patid_data.groupby(self.enc_id_col)[self.token_col],
-            )
-        )
-        _tokens, _seg_attn = self.pad_segment(_tokens)
+        if self.downstream_task_cohort is not None:
+            _seq_id_dir = f"{self.seq_id_col}={self.seq_ids[index]}"
+        else:
+            _seq_id_dir = self.seq_ids[index]
+
+        _seq_id_data = pq.read_table(
+            f"{self.data_folder}/{_seq_id_dir}",
+            columns=[self.set_id_col, self.token_col] + self.additional_cols,
+        ).to_pandas()
+
+        if self.downstream_task_cohort is not None and self.outcome_vars:
+            _set_id = self.downstream_task_cohort.iloc[index][self.set_id_col]
+            _stop_idx = _seq_id_data.loc[
+                _seq_id_data[self.set_id_col] == _set_id
+            ].index[0]
+            _seq_id_data = _seq_id_data.iloc[:_stop_idx]
+
+        _seq_id_data["t"] = self.time_operation(_seq_id_data)
+
+        _grouped = _seq_id_data.groupby(self.set_id_col)
+        _tokens = [_set_tokens.to_list() for _, _set_tokens in _grouped[self.token_col]]
+        _ts = [_set_ts.to_list() for _, _set_ts in _grouped["t"]]
+
+        _tokens, _seg_attn, _ts = self.pad_seq(_tokens, _ts)
         _tokens = [["[CLS]"] + elem for elem in _tokens]
 
         item = get_batch_encoding(self.tokenizer, _tokens)
-        item["segment_attention_mask"] = _seg_attn
-
-        # TODO: if supervised task cohort is provided, add labels to the item
+        # item: dict
+        # keys: input_ids, attention_mask, set_attention_mask, t
+        item["set_attention_mask"] = _seg_attn
+        item["t"] = pad_set(self.max_seq, _ts)
 
         return item
 
-    def pad_segment(self, tokens):
-        if len(tokens) > self.max_seg:
-            seg_attn = torch.ones(self.max_seg)
-            tokens = tokens[: self.max_seg]
-        else:
-            seg_attn = torch.cat(
-                [torch.ones(len(tokens)), torch.zeros(self.max_seg - len(tokens))]
-            )
-            tokens = tokens + [["[PAD]"]] * (self.max_seg - len(tokens))
-        return tokens, seg_attn
+    def pad_seq(self, tokens, times):
+        """pad/trunc the seq[set] to max_seq"""
+        n_sets = len(tokens)
+
+        if n_sets > self.max_seq:  # truncation
+            set_attn = torch.ones(self.max_seq, dtype=torch.bool)
+            tokens = tokens[: self.max_seq]
+            times = times[: self.max_seq]
+        else:  # pad
+            set_attn = torch.zeros(self.max_seq, dtype=torch.bool)
+            set_attn[:n_sets] = True
+
+            pad_length = self.max_seq - n_sets
+            tokens = tokens + [["[PAD]"]] * pad_length
+            times = times + [[-1]] * pad_length
+
+        # tokens: 2d list
+        # set_attn: 1d list
+        # times: 2d list
+        return tokens, set_attn, times
+
+
+def pad_set(max_set_size: int, sets, padding_value=-1):
+    padded_list = [(s + [padding_value] * max_set_size)[:max_set_size] for s in sets]
+    return torch.tensor(padded_list, dtype=torch.int64)
 
 
 def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probability=0.15):

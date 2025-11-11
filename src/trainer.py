@@ -139,13 +139,13 @@ class BaseTrainer(Trainer):
             for batch_id, batch in enumerate(bar):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
-                segment_attention_mask = batch["segment_attention_mask"].to(device)
+                set_attention_mask = batch["set_attention_mask"].to(device)
 
                 masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
                 logits = model(
                     input_ids=masked_input_ids,
                     attention_mask=attention_mask,
-                    segment_attention_mask=segment_attention_mask,
+                    set_attention_mask=set_attention_mask,
                 )
 
                 loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
@@ -173,13 +173,13 @@ class BaseTrainer(Trainer):
             ):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
-                segment_attention_mask = batch["segment_attention_mask"].to(device)
+                set_attention_mask = batch["set_attention_mask"].to(device)
 
                 masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
                 logits = model(
                     input_ids=masked_input_ids,
                     attention_mask=attention_mask,
-                    segment_attention_mask=segment_attention_mask,
+                    set_attention_mask=set_attention_mask,
                 )
 
                 loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))

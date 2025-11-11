@@ -1,5 +1,9 @@
 with raw_orders as (
-    select * from {{ source('main', 'raw_orders') }}
+    select 
+        *,
+        sum(coalesce(days_since_prior_order, 0))
+            over (partition by user_id order by order_number) as t
+    from {{ source('main', 'raw_orders') }}
 ),
 raw_order_products as (
     select * from {{ source('main', 'raw_order_products') }}
@@ -10,6 +14,7 @@ select
     o.order_id,
     o.order_number,
     o.days_since_prior_order,
+    o.t
     op.product_id,
     op.reordered,
 from raw_orders o

@@ -9,11 +9,11 @@ class SimCSE(nn.Module):
         self.model = model
         self.temperature = temperature
 
-    def forward(self, input_ids, attention_mask, segment_attention_mask):
-        h1 = self.model.encode(input_ids, attention_mask, segment_attention_mask)[
+    def forward(self, input_ids, attention_mask, set_attention_mask):
+        h1 = self.model.encode(input_ids, attention_mask, set_attention_mask)[
             :, :, 0, :
         ]
-        h2 = self.model.encode(input_ids, attention_mask, segment_attention_mask)[
+        h2 = self.model.encode(input_ids, attention_mask, set_attention_mask)[
             :, :, 0, :
         ]
         print(h1)
