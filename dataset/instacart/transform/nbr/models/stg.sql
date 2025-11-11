@@ -14,9 +14,9 @@ select
     o.order_id,
     o.order_number,
     o.days_since_prior_order,
-    o.t
+    o.t,
     op.product_id,
-    op.reordered,
+    op.reordered
 from raw_orders o
 join raw_order_products op 
 on o.order_id = op.order_id
