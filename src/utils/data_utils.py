@@ -1,64 +1,120 @@
 import torch
 from torch.utils.data import Dataset
 from tokenizers import Tokenizer
+from pathlib import Path
+import pandas as pd
+import pyarrow.parquet as pq
 
 from src.tokenizer import get_batch_encoding, SPECIAL_TOKEN_IDS
 
 
 class EHRDataset(Dataset):
+    """
+    EHR Dataset supporting both eager and lazy loading modes.
+    
+    Modes:
+    - Eager (legacy): Pass DataFrame, all data loaded in memory
+    - Lazy: Pass path to Hive-partitioned parquet, load on-demand per patient
+    """
     def __init__(
         self,
-        data,
+        data,  # DataFrame (eager) or str/Path (lazy)
         tokenizer: Tokenizer,
         supervised_task_cohort=None,
         max_seg: int = 32,
-        max_seq_len: int = 512,  # adjusted to 512 for MIMIC-IV (avg 236 events/visit)
+        max_seq_len: int = 512,
         patient_id_col: str = "patient_id",
         enc_id_col: str = "visit_id",
         token_col: str = "code",
-        time_col: str = None,  # time interval column (e.g., days_since_prior_order) requires cumsum
-        sort_col: str = None,  # sorting column (e.g., order_number, visit_seq, admittime)
-        token_time_col: str = None,  # token-level time column (e.g., time_offset_hours) for SWE RoPE
+        time_col: str = None,
+        sort_col: str = None,
+        token_time_col: str = None,
     ):
-        if supervised_task_cohort is not None:
-            data = data[
-                data[patient_id_col].isin(supervised_task_cohort[patient_id_col])
-            ]
-
-        self.data = data.groupby(patient_id_col)
-        self.patient_id = list(self.data.groups.keys())
-
         self.tokenizer = tokenizer
         self.tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=max_seq_len)
         self.tokenizer.enable_truncation(max_length=max_seq_len)
 
         self.max_seg = max_seg
         self.max_seq_len = max_seq_len
+        self.patient_id_col = patient_id_col
         self.enc_id_col = enc_id_col
         self.token_col = token_col
         self.time_col = time_col
-        self.sort_col = sort_col if sort_col else time_col  # default to time_col for sorting
-        self.token_time_col = token_time_col  # token-level time (time_offset_hours)
+        self.sort_col = sort_col if sort_col else time_col
+        self.token_time_col = token_time_col
+        self.supervised_task_cohort = supervised_task_cohort
+        
+        # Detect mode: lazy (path) or eager (DataFrame)
+        if isinstance(data, (str, Path)):
+            self._lazy_mode = True
+            self.data_path = Path(data)
+            
+            # Scan patient directories (fast, only reads directory structure)
+            partition_col = patient_id_col if patient_id_col.startswith("subject_id") or patient_id_col.startswith("user_id") else patient_id_col
+            # Handle both subject_id and patient_id partition names
+            self.subject_dirs = sorted(self.data_path.glob(f"{partition_col}=*"))
+            if not self.subject_dirs:
+                # Try alternative partition name
+                self.subject_dirs = sorted(self.data_path.glob("subject_id=*"))
+            if not self.subject_dirs:
+                self.subject_dirs = sorted(self.data_path.glob("user_id=*"))
+                
+            self.patient_ids = [d.name.split('=')[1] for d in self.subject_dirs]
+            
+            # Filter by cohort if provided
+            if supervised_task_cohort is not None:
+                cohort_ids = set(supervised_task_cohort[patient_id_col].astype(str).tolist())
+                filtered = [(d, pid) for d, pid in zip(self.subject_dirs, self.patient_ids) if pid in cohort_ids]
+                self.subject_dirs = [d for d, _ in filtered]
+                self.patient_ids = [pid for _, pid in filtered]
+                
+            self.data = None
+        else:
+            self._lazy_mode = False
+            
+            # Eager mode: original behavior
+            if supervised_task_cohort is not None:
+                data = data[data[patient_id_col].isin(supervised_task_cohort[patient_id_col])]
+            
+            self.data = data.groupby(patient_id_col)
+            self.patient_ids = list(self.data.groups.keys())
+            self.data_path = None
+            self.subject_dirs = None
 
     def __len__(self):
-        return self.data.ngroups
+        return len(self.patient_ids)
 
     def __getitem__(self, index):
         """
         Get a patient's EHR data.
-
-        Args:
-            index (int): The index of the patient.
-
+        
         Returns:
-            dict: A dictionary containing the patient's EHR data.
-            Keys:
-                input_ids (torch.Tensor): The input IDs of the patient's EHR data.
-                attention_mask (torch.Tensor): The attention mask of the patient's EHR data.
-                segment_attention_mask (torch.Tensor): The segment attention mask of the patient's EHR data.
+            dict: Patient's tokenized EHR data with keys:
+                - input_ids, attention_mask, segment_attention_mask
+                - segment_time (optional), token_time (optional)
         """
-        _patid = self.patient_id[index]
-        _patid_data = self.data.get_group(_patid)
+        patient_id = self.patient_ids[index]
+        
+        # Load patient data based on mode
+        if self._lazy_mode:
+            # Lazy: read from disk on-demand using PyArrow (fast!)
+            subject_dir = self.subject_dirs[index]
+            
+            # Only read needed columns for better performance
+            needed_cols = [self.enc_id_col, self.token_col]
+            if self.time_col:
+                needed_cols.append(self.time_col)
+            if self.sort_col and self.sort_col != self.time_col:
+                needed_cols.append(self.sort_col)
+            if self.token_time_col:
+                needed_cols.append(self.token_time_col)
+            
+            # PyArrow reads entire directory efficiently (handles multiple parquet files)
+            table = pq.read_table(subject_dir, columns=needed_cols)
+            _patid_data = table.to_pandas()
+        else:
+            # Eager: get from pre-loaded groupby
+            _patid_data = self.data.get_group(patient_id)
         
         # group by visit/order and extract tokens and times
         grouped = _patid_data.groupby(self.enc_id_col)
@@ -236,6 +292,6 @@ def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probabilit
     )
     input_ids[indices_random] = random_words[indices_random]
 
-    # 10% -> unchanged (do nothing)
+    # 10% -> unchanged
 
     return input_ids, labels

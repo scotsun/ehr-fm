@@ -107,75 +107,163 @@ def main():
     print("Loading data...")
     data_path = Path(args.data_path)
     
-    # Check if it's a single parquet file or directory
-    if data_path.is_file():
-        # Single parquet file (e.g., sample_mimic4_30patients.parquet)
-        df = pd.read_parquet(data_path)
-        print(f"Loaded from single file: {data_path}")
-    else:
-        # Directory with subject_id partitions
-        subject_dirs = sorted(data_path.glob("subject_id=*"))
+    # Determine partition column name
+    if data_path.is_dir():
+        # Check partition structure
+        if list(data_path.glob("subject_id=*")):
+            partition_col = "subject_id"
+            enc_col_raw = "hadm_id"
+        elif list(data_path.glob("user_id=*")):
+            partition_col = "user_id"
+            enc_col_raw = "order_id"
+        else:
+            raise ValueError(f"Cannot find subject_id=* or user_id=* partitions in {data_path}")
+        
+        print(f"Detected Hive partitions: {partition_col}=*")
+        
+        # Use lazy loading for large datasets
+        print(f"Using LAZY LOADING mode (memory-efficient)")
+        
+        # For tokenizer: sample small subset
+        print("Sampling data for tokenizer training...")
+        subject_dirs = sorted(data_path.glob(f"{partition_col}=*"))
         if args.max_patients:
             subject_dirs = subject_dirs[:args.max_patients]
+        else:
+            subject_dirs = subject_dirs[:min(1000, len(subject_dirs))]  # Sample 1000 for vocab
         
         dfs = []
-        for subject_dir in tqdm(subject_dirs):
+        for subject_dir in tqdm(subject_dirs[:100], desc="Loading sample"):
             for pf in subject_dir.glob("*.parquet"):
                 dfs.append(pd.read_parquet(pf))
         
-        df = pd.concat(dfs, ignore_index=True)
-        print(f"Loaded from {len(subject_dirs)} patient directories")
+        df_sample = pd.concat(dfs, ignore_index=True)
+        print(f"Sampled {len(df_sample):,} events from {len(subject_dirs[:100])} patients for tokenizer\n")
+        
+        # Tokenizer
+        print("Training tokenizer...")
+        tokenizer = get_tokenizer([df_sample], {
+            "tokenizer_path": str(Path(args.output_dir) / "tokenizer.json"),
+            "patient_id_col": partition_col,
+            "token_col": "code",
+            "min_frequency": 1,
+        })
+        vocab_size = tokenizer.get_vocab_size()
+        print(f"Vocab size: {vocab_size}\n")
+        
+        # Get all patient IDs for splitting
+        all_subject_dirs = sorted(data_path.glob(f"{partition_col}=*"))
+        if args.max_patients:
+            all_subject_dirs = all_subject_dirs[:args.max_patients]
+        
+        all_patient_ids = [d.name.split('=')[1] for d in all_subject_dirs]
+        print(f"Total patients: {len(all_patient_ids)}")
+        
+        # Split patients
+        np.random.shuffle(all_patient_ids)
+        n_train = int(len(all_patient_ids) * args.train_ratio)
+        n_val = int(len(all_patient_ids) * args.val_ratio)
+        
+        train_ids = set(all_patient_ids[:n_train])
+        val_ids = set(all_patient_ids[n_train:n_train+n_val])
+        test_ids = set(all_patient_ids[n_train+n_val:])
+        
+        print(f"Split: Train={len(train_ids)}, Val={len(val_ids)}, Test={len(test_ids)}\n")
+        
+        # Create cohort DataFrames for filtering
+        train_cohort = pd.DataFrame({partition_col: list(train_ids)})
+        val_cohort = pd.DataFrame({partition_col: list(val_ids)})
+        test_cohort = pd.DataFrame({partition_col: list(test_ids)})
+        
+    else:
+        # Single parquet file (legacy for small datasets)
+        print(f"Loading from single file: {data_path}")
+        df = pd.read_parquet(data_path)
+        
+        # Rename columns if needed
+        if 'subject_id' in df.columns:
+            df = df.rename(columns={'subject_id': 'patient_id', 'hadm_id': 'visit_id'})
+            partition_col = 'patient_id'
+            enc_col_raw = 'visit_id'
+        elif 'user_id' in df.columns:
+            df = df.rename(columns={'user_id': 'patient_id', 'order_id': 'visit_id'})
+            partition_col = 'patient_id'
+            enc_col_raw = 'visit_id'
+        else:
+            partition_col = 'patient_id'
+            enc_col_raw = 'visit_id'
+        
+        print(f"{len(df):,} events, {df['patient_id'].nunique():,} patients\n")
+        
+        # Tokenizer
+        print("Preparing tokenizer...")
+        tokenizer = get_tokenizer([df], {
+            "tokenizer_path": str(Path(args.output_dir) / "tokenizer.json"),
+            "patient_id_col": partition_col,
+            "token_col": "code",
+            "min_frequency": 1,
+        })
+        vocab_size = tokenizer.get_vocab_size()
+        print(f"Vocab size: {vocab_size}\n")
+        
+        # Split datasets
+        print("Splitting datasets...")
+        patients = df[partition_col].unique()
+        np.random.shuffle(patients)
+        
+        n_train = int(len(patients) * args.train_ratio)
+        n_val = int(len(patients) * args.val_ratio)
+        
+        train_df = df[df[partition_col].isin(patients[:n_train])]
+        val_df = df[df[partition_col].isin(patients[n_train:n_train+n_val])]
+        test_df = df[df[partition_col].isin(patients[n_train+n_val:])]
+        
+        print(f"Train: {n_train}, Val: {n_val}, Test: {len(patients)-n_train-n_val}\n")
+        
+        train_cohort, val_cohort, test_cohort = None, None, None
     
-    # Rename columns if needed
-    if 'subject_id' in df.columns:
-        df = df.rename(columns={'subject_id': 'patient_id', 'hadm_id': 'visit_id'})
-    
-    print(f"{len(df):,} events, {df['patient_id'].nunique():,} patients\n")
-    
-    # Tokenizer
-    print("Preparing tokenizer...")
-    tokenizer = get_tokenizer([df], {
-        "tokenizer_path": str(Path(args.output_dir) / "tokenizer.json"),
-        "patient_id_col": "patient_id",
-        "token_col": "code",
-        "min_frequency": 1,
-    })
-    vocab_size = tokenizer.get_vocab_size()
-    print(f"Vocab size: {vocab_size}\n")
-    
-    # Split datasets
-    print("Splitting datasets...")
-    patients = df['patient_id'].unique()
-    np.random.shuffle(patients)
-    
-    n_train = int(len(patients) * args.train_ratio)
-    n_val = int(len(patients) * args.val_ratio)
-    
-    train_df = df[df['patient_id'].isin(patients[:n_train])]
-    val_df = df[df['patient_id'].isin(patients[n_train:n_train+n_val])]
-    test_df = df[df['patient_id'].isin(patients[n_train+n_val:])]
-    
-    print(f"Train: {n_train}, Val: {n_val}, Test: {len(patients)-n_train-n_val}\n")
-    
-    # Create datasets
+    # Create datasets with appropriate mode
     common_cfg = {
-        'tokenizer': tokenizer, 'max_seg': args.max_seg, 'max_seq_len': args.max_seq_len,
-        'patient_id_col': 'patient_id', 'enc_id_col': 'visit_id', 'token_col': 'code',
-        'time_col': 'days_since_prior_admission', 'sort_col': 'visit_seq',
-        'token_time_col': 'time_offset_hours'
+        'tokenizer': tokenizer, 
+        'max_seg': args.max_seg, 
+        'max_seq_len': args.max_seq_len,
+        'patient_id_col': partition_col, 
+        'enc_id_col': enc_col_raw, 
+        'token_col': 'code',
+        'time_col': 'days_since_prior_admission' if partition_col == 'subject_id' else 'days_since_prior_order',
+        'sort_col': 'visit_seq' if partition_col == 'subject_id' else 'order_number',
+        'token_time_col': 'time_offset_hours' if partition_col == 'subject_id' else None
     }
     
     use_gpu = (args.device == "cuda" and torch.cuda.is_available())
     
-    train_loader = DataLoader(EHRDataset(data=train_df, **common_cfg), 
-                              batch_size=args.batch_size, shuffle=True, num_workers=4,
-                              pin_memory=use_gpu)
-    val_loader = DataLoader(EHRDataset(data=val_df, **common_cfg),
-                            batch_size=args.batch_size, shuffle=False, num_workers=4,
-                            pin_memory=use_gpu)
-    test_loader = DataLoader(EHRDataset(data=test_df, **common_cfg),
-                             batch_size=args.batch_size, shuffle=False, num_workers=4,
-                             pin_memory=use_gpu)
+    if data_path.is_dir():
+        # Lazy mode
+        print("Creating datasets with LAZY LOADING...")
+        train_loader = DataLoader(
+            EHRDataset(data=str(data_path), supervised_task_cohort=train_cohort, **common_cfg),
+            batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=use_gpu
+        )
+        val_loader = DataLoader(
+            EHRDataset(data=str(data_path), supervised_task_cohort=val_cohort, **common_cfg),
+            batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=use_gpu
+        )
+        test_loader = DataLoader(
+            EHRDataset(data=str(data_path), supervised_task_cohort=test_cohort, **common_cfg),
+            batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=use_gpu
+        )
+    else:
+        # Eager mode (legacy)
+        print("Creating datasets with EAGER LOADING...")
+        train_loader = DataLoader(EHRDataset(data=train_df, **common_cfg), 
+                                  batch_size=args.batch_size, shuffle=True, num_workers=4,
+                                  pin_memory=use_gpu)
+        val_loader = DataLoader(EHRDataset(data=val_df, **common_cfg),
+                                batch_size=args.batch_size, shuffle=False, num_workers=4,
+                                pin_memory=use_gpu)
+        test_loader = DataLoader(EHRDataset(data=test_df, **common_cfg),
+                                 batch_size=args.batch_size, shuffle=False, num_workers=4,
+                                 pin_memory=use_gpu)
     
     # Model
     print("Creating model...")
