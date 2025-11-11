@@ -307,6 +307,12 @@ def main():
         print(f"  - Token mask probability: {args.token_mask_prob}")
     print()
     
+    # Get patient count for logging
+    if data_path.is_dir():
+        n_patients_total = len(all_patient_ids)
+    else:
+        n_patients_total = len(patients)
+    
     # Start MLflow run if enabled
     if args.use_mlflow:
         import mlflow
@@ -316,7 +322,7 @@ def main():
         # Log all parameters
         mlflow.log_params({
             "data_path": args.data_path,
-            "n_patients": df['patient_id'].nunique(),
+            "n_patients": n_patients_total,
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
             "num_epochs": args.num_epochs,
