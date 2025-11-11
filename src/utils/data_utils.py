@@ -13,6 +13,7 @@ class SeqSet(Dataset):
     def __init__(
         self,
         tokenizer: Tokenizer,
+        data_root: str,
         data_folder: str,
         max_seq: int,
         max_set_size: int,
@@ -24,12 +25,15 @@ class SeqSet(Dataset):
         token_col: str,  # "code", "product_id"
         additional_cols: list[str] = [],
     ):
+        self.data_root = data_root
         self.data_folder = data_folder
         self.downstream_task_cohort = downstream_task_cohort
         if self.downstream_task_cohort is not None:
-            self.seq_ids = downstream_task_cohort[seq_id_col]
+            self.seq_ids = downstream_task_cohort[seq_id_col].values
         else:
-            self.seq_ids = pd.read_csv(f"{self.data_folder}/metadata.csv")
+            self.seq_ids = pd.read_csv(f"{self.data_root}/metadata.csv")[
+                "subdir"
+            ].values
         self.tokenizer = tokenizer
         self.tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=max_set_size)
         self.tokenizer.enable_truncation(max_length=max_set_size)
@@ -41,7 +45,7 @@ class SeqSet(Dataset):
         self.seq_id_col = seq_id_col
         self.set_id_col = set_id_col
         self.token_col = token_col
-        self.addtional_cols = additional_cols
+        self.additional_cols = additional_cols
 
     def __len__(self):
         return self.data.ngroups
@@ -69,8 +73,10 @@ class SeqSet(Dataset):
             f"{self.data_folder}/{_seq_id_dir}",
             columns=[self.set_id_col, self.token_col] + self.additional_cols,
         ).to_pandas()
+        _seq_id_data[self.token_col] = _seq_id_data[self.token_col].astype(str)
+        print(_seq_id_data)
 
-        if self.downstream_task_cohort is not None and self.outcome_vars:
+        if self.downstream_task_cohort is not None and len(self.outcome_vars) > 0:
             _set_id = self.downstream_task_cohort.iloc[index][self.set_id_col]
             _stop_idx = _seq_id_data.loc[
                 _seq_id_data[self.set_id_col] == _set_id
@@ -87,6 +93,7 @@ class SeqSet(Dataset):
         _tokens = [["[CLS]"] + elem for elem in _tokens]
 
         item = get_batch_encoding(self.tokenizer, _tokens)
+
         # item: dict
         # keys: input_ids, attention_mask, set_attention_mask, t
         item["set_attention_mask"] = _seg_attn
@@ -96,6 +103,9 @@ class SeqSet(Dataset):
 
     def pad_seq(self, tokens, times):
         """pad/trunc the seq[set] to max_seq"""
+        # tokens: 2d list
+        # set_attn: 1d list
+        # times: 2d list
         n_sets = len(tokens)
 
         if n_sets > self.max_seq:  # truncation
@@ -110,15 +120,12 @@ class SeqSet(Dataset):
             tokens = tokens + [["[PAD]"]] * pad_length
             times = times + [[-1]] * pad_length
 
-        # tokens: 2d list
-        # set_attn: 1d list
-        # times: 2d list
         return tokens, set_attn, times
 
 
-def pad_set(max_set_size: int, sets, padding_value=-1):
+def pad_set(max_set_size: int, sets, padding_value=-1.0):
     padded_list = [(s + [padding_value] * max_set_size)[:max_set_size] for s in sets]
-    return torch.tensor(padded_list, dtype=torch.int64)
+    return torch.tensor(padded_list, dtype=torch.float32)
 
 
 def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probability=0.15):
