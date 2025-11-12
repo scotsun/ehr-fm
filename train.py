@@ -124,21 +124,39 @@ def main():
         # Use lazy loading for large datasets
         print(f"Using LAZY LOADING mode (memory-efficient)")
         
-        # For tokenizer: sample small subset
-        print("Sampling data for tokenizer training...")
-        subject_dirs = sorted(data_path.glob(f"{partition_col}=*"))
+        # For tokenizer: use ALL patients for complete vocabulary coverage
+        print("Loading ALL patient data for tokenizer training...")
+        all_tokenizer_dirs = sorted(data_path.glob(f"{partition_col}=*"))
         if args.max_patients:
-            subject_dirs = subject_dirs[:args.max_patients]
-        else:
-            subject_dirs = subject_dirs[:min(1000, len(subject_dirs))]  # Sample 1000 for vocab
+            all_tokenizer_dirs = all_tokenizer_dirs[:args.max_patients]
         
+        print(f"Total patients for tokenizer: {len(all_tokenizer_dirs)}")
+        print("Reading patient data with PyArrow + multi-threading (fast)...")
+        
+        import pyarrow.parquet as pq
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        def read_patient_codes(subject_dir):
+            """Read minimal columns needed for tokenizer training"""
+            try:
+                # Need partition_col (subject_id/user_id) for groupby + code column
+                table = pq.read_table(subject_dir, columns=[partition_col, 'code'])
+                return table.to_pandas()
+            except Exception:
+                return None
+        
+        # Multi-threaded reading (much faster!)
         dfs = []
-        for subject_dir in tqdm(subject_dirs[:100], desc="Loading sample"):
-            for pf in subject_dir.glob("*.parquet"):
-                dfs.append(pd.read_parquet(pf))
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(read_patient_codes, d): d for d in all_tokenizer_dirs}
+            
+            for future in tqdm(as_completed(futures), total=len(futures), desc="Loading for tokenizer"):
+                result = future.result()
+                if result is not None:
+                    dfs.append(result)
         
         df_sample = pd.concat(dfs, ignore_index=True)
-        print(f"Sampled {len(df_sample):,} events from {len(subject_dirs[:100])} patients for tokenizer\n")
+        print(f"Loaded {len(df_sample):,} events from {len(dfs)} patients for complete vocab\n")
         
         # Tokenizer
         print("Training tokenizer...")
