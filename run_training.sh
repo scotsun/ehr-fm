@@ -2,9 +2,9 @@
 #SBATCH --job-name=hat_mimic4
 #SBATCH --output=logs/train_%j.log
 #SBATCH --error=logs/train_%j.err
-#SBATCH --partition=gpu-common
+#SBATCH --partition=scavenger-gpu
 #SBATCH --gres=gpu:1
-#SBATCH --cpus-per-task=4
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=80G
 #SBATCH --time=48:00:00
 #SBATCH --mail-type=END,FAIL
@@ -28,6 +28,7 @@ echo "Activated hat environment"
 # Set environment variables
 export PYTHONPATH="${PYTHONPATH}:$(pwd)"
 export TOKENIZERS_PARALLELISM=false  # Disable tokenizer parallelism to avoid warnings with multiprocessing DataLoader
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Reduce memory fragmentation
 cd /hpc/home/hg176/work/ehr-fm/ehr-fm
 
 # Create output directories
@@ -42,11 +43,14 @@ echo "Output directory: ${OUTPUT_DIR}"
 echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader)"
 echo ""
 echo "Starting training..."
+echo "Note: Using LAZY LOADING mode for memory-efficient data loading"
+echo "      Data will be loaded on-demand from Hive-partitioned parquet files"
+echo ""
 
 python train.py \
     --data_path dataset/mimic4/data/mimic4_tokens.parquet \
     --output_dir "${OUTPUT_DIR}" \
-    --batch_size 2 \
+    --batch_size 1 \
     --num_epochs 100 \
     --masking_strategy encounter \
     --encounter_mask_prob 0.3 \
@@ -60,8 +64,7 @@ python train.py \
     --swe_rope True \
     --learning_rate 1e-4 \
     --patience 10 \
-    --gradient_accumulation_steps 16 \
-    --max_patients 5000 \
+    --gradient_accumulation_steps 32 \
     --use_mlflow
 
 echo ""
