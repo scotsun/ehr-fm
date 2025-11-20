@@ -48,8 +48,8 @@ def parse_args():
     parser.add_argument("--n_heads", type=int, default=12)
     parser.add_argument("--n_blocks", type=int, default=6)
     parser.add_argument("--d_ff", type=int, default=3072)
-    parser.add_argument("--max_seg", type=int, default=32)
-    parser.add_argument("--max_seq_len", type=int, default=512)
+    parser.add_argument("--max_seg", type=int, default=16)
+    parser.add_argument("--max_seq_len", type=int, default=256)
     parser.add_argument("--swe_rope", type=lambda x: x.lower() == 'true', 
                        default=True,
                        help="Whether to use RoPE in SWE")
@@ -59,12 +59,12 @@ def parse_args():
     # ========================================================================
     parser.add_argument("--learning_rate", type=float, default=1e-4)
     parser.add_argument("--encounter_mask_prob", type=float, default=0.3)
-    parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1,
-                       help="Gradient accumulation steps (1=disabled, >1=enabled)")
-    parser.add_argument("--max_grad_norm", type=float, default=0.0,
-                       help="Max gradient norm for clipping (0=disabled, >0=enabled)")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
+                       help="Gradient accumulation steps (effective batch_size=32)")
+    parser.add_argument("--max_grad_norm", type=float, default=1.0,
+                       help="Max gradient norm for clipping")
     
     # ========================================================================
     # OPTIONAL - For debugging/testing
