@@ -44,7 +44,7 @@ class EarlyStopping:
             mlflow.pytorch.log_model(
                 model,
                 "best_model",
-                pip_requirements=["torch==2.7.1+cu128"],
+                pip_requirements=None,  # Let MLflow auto-detect dependencies
                 signature=self.model_signature,
             )
 
