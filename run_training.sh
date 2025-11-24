@@ -54,9 +54,9 @@ echo ""
 echo "Training Configuration:"
 echo "  Context window: 16 segments × 256 tokens = 4,096 tokens/patient"
 echo "  Batch size: 32 (real) × 2 (accumulation) = 64 (effective)"
-echo "  Masking strategy: token-level (15% mask probability)"
+echo "  Masking strategy: token-level (25% mask probability)"
 echo "  Mixed Precision: AMP enabled (FP16)"
-echo "  Model: 6 layers, 768 dim, 12 heads"
+echo "  Model: 8 layers, 768 dim, 12 heads"
 echo "  Output: ${OUTPUT_DIR}"
 echo ""
 
@@ -67,19 +67,19 @@ python train.py \
     --batch_size 32 \
     --num_epochs 100 \
     --masking_strategy token \
-    --token_mask_prob 0.15 \
+    --token_mask_prob 0.25 \
     --d_model 768 \
     --n_heads 12 \
-    --n_blocks 6 \
+    --n_blocks 8 \
     --d_ff 3072 \
     --dropout 0.1 \
     --max_seg 16 \
     --max_seq_len 256 \
     --swe_rope True \
-    --learning_rate 1e-4 \
+    --learning_rate 5e-5 \
     --patience 10 \
     --gradient_accumulation_steps 2 \
-    --max_grad_norm 1.0 \
+    --max_grad_norm 0.0 \
     --use_mlflow \
     --use_amp
 

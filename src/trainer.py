@@ -146,7 +146,16 @@ class BaseTrainer(Trainer):
 
         # Initialize AMP scaler if using mixed precision
         if self.use_amp:
-            self.scaler = torch.amp.GradScaler('cuda')
+            # Use conservative settings to prevent overflow
+            # init_scale: 4096 (balanced between preventing underflow and overflow)
+            # growth_factor: 1.0 (disable auto-growth to keep scale stable)
+            self.scaler = torch.amp.GradScaler(
+                'cuda',
+                init_scale=4096.0,
+                growth_factor=1.0,
+                backoff_factor=0.5,
+                growth_interval=2000
+            )
         else:
             self.scaler = None
 

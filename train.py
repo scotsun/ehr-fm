@@ -57,14 +57,14 @@ def parse_args():
     # ========================================================================
     # TRAINING PARAMETERS - Good defaults
     # ========================================================================
-    parser.add_argument("--learning_rate", type=float, default=1e-4)
+    parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--encounter_mask_prob", type=float, default=0.3)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=4,
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=2,
                        help="Gradient accumulation steps (effective batch_size=32)")
-    parser.add_argument("--max_grad_norm", type=float, default=1.0,
-                       help="Max gradient norm for clipping")
+    parser.add_argument("--max_grad_norm", type=float, default=0.0,
+                       help="Max gradient norm for clipping (0 = disabled)")
     
     # ========================================================================
     # OPTIONAL - For debugging/testing
