@@ -315,6 +315,7 @@ def main():
         local_rank=0,
         use_encounter_masking=use_encounter,
         encounter_mask_prob=args.encounter_mask_prob,
+        token_mask_prob=args.token_mask_prob,
         use_mlflow=args.use_mlflow,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         max_grad_norm=args.max_grad_norm,

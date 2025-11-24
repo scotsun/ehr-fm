@@ -125,6 +125,7 @@ class BaseTrainer(Trainer):
         local_rank: int,
         use_encounter_masking: bool = False,
         encounter_mask_prob: float = 0.3,
+        token_mask_prob: float = 0.15,
         use_mlflow: bool = True,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
@@ -137,6 +138,7 @@ class BaseTrainer(Trainer):
         self.criterion = criterion
         self.use_encounter_masking = use_encounter_masking
         self.encounter_mask_prob = encounter_mask_prob
+        self.token_mask_prob = token_mask_prob
         self.use_mlflow = use_mlflow
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
@@ -177,7 +179,7 @@ class BaseTrainer(Trainer):
                     if (labels != -100).sum() == 0:
                         continue
                 else:
-                    masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
+                    masked_input_ids, labels = random_masking(input_ids, self.tokenizer, self.token_mask_prob)
 
                 # Forward pass with AMP
                 if self.use_amp:
@@ -263,7 +265,7 @@ class BaseTrainer(Trainer):
                     if (labels != -100).sum() == 0:
                         continue
                 else:
-                    masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
+                    masked_input_ids, labels = random_masking(input_ids, self.tokenizer, self.token_mask_prob)
 
                 # Forward pass with AMP (validation)
                 if self.use_amp:
