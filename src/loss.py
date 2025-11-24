@@ -24,7 +24,8 @@ class SimCSE(nn.Module):
         # sim (2*batch_size, 2*batch_size)
         sim = torch.einsum("nd,md->nm", h, h)
         mask = torch.eye(sim.shape[0], device=sim.device).bool()
-        sim = sim.masked_fill(mask, -1e9)
+        # Use -1e4 instead of -1e9 to avoid FP16 overflow in AMP
+        sim = sim.masked_fill(mask, -1e4)
 
         targets = torch.arange(sim.shape[0] // 2, device=sim.device) + sim.shape[0] // 2
         targets = torch.cat([targets, targets - sim.shape[0] // 2], dim=0)

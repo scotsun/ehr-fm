@@ -38,7 +38,8 @@ class MultiHeadAttentionBlock(nn.Module):
         if mask is not None:
             # (batch, 1, 1, seq_len) which will broadcast to all `heads` and `queries`
             mask = mask[:, None, None, :]
-            attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
+            # Use -1e4 instead of -1e9 to avoid FP16 overflow in AMP
+            attention_scores = attention_scores.masked_fill(mask == 0, -1e4)
         attention_scores = attention_scores.softmax(dim=-1)
         # matmul
         mh_out = einsum("bhqk, bhkd->bhqd", attention_scores, value)
