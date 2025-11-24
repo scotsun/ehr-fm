@@ -17,6 +17,7 @@
 # Context: max_seg=16, max_seq_len=256 (4,096 tokens/patient)
 # Effective batch size: 24 × 2 = 48 patients
 # Masking: Token-level (basic BERT-style)
+# Mixed Precision: AMP enabled (FP16 training for 2-3x speedup)
 # ============================================================================
 
 echo "=========================================="
@@ -54,6 +55,7 @@ echo "Training Configuration:"
 echo "  Context window: 16 segments × 256 tokens = 4,096 tokens/patient"
 echo "  Batch size: 24 (real) × 2 (accumulation) = 48 (effective)"
 echo "  Masking strategy: token-level (15% mask probability)"
+echo "  Mixed Precision: AMP enabled (FP16)"
 echo "  Model: 6 layers, 768 dim, 12 heads"
 echo "  Output: ${OUTPUT_DIR}"
 echo ""
@@ -78,7 +80,8 @@ python train.py \
     --patience 10 \
     --gradient_accumulation_steps 2 \
     --max_grad_norm 1.0 \
-    --use_mlflow
+    --use_mlflow \
+    --use_amp
 
 echo ""
 echo "=========================================="

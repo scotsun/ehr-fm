@@ -77,7 +77,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_mlflow", action="store_true",
                        help="Enable MLflow tracking (default: False)")
-    
+    parser.add_argument("--use_amp", action="store_true",
+                       help="Enable Automatic Mixed Precision (AMP) for faster training (default: False)")
+
     return parser.parse_args()
 
 def main():
@@ -315,14 +317,16 @@ def main():
         encounter_mask_prob=args.encounter_mask_prob,
         use_mlflow=args.use_mlflow,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        max_grad_norm=args.max_grad_norm
+        max_grad_norm=args.max_grad_norm,
+        use_amp=args.use_amp
     )
-    
+
     print(f"Masking strategy: {args.masking_strategy}")
     if use_encounter:
         print(f"  - Encounter mask probability: {args.encounter_mask_prob}")
     else:
         print(f"  - Token mask probability: {args.token_mask_prob}")
+    print(f"Mixed Precision (AMP): {'Enabled' if args.use_amp else 'Disabled'}")
     print()
     
     # Get patient count for logging

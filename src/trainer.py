@@ -128,6 +128,7 @@ class BaseTrainer(Trainer):
         use_mlflow: bool = True,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
+        use_amp: bool = False,
     ) -> None:
         super().__init__(
             model, optimizer, early_stopping, verbose_period, device, local_rank
@@ -139,6 +140,13 @@ class BaseTrainer(Trainer):
         self.use_mlflow = use_mlflow
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
+        self.use_amp = use_amp
+
+        # Initialize AMP scaler if using mixed precision
+        if self.use_amp:
+            self.scaler = torch.amp.GradScaler('cuda')
+        else:
+            self.scaler = None
 
     def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
         model: nn.Module = self.model
@@ -170,27 +178,50 @@ class BaseTrainer(Trainer):
                         continue
                 else:
                     masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
-                
-                logits = model(
-                    input_ids=masked_input_ids,
-                    attention_mask=attention_mask,
-                    segment_attention_mask=segment_attention_mask,
-                    segment_time=segment_time,
-                    token_time=token_time,
-                )
 
-                loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
-                
-                # Gradient accumulation
-                loss = loss / self.gradient_accumulation_steps
-                loss.backward()
-                
+                # Forward pass with AMP
+                if self.use_amp:
+                    with torch.amp.autocast('cuda'):
+                        logits = model(
+                            input_ids=masked_input_ids,
+                            attention_mask=attention_mask,
+                            segment_attention_mask=segment_attention_mask,
+                            segment_time=segment_time,
+                            token_time=token_time,
+                        )
+                        loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+                        loss = loss / self.gradient_accumulation_steps
+                else:
+                    logits = model(
+                        input_ids=masked_input_ids,
+                        attention_mask=attention_mask,
+                        segment_attention_mask=segment_attention_mask,
+                        segment_time=segment_time,
+                        token_time=token_time,
+                    )
+                    loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+                    loss = loss / self.gradient_accumulation_steps
+
+                # Backward pass with AMP
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
                 # Update weights with gradient accumulation
                 if (batch_id + 1) % self.gradient_accumulation_steps == 0:
-                    # Gradient clipping
-                    if self.max_grad_norm > 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), self.max_grad_norm)
-                    optimizer.step()
+                    if self.use_amp:
+                        # Unscale gradients before clipping
+                        if self.max_grad_norm > 0:
+                            self.scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), self.max_grad_norm)
+                        self.scaler.step(optimizer)
+                        self.scaler.update()
+                    else:
+                        # Standard gradient clipping and optimizer step
+                        if self.max_grad_norm > 0:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), self.max_grad_norm)
+                        optimizer.step()
                     optimizer.zero_grad()
 
                 bar.set_postfix(mlm_loss=float(loss * self.gradient_accumulation_steps))
@@ -225,7 +256,7 @@ class BaseTrainer(Trainer):
                 # Use encounter masking or token masking
                 if self.use_encounter_masking:
                     from src.utils.encounter_masking import encounter_masking
-                    masked_input_ids, labels, enc_mask = encounter_masking(
+                    masked_input_ids, labels, _ = encounter_masking(
                         input_ids, segment_attention_mask, self.tokenizer, self.encounter_mask_prob
                     )
                     # Skip empty batches
@@ -233,16 +264,28 @@ class BaseTrainer(Trainer):
                         continue
                 else:
                     masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
-                
-                logits = model(
-                    input_ids=masked_input_ids,
-                    attention_mask=attention_mask,
-                    segment_attention_mask=segment_attention_mask,
-                    segment_time=segment_time,
-                    token_time=token_time,
-                )
 
-                loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+                # Forward pass with AMP (validation)
+                if self.use_amp:
+                    with torch.amp.autocast('cuda'):
+                        logits = model(
+                            input_ids=masked_input_ids,
+                            attention_mask=attention_mask,
+                            segment_attention_mask=segment_attention_mask,
+                            segment_time=segment_time,
+                            token_time=token_time,
+                        )
+                        loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+                else:
+                    logits = model(
+                        input_ids=masked_input_ids,
+                        attention_mask=attention_mask,
+                        segment_attention_mask=segment_attention_mask,
+                        segment_time=segment_time,
+                        token_time=token_time,
+                    )
+                    loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
+
                 total_mlm += loss.item()
 
         return total_mlm / total_num_batch
