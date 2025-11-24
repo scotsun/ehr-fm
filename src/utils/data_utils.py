@@ -74,7 +74,6 @@ class SeqSet(Dataset):
             columns=[self.set_id_col, self.token_col] + self.additional_cols,
         ).to_pandas()
         _seq_id_data[self.token_col] = _seq_id_data[self.token_col].astype(str)
-        print(_seq_id_data)
 
         if self.downstream_task_cohort is not None and len(self.outcome_vars) > 0:
             _set_id = self.downstream_task_cohort.iloc[index][self.set_id_col]

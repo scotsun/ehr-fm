@@ -1,12 +1,14 @@
 """Trainer classes & training infra functionalities integrated with MLflow."""
 
 from abc import ABC, abstractmethod
+
 import torch
 import torch.nn as nn
+import mlflow
+
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-import mlflow
 from tokenizers import Tokenizer
 
 from src.utils.data_utils import random_masking
@@ -140,12 +142,14 @@ class BaseTrainer(Trainer):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 set_attention_mask = batch["set_attention_mask"].to(device)
+                t = batch["t"].to(device)
 
                 masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
                 logits = model(
                     input_ids=masked_input_ids,
                     attention_mask=attention_mask,
                     set_attention_mask=set_attention_mask,
+                    t=t,  # TODO revise this
                 )
 
                 loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))

@@ -13,7 +13,7 @@ class FFNSwiGLUBlock(nn.Module):
         gate_output = self.linear_gate(x)
         up_output = self.linear_up(x)
         activated_gate = F.silu(gate_output)
-        return self.linear_down(activated_gate * up_output)
+        return self.linear_down(activated_gate * up_output)  # SwiGLU
 
 
 class FFNLUBlock(nn.Module):
