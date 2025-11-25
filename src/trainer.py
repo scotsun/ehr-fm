@@ -26,15 +26,16 @@ class EarlyStopping:
         patience: int,
         min_delta: int = 0,
         mode: str = "min",
-        model_signature=None,
-        local_rank: int = 0,
+        save_best_weights: bool = True,
     ) -> None:
         self.patience = patience
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.model_signature = model_signature
-        self.local_rank = local_rank
+        self.save_best_weights = save_best_weights
+        self.best_weights = None
+        self.best_epoch = None
+        self.mode = mode
 
         match mode:
             case "min":
@@ -46,7 +47,7 @@ class EarlyStopping:
 
     def _is_main_process(self):
         return (
-            not dist.is_available() or not dist.is_initialized() or self.local_rank == 0
+            not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
         )
 
     def _track_best_state(self, model_to_track: nn.Module):
@@ -55,16 +56,20 @@ class EarlyStopping:
             self.best_model_state = model_to_track.state_dict().copy()
         return
 
-    def step(self, metric_val: float, model: nn.Module | DDP, epoch: int):
+    def step(
+        self,
+        metric_val: float,
+        model: nn.Module | DDP,
+        epoch: int,
+    ):
         model_to_log = model.module if hasattr(model, "module") else model
-        # save the first chkpt
         if self.best_score is None:
             self.best_score = metric_val
             self.counter = 0
             self.best_epoch = epoch
             self._track_best_state(model_to_log)
             return
-        # save the subsequent chkpt
+
         if self.monitor_op(metric_val, self.best_score + self.delta_op):
             self.best_score = metric_val
             self.counter = 0
@@ -87,6 +92,10 @@ class EarlyStopping:
 
 
 class Trainer(ABC):
+    """
+    external state-tracking & mlflow state-logging in the end
+    """
+
     def __init__(
         self,
         model: nn.Module,
@@ -106,7 +115,7 @@ class Trainer(ABC):
 
     def _is_main_process(self):
         return (
-            not dist.is_available() or not dist.is_initialized() or self.local_rank == 0
+            not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
         )
 
     def log_best_model(self, model: nn.Module | DDP):
@@ -223,7 +232,7 @@ class BaseTrainer(Trainer):
                 bar.set_postfix(mlm_loss=float(loss))
 
                 cur_step = epoch_id * len(dataloader) + batch_id
-                if self.local_rank == 0 and cur_step % 100 == 0:
+                if self._is_main_process() and cur_step % 100 == 0:
                     mlflow.log_metrics({"train_mlm_loss": float(loss)}, step=cur_step)
         return
 
