@@ -79,7 +79,7 @@ python train.py \
     --learning_rate 5e-5 \
     --patience 10 \
     --gradient_accumulation_steps 2 \
-    --max_grad_norm 0.0 \
+    --max_grad_norm 5.0 \
     --use_mlflow \
     --use_amp
 
