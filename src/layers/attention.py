@@ -33,14 +33,27 @@ class MultiHeadAttentionBlock(nn.Module):
     def attention(query, key, value, mask):
         # this can be replaced
         d_k = query.shape[-1]
-        # transpose matmul
-        attention_scores = einsum("bhqd, bhkd->bhqk", query, key) / math.sqrt(d_k)
+
+        # Compute attention scores in FP32 for numerical stability with AMP
+        original_dtype = query.dtype
+        query_fp32 = query.float()
+        key_fp32 = key.float()
+
+        # transpose matmul in FP32
+        attention_scores = einsum("bhqd, bhkd->bhqk", query_fp32, key_fp32) / math.sqrt(d_k)
+
         if mask is not None:
             # (batch, 1, 1, seq_len) which will broadcast to all `heads` and `queries`
             mask = mask[:, None, None, :]
-            # Use -1e4 instead of -1e9 to avoid FP16 overflow in AMP
+            # Use -1e4 instead of -1e9 to avoid FP16 overflow
             attention_scores = attention_scores.masked_fill(mask == 0, -1e4)
+
+        # Softmax in FP32 for stability
         attention_scores = attention_scores.softmax(dim=-1)
+
+        # Convert back to original dtype for the final matmul
+        attention_scores = attention_scores.to(original_dtype)
+
         # matmul
         mh_out = einsum("bhqk, bhkd->bhqd", attention_scores, value)
         return mh_out

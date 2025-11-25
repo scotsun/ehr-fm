@@ -25,11 +25,21 @@ class RoPE(nn.Module):
             device
         )
 
-        angle = einsum("bi,j -> bij", time, theta)  # shape: (b, seq_len, d/2)
+        # Compute angle in FP32 to avoid precision issues with large time values
+        # Then convert back to input dtype for consistency
+        original_dtype = time.dtype
+        time_fp32 = time.float()
+        theta_fp32 = theta.float()
+
+        angle = einsum("bi,j -> bij", time_fp32, theta_fp32)  # shape: (b, seq_len, d/2)
         angle = torch.cat([angle, angle], dim=-1)  # shape: (b, seq_len, d)
 
+        # Compute cos/sin in FP32 for numerical stability
+        cos_angle = torch.cos(angle).to(original_dtype)
+        sin_angle = torch.sin(angle).to(original_dtype)
+
         # (b, 1, seq_len, d)
-        return torch.cos(angle)[:, None, :, :], torch.sin(angle)[:, None, :, :]
+        return cos_angle[:, None, :, :], sin_angle[:, None, :, :]
 
     def forward(self, x: torch.Tensor, time: torch.Tensor | None = None):
         # x: (batch, h, seq_len, d)
