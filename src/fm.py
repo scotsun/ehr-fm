@@ -92,12 +92,12 @@ class FMBase(PreTrainedModel):
     def forward(self, input_ids, attention_mask, set_attention_mask, t):
         h = self.encode(input_ids, attention_mask, set_attention_mask)
         logits = self.lm_head(h)
-        # (batch, max_seg, max_seq_len, vocab)
-        return logits
+        # (batch, max_seq, max_set_size, d_model)
+        return logits, h
 
     def encode(self, input_ids, attention_mask, set_attention_mask, t):
         h = self.embeddings(input_ids)
         h = h + self.t2v(t)
         h = self.transformer_encoder(h, attention_mask, set_attention_mask, t)
-        # (batch, max_seg, max_seq_len, d_model)
+        # (batch, max_seq, max_set_size, d_model)
         return h
