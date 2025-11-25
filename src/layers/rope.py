@@ -52,8 +52,15 @@ class RoPE(nn.Module):
         neg_half = torch.cat(
             [-x_rope[..., self.d // 2 :], x_rope[..., : self.d // 2]], dim=-1
         )
-        x_rope = x_rope * cos_rotery + neg_half * sin_rotery
-        return torch.cat([x_rope, x_pass], dim=-1)
+
+        # Perform RoPE rotation in FP32 to prevent cumulative precision errors
+        # FP16 multiplication accumulates errors over many training steps
+        original_dtype = x_rope.dtype
+        x_rope_rotated = (
+            x_rope.float() * cos_rotery.float() + neg_half.float() * sin_rotery.float()
+        ).to(original_dtype)
+
+        return torch.cat([x_rope_rotated, x_pass], dim=-1)
 
 
 class T2V(nn.Module):
