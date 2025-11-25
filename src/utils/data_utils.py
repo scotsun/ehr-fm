@@ -23,6 +23,7 @@ class SeqSet(Dataset):
         seq_id_col: str,  # "patient_id", "user_id"
         set_id_col: str,  # "enc_id", "order_id"
         token_col: str,  # "code", "product_id"
+        val_col: str | None = None,
         additional_cols: list[str] = [],
     ):
         self.data_root = data_root
@@ -45,10 +46,11 @@ class SeqSet(Dataset):
         self.seq_id_col = seq_id_col
         self.set_id_col = set_id_col
         self.token_col = token_col
+        self.val_col = val_col
         self.additional_cols = additional_cols
 
     def __len__(self):
-        return self.data.ngroups
+        return len(self.seq_ids)
 
     def __getitem__(self, index):
         """
@@ -86,9 +88,14 @@ class SeqSet(Dataset):
 
         _grouped = _seq_id_data.groupby(self.set_id_col)
         _tokens = [_set_tokens.to_list() for _, _set_tokens in _grouped[self.token_col]]
+        if self.val_col is not None:
+            _vs = [
+                _set_vs.fillna(-999).to_list() for _, _set_vs in _grouped[self.val_col]
+            ]
+        else:
+            _vs = None
         _ts = [_set_ts.to_list() for _, _set_ts in _grouped["t"]]
-
-        _tokens, _seg_attn, _ts = self.pad_seq(_tokens, _ts)
+        _tokens, _seg_attn, _ts, _vs = self.pad_seq(_tokens, _ts, _vs)
         _tokens = [["[CLS]"] + elem for elem in _tokens]
 
         item = get_batch_encoding(self.tokenizer, _tokens)
@@ -96,21 +103,33 @@ class SeqSet(Dataset):
         # item: dict
         # keys: input_ids, attention_mask, set_attention_mask, t
         item["set_attention_mask"] = _seg_attn
-        item["t"] = pad_set(self.max_seq, _ts)
+        item["t"] = pad_set(self.max_set_size, _ts)
+        if _vs is not None:
+            item["v"] = pad_set(self.max_set_size, _vs, padding_value=-99)
+
+        if self.downstream_task_cohort is not None and self.outcome_vars:
+            _outrow = self.downstream_task_cohort.iloc[index][
+                self.outcome_vars
+            ].to_dict()
+            for _outvar, _value in _outrow.items():
+                item[_outvar] = torch.tensor(_value, dtype=torch.float32)
 
         return item
 
-    def pad_seq(self, tokens, times):
+    def pad_seq(self, tokens, times, values):
         """pad/trunc the seq[set] to max_seq"""
         # tokens: 2d list
         # set_attn: 1d list
         # times: 2d list
+        # values: 2d list
         n_sets = len(tokens)
 
         if n_sets > self.max_seq:  # truncation
             set_attn = torch.ones(self.max_seq, dtype=torch.bool)
             tokens = tokens[: self.max_seq]
             times = times[: self.max_seq]
+            if values is not None:
+                values = values[: self.max_seq]
         else:  # pad
             set_attn = torch.zeros(self.max_seq, dtype=torch.bool)
             set_attn[:n_sets] = True
@@ -118,8 +137,10 @@ class SeqSet(Dataset):
             pad_length = self.max_seq - n_sets
             tokens = tokens + [["[PAD]"]] * pad_length
             times = times + [[-1]] * pad_length
+            if values is not None:
+                values = values + [[-99]] * pad_length
 
-        return tokens, set_attn, times
+        return tokens, set_attn, times, values
 
 
 def pad_set(max_set_size: int, sets, padding_value=-1.0):

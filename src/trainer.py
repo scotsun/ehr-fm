@@ -4,14 +4,20 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 import mlflow
 
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
-from tqdm import tqdm
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch import GradScaler, autocast
+from mlflow.models import ModelSignature
 from tokenizers import Tokenizer
+from tqdm import tqdm
 
 from src.utils.data_utils import random_masking
+from src.fm import FMBase
+from src.metric import topk_accuracy
 
 
 class EarlyStopping:
@@ -20,15 +26,16 @@ class EarlyStopping:
         patience: int,
         min_delta: int = 0,
         mode: str = "min",
-        model_signature=None,
-        local_rank: int = 0,
+        save_best_weights: bool = True,
     ) -> None:
         self.patience = patience
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.model_signature = model_signature
-        self.local_rank = local_rank
+        self.save_best_weights = save_best_weights
+        self.best_weights = None
+        self.best_epoch = None
+        self.mode = mode
 
         match mode:
             case "min":
@@ -38,36 +45,57 @@ class EarlyStopping:
             case _:
                 raise ValueError("mode must be either `min` or `max`")
 
-    def _log_best_model(self, model):
-        """helper function to log model."""
-        if self.local_rank == 0:
-            mlflow.pytorch.log_model(
-                model,
-                "best_model",
-                pip_requirements=["torch==2.7.1+cu128"],
-                signature=self.model_signature,
-            )
+    def _is_main_process(self):
+        return (
+            not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
+        )
 
-    def step(self, metric_val, model):
-        # save the first chkpt
+    def _track_best_state(self, model_to_track: nn.Module):
+        if self._is_main_process():
+            print("[INFO]: log state")
+            self.best_model_state = model_to_track.state_dict().copy()
+        return
+
+    def step(
+        self,
+        metric_val: float,
+        model: nn.Module | DDP,
+        epoch: int,
+    ):
+        model_to_log = model.module if hasattr(model, "module") else model
         if self.best_score is None:
             self.best_score = metric_val
-            self._log_best_model(model)
+            self.counter = 0
+            self.best_epoch = epoch
+            self._track_best_state(model_to_log)
             return
-        # save the subsequent chkpt
+
         if self.monitor_op(metric_val, self.best_score + self.delta_op):
             self.best_score = metric_val
             self.counter = 0
-            self._log_best_model(model)
-            return
+            self.best_epoch = epoch
+            self._track_best_state(model_to_log)
         else:
             self.counter += 1
-            if self.counter > self.patience:
+            if self.counter >= self.patience:
                 self.early_stop = True
-            return
+        return
+
+    def listen_to_broadcast(self, device: torch.device):
+        if self._is_main_process():
+            flag = self.early_stop
+        else:
+            flag = False
+        flag_tensor = torch.tensor([flag], device=device)
+        dist.broadcast(flag_tensor, src=0)
+        return bool(flag_tensor.item())
 
 
 class Trainer(ABC):
+    """
+    external state-tracking & mlflow state-logging in the end
+    """
+
     def __init__(
         self,
         model: nn.Module,
@@ -75,15 +103,34 @@ class Trainer(ABC):
         early_stopping: EarlyStopping | None,
         verbose_period: int,
         device: torch.device,
-        local_rank: int = 0,
+        model_signature: ModelSignature,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.early_stopping = early_stopping
         self.verbose_period = verbose_period
         self.device = device
-        self.local_rank = local_rank
-        self.best_score = -float("inf")
+        self.model_signature = model_signature
+        self.scaler = GradScaler(device=device)
+
+    def _is_main_process(self):
+        return (
+            not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
+        )
+
+    def log_best_model(self, model: nn.Module | DDP):
+        if self._is_main_process():
+            model_to_log = model.module if hasattr(model, "module") else model
+            if self.early_stopping:
+                model_to_log.load_state_dict(self.early_stopping.best_model_state)
+            mlflow.pytorch.log_model(
+                model_to_log,
+                "best_model",
+                pip_requirements=["torch==2.7.1+cu128"],
+                signature=self.model_signature,
+            )
+            print("[INFO]: logged model")
+        return
 
     def fit(
         self,
@@ -91,13 +138,25 @@ class Trainer(ABC):
         train_loader: DataLoader,
         valid_loader: None | DataLoader = None,
     ):
+        if self.early_stopping and not valid_loader:
+            raise ValueError("EarlyStopping must be accompanied by valid data.")
         for epoch in range(epochs):
-            verbose = (epoch % self.verbose_period) == 0
+            verbose = ((epoch % self.verbose_period) == 0) and self._is_main_process()
             self._train(train_loader, verbose, epoch)
-            if valid_loader is not None and self.local_rank == 0:
-                self._valid(valid_loader, verbose, epoch)
-                if self.early_stopping and self.early_stopping.early_stop:
-                    break
+            if valid_loader:
+                valid_metrics = self._valid(valid_loader, verbose, epoch)
+                if self._is_main_process():
+                    mlflow.log_metrics(valid_metrics["logged_metrics"], step=epoch)
+                    if self.early_stopping:
+                        self.early_stopping.step(
+                            valid_metrics["logged_metrics"], self.model, epoch
+                        )
+            stop = self.early_stopping.listen_to_broadcast(self.device)
+            if stop:
+                self.log_best_model(self.model)
+                return
+        self.log_best_model(self.model)
+        return
 
     @abstractmethod
     def evaluate(self, **kwarg):
@@ -115,25 +174,30 @@ class Trainer(ABC):
 class BaseTrainer(Trainer):
     def __init__(
         self,
-        model: nn.Module,
+        model: FMBase,
         tokenizer: Tokenizer,
         optimizer: Optimizer,
-        criterion: nn.CrossEntropyLoss,
+        criterions: dict[str, nn.Module],
         early_stopping: EarlyStopping | None,
         verbose_period: int,
         device: torch.device,
-        local_rank: int,
+        model_signature: ModelSignature | None,
+        trainer_args: dict,
     ) -> None:
         super().__init__(
-            model, optimizer, early_stopping, verbose_period, device, local_rank
+            model, optimizer, early_stopping, verbose_period, device, model_signature
         )
         self.tokenizer = tokenizer
-        self.criterion = criterion
+        self.criterions = criterions
+        self.trainer_args = trainer_args
 
     def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
-        model: nn.Module = self.model
+        model: FMBase | DDP = self.model
         model.train()
+        scaler = self.scaler
         optimizer = self.optimizer
+        criterions = self.criterions
+        trainer_args = self.trainer_args
         device = self.device
 
         with tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose) as bar:
@@ -144,33 +208,43 @@ class BaseTrainer(Trainer):
                 set_attention_mask = batch["set_attention_mask"].to(device)
                 t = batch["t"].to(device)
 
-                masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
-                logits = model(
-                    input_ids=masked_input_ids,
-                    attention_mask=attention_mask,
-                    set_attention_mask=set_attention_mask,
-                    t=t,  # TODO revise this
+                masked_input_ids, labels = random_masking(
+                    input_ids, self.tokenizer, trainer_args["mlm_probability"]
                 )
+                if (labels == -100).all():
+                    continue
+                with autocast(device_type="cuda", dtype=torch.float16):
+                    logits, _ = model(
+                        input_ids=masked_input_ids,
+                        attention_mask=attention_mask,
+                        set_attention_mask=set_attention_mask,
+                        t=t,
+                    )
 
-                loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
+                    loss = criterions["cross_entropy"](
+                        logits.view(-1, logits.size(-1), labels.view(-1))
+                    )
+
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 bar.set_postfix(mlm_loss=float(loss))
 
                 cur_step = epoch_id * len(dataloader) + batch_id
-                if self.local_rank == 0 and cur_step % 100 == 0:
+                if self._is_main_process() and cur_step % 100 == 0:
                     mlflow.log_metrics({"train_mlm_loss": float(loss)}, step=cur_step)
         return
 
-    def evaluate(self, dataloader: DataLoader, verbose: bool, epoch_id: int) -> float:
-        model: nn.Module = self.model
+    def evaluate(self, dataloader: DataLoader, verbose: bool) -> float:
+        model: FMBase = self.model
         model.eval()
         device = self.device
+        criterions = self.criterions
+        trainer_args = self.trainer_args
 
-        total_mlm = 0.0
-        total_num_batch = len(dataloader)
+        # total_num_batch, total_mlm, total_top1_acc, total_top10_acc = 0., 0., 0., 0.
+        counter = torch.zeros(4, device=device)
         with torch.no_grad():
             for batch in tqdm(
                 dataloader, unit="batch", mininterval=0, disable=not verbose
@@ -178,30 +252,81 @@ class BaseTrainer(Trainer):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 set_attention_mask = batch["set_attention_mask"].to(device)
+                t = batch["t"].to(device)
 
-                masked_input_ids, labels = random_masking(input_ids, self.tokenizer)
-                logits = model(
-                    input_ids=masked_input_ids,
-                    attention_mask=attention_mask,
-                    set_attention_mask=set_attention_mask,
+                masked_input_ids, labels = random_masking(
+                    input_ids, self.tokenizer, trainer_args["mlm_probability"]
                 )
-
-                loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
-                total_mlm += loss.item()
-
-        return total_mlm / total_num_batch
+                with autocast(device_type="cuda", dtype=torch.float16):
+                    logits, _ = model(
+                        input_ids=masked_input_ids,
+                        attention_mask=attention_mask,
+                        set_attention_mask=set_attention_mask,
+                        t=t,
+                    )
+                    loss = criterions["cross_entropy"](
+                        logits.view(-1, logits.size(-1)), labels.view(-1)
+                    )
+                    top1_acc = topk_accuracy(logits, labels, 1)
+                    top10_acc = topk_accuracy(logits, labels, 10)
+                counter[0] += 1
+                counter[1] += loss.item()
+                counter[2] += top1_acc.item()
+                counter[3] += top10_acc.item()
+        dist.all_reduce(counter, op=dist.ReduceOp.SUM)
+        return (
+            (counter[1] / counter[0]).item(),
+            (counter[2] / counter[0]).item(),
+            (counter[3] / counter[0]).item(),
+        )
 
     def _valid(self, dataloader, verbose, epoch_id):
         """
         log all the metrics in mlflow;
         return the metric for save-best/early-stop.
+            {
+                "callback_metric": ...,
+                "logged_metrics": {...}
+            }
         """
+        val_mlm, val_top1, val_top10 = self.evaluate(dataloader, verbose)
         if verbose:
-            valid_mlm = self.evaluate(dataloader, verbose, epoch_id)
-            mlflow.log_metrics({"val_mlm_loss": valid_mlm}, step=epoch_id)
-        if self.early_stopping:
-            self.early_stopping.step(valid_mlm, self.model)
-        return valid_mlm
+            print(f"epoch {epoch_id}/val_mlm_loss: {round(val_mlm, 3)}")
+        valid_metrics = {
+            "callback_metric": val_mlm,
+            "logged_metrics": {
+                "val_mlm_loss": val_mlm,
+                "val_top1_acc": val_top1,
+                "val_top10_acc": val_top10,
+            },
+        }
+        return valid_metrics
+
+
+class BinaryTrainer(Trainer):
+    def __init__(
+        self,
+        fm: FMBase,
+        model: nn.Module,
+        optimizer,
+        early_stopping,
+        criterion,
+        verbose_period,
+        device,
+        model_signature,
+        outcome_name: str,
+        fm_freeze: bool = True,
+    ) -> None:
+        super().__init__(
+            model, optimizer, early_stopping, verbose_period, device, model_signature
+        )
+        self.fm = fm
+        self.fm_freeze = fm_freeze
+        if fm_freeze:
+            for p in fm.parameters():
+                p.requires_grad = False
+        self.criterion = criterion
+        self.outcome_name = outcome_name
 
 
 def test_logging(
