@@ -11,6 +11,7 @@
 #SBATCH --time=72:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=hg176@duke.edu
+#SBATCH --signal=B:TERM@120  # Send SIGTERM 120 seconds before timeout for graceful checkpoint save
 
 # ============================================================================
 # HAT Model Training - MIMIC-IV on H200 GPU (Optimized)
@@ -54,9 +55,10 @@ echo ""
 echo "Training Configuration:"
 echo "  Context window: 16 segments × 256 tokens = 4,096 tokens/patient"
 echo "  Batch size: 32 (real) × 2 (accumulation) = 64 (effective)"
-echo "  Masking strategy: token-level (25% mask probability)"
+echo "  Masking strategy: token-level (15% mask probability)"
 echo "  Mixed Precision: AMP enabled (FP16)"
-echo "  Model: 8 layers, 768 dim, 12 heads"
+echo "  Model: 6 layers, 768 dim, 12 heads"
+echo "  Checkpoint: Save every epoch after epoch 5 (keep last 3)"
 echo "  Output: ${OUTPUT_DIR}"
 echo ""
 
@@ -67,10 +69,10 @@ python train.py \
     --batch_size 32 \
     --num_epochs 100 \
     --masking_strategy token \
-    --token_mask_prob 0.25 \
+    --token_mask_prob 0.15 \
     --d_model 768 \
     --n_heads 12 \
-    --n_blocks 8 \
+    --n_blocks 6 \
     --d_ff 3072 \
     --dropout 0.1 \
     --max_seg 16 \
@@ -80,6 +82,7 @@ python train.py \
     --patience 10 \
     --gradient_accumulation_steps 2 \
     --max_grad_norm 5.0 \
+    --start_saving_after 5 \
     --use_mlflow \
     --use_amp
 

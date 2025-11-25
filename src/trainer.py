@@ -1,6 +1,8 @@
 """Trainer classes & training infra functionalities integrated with MLflow."""
 
 from abc import ABC, abstractmethod
+import signal
+from pathlib import Path
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
@@ -10,6 +12,143 @@ import mlflow
 from tokenizers import Tokenizer
 
 from src.utils.data_utils import random_masking
+
+
+class CheckpointManager:
+    """Manages local checkpoint saving with support for Slurm graceful shutdown."""
+
+    def __init__(
+        self,
+        checkpoint_dir: str,
+        start_saving_after: int = 5,
+        keep_last_n: int = 3,
+    ):
+        self.checkpoint_dir = Path(checkpoint_dir)
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.start_saving_after = start_saving_after  # Start saving after N epochs
+        self.keep_last_n = keep_last_n
+        self._model = None
+        self._optimizer = None
+        self._scaler = None
+        self._epoch = 0
+        self._best_loss = float('inf')
+
+        # Register signal handlers for Slurm
+        self._setup_signal_handlers()
+
+    def _setup_signal_handlers(self):
+        """Setup handlers for Slurm signals (SIGTERM, SIGUSR1)."""
+        # SIGTERM: Slurm sends this before killing job
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        # SIGUSR1: Can be used for preemption warning
+        signal.signal(signal.SIGUSR1, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle termination signals by saving checkpoint."""
+        sig_name = signal.Signals(signum).name
+        print(f"\n⚠️  Received {sig_name} signal! Saving emergency checkpoint...")
+        self.save_emergency_checkpoint()
+        print(f"✅ Emergency checkpoint saved. Exiting gracefully.")
+        exit(0)
+
+    def register_model(self, model, optimizer, scaler=None):
+        """Register model and optimizer for signal handler access."""
+        self._model = model
+        self._optimizer = optimizer
+        self._scaler = scaler
+
+    def update_epoch(self, epoch: int, best_loss: float = None):
+        """Update current epoch (call at start of each epoch)."""
+        self._epoch = epoch
+        if best_loss is not None:
+            self._best_loss = best_loss
+
+    def should_save(self, epoch: int) -> bool:
+        """Check if checkpoint should be saved this epoch (after start_saving_after epochs)."""
+        return epoch >= self.start_saving_after
+
+    def save_checkpoint(self, model, optimizer, epoch: int, loss: float, scaler=None, is_best: bool = False):
+        """Save a checkpoint."""
+        checkpoint = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'loss': loss,
+        }
+        if scaler is not None:
+            checkpoint['scaler_state_dict'] = scaler.state_dict()
+
+        # Save periodic checkpoint
+        ckpt_path = self.checkpoint_dir / f"checkpoint_epoch_{epoch:04d}.pt"
+        torch.save(checkpoint, ckpt_path)
+        print(f"💾 Saved checkpoint: {ckpt_path}")
+
+        # Save best model
+        if is_best:
+            best_path = self.checkpoint_dir / "best_model.pt"
+            torch.save(checkpoint, best_path)
+            print(f"⭐ New best model saved: {best_path}")
+
+        # Save latest (always overwrite)
+        latest_path = self.checkpoint_dir / "latest_checkpoint.pt"
+        torch.save(checkpoint, latest_path)
+
+        # Cleanup old checkpoints
+        self._cleanup_old_checkpoints()
+
+    def save_emergency_checkpoint(self):
+        """Save emergency checkpoint when receiving termination signal."""
+        if self._model is None:
+            print("⚠️  No model registered for emergency save")
+            return
+
+        checkpoint = {
+            'epoch': self._epoch,
+            'model_state_dict': self._model.state_dict(),
+            'optimizer_state_dict': self._optimizer.state_dict() if self._optimizer else None,
+            'loss': self._best_loss,
+            'emergency': True,
+        }
+        if self._scaler is not None:
+            checkpoint['scaler_state_dict'] = self._scaler.state_dict()
+
+        emergency_path = self.checkpoint_dir / f"emergency_checkpoint_epoch_{self._epoch:04d}.pt"
+        torch.save(checkpoint, emergency_path)
+
+        # Also update latest
+        latest_path = self.checkpoint_dir / "latest_checkpoint.pt"
+        torch.save(checkpoint, latest_path)
+
+    def _cleanup_old_checkpoints(self):
+        """Keep only the last N checkpoints (excluding best/latest/emergency)."""
+        checkpoints = sorted(self.checkpoint_dir.glob("checkpoint_epoch_*.pt"))
+        if len(checkpoints) > self.keep_last_n:
+            for ckpt in checkpoints[:-self.keep_last_n]:
+                ckpt.unlink()
+                print(f"🗑️  Removed old checkpoint: {ckpt.name}")
+
+    def load_checkpoint(self, model, optimizer, scaler=None, path: str = None):
+        """Load checkpoint. If path is None, loads latest."""
+        if path is None:
+            path = self.checkpoint_dir / "latest_checkpoint.pt"
+        else:
+            path = Path(path)
+
+        if not path.exists():
+            print(f"No checkpoint found at {path}")
+            return None
+
+        print(f"📂 Loading checkpoint: {path}")
+        checkpoint = torch.load(path, weights_only=False)
+
+        model.load_state_dict(checkpoint['model_state_dict'])
+        if checkpoint['optimizer_state_dict'] is not None:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if scaler is not None and 'scaler_state_dict' in checkpoint:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+
+        print(f"✅ Resumed from epoch {checkpoint['epoch']}, loss: {checkpoint['loss']:.4f}")
+        return checkpoint
 
 
 class EarlyStopping:
@@ -202,7 +341,7 @@ class BaseTrainer(Trainer):
                             token_time=token_time,
                         )
                         loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
-                        loss = loss / self.gradient_accumulation_steps
+                    loss = loss / self.gradient_accumulation_steps
                 else:
                     logits = model(
                         input_ids=masked_input_ids,

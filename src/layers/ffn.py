@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -13,7 +14,11 @@ class FFNSwiGLUBlock(nn.Module):
         gate_output = self.linear_gate(x)
         up_output = self.linear_up(x)
         activated_gate = F.silu(gate_output)
-        return self.linear_down(activated_gate * up_output)
+        # Compute multiplication in FP32 to avoid FP16 overflow
+        # Two large FP16 values multiplied can exceed FP16 max (~65504)
+        original_dtype = x.dtype
+        hidden = (activated_gate.float() * up_output.float()).to(original_dtype)
+        return self.linear_down(hidden)
 
 
 class FFNLUBlock(nn.Module):

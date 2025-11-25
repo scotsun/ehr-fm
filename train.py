@@ -20,7 +20,7 @@ from tqdm import tqdm
 from src.tokenizer import get_tokenizer
 from src.utils.data_utils import EHRDataset
 from src.fm import FMConfig, FMBase
-from src.trainer import BaseTrainer, EarlyStopping
+from src.trainer import BaseTrainer, EarlyStopping, CheckpointManager
 
 def parse_args():
     parser = argparse.ArgumentParser(description="HAT Model Training")
@@ -79,6 +79,14 @@ def parse_args():
                        help="Enable MLflow tracking (default: False)")
     parser.add_argument("--use_amp", action="store_true",
                        help="Enable Automatic Mixed Precision (AMP) for faster training (default: False)")
+
+    # ========================================================================
+    # CHECKPOINT PARAMETERS - For Slurm job recovery
+    # ========================================================================
+    parser.add_argument("--start_saving_after", type=int, default=5,
+                       help="Start saving checkpoints after N epochs (default: 5)")
+    parser.add_argument("--resume_from", type=str, default=None,
+                       help="Path to checkpoint to resume from (default: auto-detect latest)")
 
     return parser.parse_args()
 
@@ -303,11 +311,12 @@ def main():
     
     # Trainer
     use_encounter = (args.masking_strategy == "encounter")
-    
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
+
     trainer = BaseTrainer(
         model=model,
         tokenizer=tokenizer,
-        optimizer=torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01),
+        optimizer=optimizer,
         criterion=nn.CrossEntropyLoss(ignore_index=-100),
         early_stopping=EarlyStopping(patience=args.patience, min_delta=0.001, mode="min", use_mlflow=args.use_mlflow),
         verbose_period=1,
@@ -321,6 +330,28 @@ def main():
         max_grad_norm=args.max_grad_norm,
         use_amp=args.use_amp
     )
+
+    # Setup checkpoint manager for Slurm graceful shutdown
+    ckpt_manager = CheckpointManager(
+        checkpoint_dir=args.output_dir,
+        start_saving_after=args.start_saving_after,
+        keep_last_n=3
+    )
+    ckpt_manager.register_model(model, optimizer, trainer.scaler)
+
+    # Resume from checkpoint if exists
+    start_epoch = 0
+    if args.resume_from:
+        ckpt = ckpt_manager.load_checkpoint(model, optimizer, trainer.scaler, args.resume_from)
+        if ckpt:
+            start_epoch = ckpt['epoch'] + 1
+    else:
+        # Auto-detect latest checkpoint
+        latest_ckpt = Path(args.output_dir) / "latest_checkpoint.pt"
+        if latest_ckpt.exists():
+            ckpt = ckpt_manager.load_checkpoint(model, optimizer, trainer.scaler)
+            if ckpt:
+                start_epoch = ckpt['epoch'] + 1
 
     print(f"Masking strategy: {args.masking_strategy}")
     if use_encounter:
@@ -363,9 +394,42 @@ def main():
     # Training
     print("="*80)
     print("Training...")
+    if start_epoch > 0:
+        print(f"Resuming from epoch {start_epoch}")
     print("="*80)
-    
-    trainer.fit(epochs=args.num_epochs, train_loader=train_loader, valid_loader=val_loader)
+
+    # Custom training loop with checkpoint saving
+    best_val_loss = float('inf')
+    for epoch in range(start_epoch, args.num_epochs):
+        ckpt_manager.update_epoch(epoch, best_val_loss)
+
+        # Train one epoch
+        trainer._train(train_loader, verbose=True, epoch_id=epoch)
+
+        # Validate
+        val_loss = trainer.evaluate(val_loader, verbose=True, epoch_id=epoch)
+        if args.use_mlflow:
+            import mlflow
+            mlflow.log_metrics({"val_mlm_loss": val_loss}, step=epoch)
+
+        # Check if best model
+        is_best = val_loss < best_val_loss
+        if is_best:
+            best_val_loss = val_loss
+
+        # Save checkpoint periodically or if best
+        if ckpt_manager.should_save(epoch) or is_best:
+            ckpt_manager.save_checkpoint(
+                model, optimizer, epoch, val_loss,
+                scaler=trainer.scaler, is_best=is_best
+            )
+
+        # Early stopping
+        if trainer.early_stopping:
+            trainer.early_stopping.step(val_loss, model)
+            if trainer.early_stopping.early_stop:
+                print(f"Early stopping triggered at epoch {epoch}")
+                break
     
     # Test
     print("\n" + "="*80)
