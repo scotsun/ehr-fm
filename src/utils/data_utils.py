@@ -86,7 +86,7 @@ class SeqSet(Dataset):
 
         _seq_id_data["t"] = self.time_operation(_seq_id_data)
 
-        _grouped = _seq_id_data.groupby(self.set_id_col)
+        _grouped = _seq_id_data.groupby("t")
         _tokens = [_set_tokens.to_list() for _, _set_tokens in _grouped[self.token_col]]
         if self.val_col is not None:
             _vs = [
