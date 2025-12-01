@@ -203,6 +203,7 @@ class BaseTrainer(Trainer):
         with tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose) as bar:
             bar.set_description(f"Epoch {epoch_id}")
             for batch_id, batch in enumerate(bar):
+                optimizer.zero_grad()
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 set_attention_mask = batch["set_attention_mask"].to(device)
