@@ -2,6 +2,11 @@ dataset:
     root: "dataset/instacart/data"
     max_seq: 64
     max_set_size: 32
+    seq_id_col: "user_id"
+    set_id_col: "order_number"
+    token_col: "product_id"
+    val_col: null
+    addtitional_cols: ["t"]
 trainer:
     lr: 0.00005
     batch_size: 8
