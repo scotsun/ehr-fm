@@ -126,7 +126,7 @@ class Trainer(ABC):
             mlflow.pytorch.log_model(
                 model_to_log,
                 "best_model",
-                pip_requirements=["torch==2.7.1+cu128"],
+                pip_requirements=["torch>=2.5"],
                 signature=self.model_signature,
             )
             print("[INFO]: logged model")
