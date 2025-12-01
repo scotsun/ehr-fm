@@ -15,7 +15,7 @@ class MultiHeadAttentionBlock(nn.Module):
         self.h = h
         self.with_rope = with_rope
 
-        assert d_model % h == 0, "d_model must be divisible by h"
+        assert d_model % h == 0, f"d_model {d_model} must be divisible by h {h}"
         self.d_k = d_model // h  # dimension of each head
         self.w_q = nn.Linear(d_model, d_model, bias=False)
         self.w_k = nn.Linear(d_model, d_model, bias=False)

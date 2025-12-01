@@ -46,6 +46,7 @@ def get_tokenizer(config) -> Tokenizer:
         tokenizer.pre_tokenizer = Split(pattern=";", behavior="removed")
         tokenizer.enable_padding(pad_id=PAD_ID, pad_token=PAD_TOKEN)
         trainer = WordLevelTrainer(
+            vocab_size=config["vocab_size"],
             special_tokens=SPECIAL_TOKENS,
             min_frequency=config["min_frequency"],
             show_progress=True,
@@ -73,5 +74,5 @@ def get_batch_encoding(tk: Tokenizer, records: list[list[str]]) -> torch.Tensor:
         list(map(lambda elem: elem.ids, encoding)),
         dtype=torch.int64,
     )
-    attention_mask = (input_ids != 0).to(torch.int64)
+    attention_mask = (input_ids != 0).to(torch.bool)
     return {"input_ids": input_ids, "attention_mask": attention_mask}

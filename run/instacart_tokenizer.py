@@ -9,6 +9,7 @@ from src.tokenizer import get_tokenizer
 
 def main():
     config = {
+        "vocab_size": 45000,
         "tokenizer_path": "./dataset/instacart/data/tk.json",
         "min_frequency": 5,
         "data_folder": "./dataset/instacart/data/instacart.parquet",

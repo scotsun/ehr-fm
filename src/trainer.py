@@ -16,7 +16,7 @@ from tokenizers import Tokenizer
 from tqdm import tqdm
 
 from src.utils.data_utils import random_masking
-from src.fm import FMBase
+from src.models.base import FMBase
 from src.metric import topk_accuracy
 
 
@@ -174,7 +174,7 @@ class Trainer(ABC):
 class BaseTrainer(Trainer):
     def __init__(
         self,
-        model: FMBase,
+        model: FMBase | DDP,
         tokenizer: Tokenizer,
         optimizer: Optimizer,
         criterions: dict[str, nn.Module],
@@ -222,7 +222,8 @@ class BaseTrainer(Trainer):
                     )
 
                     loss = criterions["cross_entropy"](
-                        logits.view(-1, logits.size(-1), labels.view(-1))
+                        logits.view(-1, logits.size(-1)),
+                        labels.view(-1),
                     )
 
                 scaler.scale(loss).backward()
