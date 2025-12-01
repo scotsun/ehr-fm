@@ -292,7 +292,12 @@ class BaseTrainer(Trainer):
         """
         val_mlm, val_top1, val_top10 = self.evaluate(dataloader, verbose)
         if verbose:
-            print(f"epoch {epoch_id}/val_mlm_loss: {round(val_mlm, 3)}")
+            print(
+                f"epoch {epoch_id}/val_mlm_loss: {round(val_mlm, 3)}/"
+                f"val_top1_acc: {round(val_top1, 3)}/"
+                f"val_top10_acc: {round(val_top10, 3)}"
+            )
+
         valid_metrics = {
             "callback_metric": val_mlm,
             "logged_metrics": {
