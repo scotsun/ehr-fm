@@ -12,8 +12,8 @@ def main():
         "vocab_size": 45000,
         "tokenizer_path": "./dataset/instacart/data/tk.json",
         "min_frequency": 5,
-        "data_folder": "./dataset/instacart/data/instacart.parquet",
-        "metadata_file_path": "./dataset/instacart/data/metadata.csv",
+        "data_folder": "/hpc/group/engelhardlab/ms1008/instacart/instacart.parquet",
+        "metadata_file_path": "/hpc/group/engelhardlab/ms1008/instacart/metadata.csv",
         "max_worker": 10,
         "token_col": "product_id",
     }
