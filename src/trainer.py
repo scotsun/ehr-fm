@@ -149,7 +149,7 @@ class Trainer(ABC):
                     mlflow.log_metrics(valid_metrics["logged_metrics"], step=epoch)
                     if self.early_stopping:
                         self.early_stopping.step(
-                            valid_metrics["logged_metrics"], self.model, epoch
+                            valid_metrics["callback_metric"], self.model, epoch
                         )
             stop = self.early_stopping.listen_to_broadcast(self.device)
             if stop:
