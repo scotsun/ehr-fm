@@ -125,7 +125,7 @@ class Trainer(ABC):
                 model_to_log.load_state_dict(self.early_stopping.best_model_state)
             mlflow.pytorch.log_model(
                 model_to_log,
-                "best_model",
+                name="best_model",
                 pip_requirements=["torch>=2.5"],
                 signature=self.model_signature,
             )
