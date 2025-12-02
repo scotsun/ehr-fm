@@ -1,10 +1,14 @@
 # todo:
-- [ ] add dataset util
-- [ ] add rope
 - [ ] allow attention retrieval from transformer layer
+- [ ] add multiset loss
 
 
+## mlflow cmd
 
+```
+mlflow ui --host 0.0.0.0 --port 5000
+ssh -L 5000:localhost:5000 youruser@remote.host
+```
 
 ## attention retrieval sudo code
 
