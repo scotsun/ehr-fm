@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from src.utils.data_utils import random_masking
 from src.models.base import FMBase
-from src.metric import topk_accuracy
+from src.metric import topk_accuracy, recall_at_k, ndcg_at_k
 
 
 class EarlyStopping:
@@ -247,8 +247,10 @@ class BaseTrainer(Trainer):
         criterions = self.criterions
         trainer_args = self.trainer_args
 
-        # total_num_batch, total_mlm, total_top1_acc, total_top10_acc = 0., 0., 0., 0.
-        counter = torch.zeros(4, device=device)
+        # total_mlm
+        # total_top1_acc, total_top10_acc
+        # total_recall@k, total_ndcg@k
+        counter = torch.zeros(5, device=device)
         with torch.no_grad():
             for batch in tqdm(
                 dataloader, unit="batch", mininterval=0, disable=not verbose
@@ -273,15 +275,20 @@ class BaseTrainer(Trainer):
                     )
                     top1_acc = topk_accuracy(logits, labels, 1)
                     top10_acc = topk_accuracy(logits, labels, 10)
-                counter[0] += 1
-                counter[1] += loss.item()
-                counter[2] += top1_acc.item()
-                counter[3] += top10_acc.item()
+                    recall10 = recall_at_k(logits, input_ids, set_attention_mask, 10)
+                    ndcg10 = ndcg_at_k(logits, input_ids, set_attention_mask, 10)
+                counter[0] += loss.item()
+                counter[1] += top1_acc.item()
+                counter[2] += top10_acc.item()
+                counter[3] += recall10.item()
+                counter[4] += ndcg10.item()
         dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
-            (counter[1] / counter[0]).item(),
-            (counter[2] / counter[0]).item(),
-            (counter[3] / counter[0]).item(),
+            (counter[0] / len(dataloader)).item(),
+            (counter[1] / len(dataloader)).item(),
+            (counter[2] / len(dataloader)).item(),
+            (counter[3] / len(dataloader)).item(),
+            (counter[4] / len(dataloader)).item(),
         )
 
     def _valid(self, dataloader, verbose, epoch_id):
@@ -293,12 +300,16 @@ class BaseTrainer(Trainer):
                 "logged_metrics": {...}
             }
         """
-        val_mlm, val_top1, val_top10 = self.evaluate(dataloader, verbose)
+        val_mlm, val_top1, val_top10, val_recall10, val_ndcg10 = self.evaluate(
+            dataloader, verbose
+        )
         if verbose:
             print(
                 f"epoch {epoch_id}/val_mlm_loss: {round(val_mlm, 3)}/"
                 f"val_top1_acc: {round(val_top1, 3)}/"
-                f"val_top10_acc: {round(val_top10, 3)}"
+                f"val_top10_acc: {round(val_top10, 3)}/"
+                f"val_recall@10: {round(val_recall10, 3)}/"
+                f"val_ndcg@10: {round(val_ndcg10, 3)}"
             )
 
         valid_metrics = {
@@ -307,6 +318,8 @@ class BaseTrainer(Trainer):
                 "val_mlm_loss": val_mlm,
                 "val_top1_acc": val_top1,
                 "val_top10_acc": val_top10,
+                "val_recall@10": val_recall10,
+                "val_ndcg@10": val_ndcg10,
             },
         }
         return valid_metrics
