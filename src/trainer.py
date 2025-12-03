@@ -118,14 +118,14 @@ class Trainer(ABC):
             not dist.is_available() or not dist.is_initialized() or dist.get_rank() == 0
         )
 
-    def log_best_model(self, model: nn.Module | DDP):
+    def log_model(self, model: nn.Module | DDP, model_name: str = "best_model"):
         if self._is_main_process():
             model_to_log = model.module if hasattr(model, "module") else model
             if self.early_stopping:
                 model_to_log.load_state_dict(self.early_stopping.best_model_state)
             mlflow.pytorch.log_model(
                 model_to_log,
-                name="best_model",
+                name=model_name,
                 pip_requirements=["torch>=2.5"],
                 signature=self.model_signature,
             )
@@ -152,10 +152,12 @@ class Trainer(ABC):
                             valid_metrics["callback_metric"], self.model, epoch
                         )
             stop = self.early_stopping.listen_to_broadcast(self.device)
+            if (epoch % 10) == 0:
+                self.log_model(self.model, model_name=f"epoch-{epoch}")
             if stop:
-                self.log_best_model(self.model)
+                self.log_model(self.model)
                 return
-        self.log_best_model(self.model)
+        self.log_model(self.model)
         return
 
     @abstractmethod
