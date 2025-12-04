@@ -233,7 +233,12 @@ class BaseTrainer(Trainer):
                 scaler.step(optimizer)
                 scaler.update()
 
-                bar.set_postfix(mlm_loss=float(loss))
+                recall10 = recall_at_k(logits, input_ids, set_attention_mask, 10)
+                ndcg10 = ndcg_at_k(logits, input_ids, set_attention_mask, 10)
+
+                bar.set_postfix(
+                    mlm_loss=float(loss), recall10=float(recall10), ndcg10=float(ndcg10)
+                )
 
                 cur_step = epoch_id * len(dataloader) + batch_id
                 if self._is_main_process() and cur_step % 100 == 0:
