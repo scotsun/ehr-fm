@@ -34,7 +34,7 @@ def recall_at_k(logits, input_ids, set_attention_mask, k=10):
     intersection_sets = p_sets & t_sets
     intersection_size = intersection_sets.sum(dim=-1)
 
-    return intersection_size / t_setsize
+    return (intersection_size / t_setsize).mean()
 
 
 def ndcg_at_k(logits, input_ids, set_attention_mask, k=10):
@@ -59,4 +59,4 @@ def ndcg_at_k(logits, input_ids, set_attention_mask, k=10):
     idcg_sums[1:] = torch.cumsum(terms, dim=0)
     idcg_at_k = idcg_sums[t_setsize]
 
-    return dcg_at_k / idcg_at_k
+    return (dcg_at_k / idcg_at_k).mean()
