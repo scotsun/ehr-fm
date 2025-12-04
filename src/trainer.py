@@ -318,8 +318,8 @@ class BaseTrainer(Trainer):
                 "val_mlm_loss": val_mlm,
                 "val_top1_acc": val_top1,
                 "val_top10_acc": val_top10,
-                "val_recall@10": val_recall10,
-                "val_ndcg@10": val_ndcg10,
+                "val_recall10": val_recall10,
+                "val_ndcg10": val_ndcg10,
             },
         }
         return valid_metrics
