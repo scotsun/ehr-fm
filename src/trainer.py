@@ -278,10 +278,12 @@ class BaseTrainer(Trainer):
                     loss = criterions["cross_entropy"](
                         logits.view(-1, logits.size(-1)), labels.view(-1)
                     )
-                    top1_acc = topk_accuracy(logits, labels, 1)
-                    top10_acc = topk_accuracy(logits, labels, 10)
-                    recall10 = recall_at_k(logits, input_ids, set_attention_mask, 10)
-                    ndcg10 = ndcg_at_k(logits, input_ids, set_attention_mask, 10)
+                top1_acc = topk_accuracy(logits, labels, 1)
+                top10_acc = topk_accuracy(logits, labels, 10)
+                recall10 = recall_at_k(logits, input_ids, set_attention_mask, 10)
+                ndcg10 = ndcg_at_k(logits, input_ids, set_attention_mask, 10)
+                if recall10.item() > 1:
+                    raise ValueError("!!!")
                 counter[0] += loss.item()
                 counter[1] += top1_acc.item()
                 counter[2] += top10_acc.item()
