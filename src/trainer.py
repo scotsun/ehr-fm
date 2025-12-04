@@ -283,9 +283,7 @@ class BaseTrainer(Trainer):
                 top10_acc = topk_accuracy(logits, labels, 10)
                 recall10 = recall_at_k(logits, input_ids, set_attention_mask, 10)
                 ndcg10 = ndcg_at_k(logits, input_ids, set_attention_mask, 10)
-                if recall10.item() > 1:
-                    print(recall10.item())
-                    raise ValueError("!!!")
+
                 counter[0] += 1
                 counter[1] += loss.item()
                 counter[2] += top1_acc.item()
