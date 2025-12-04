@@ -9,7 +9,7 @@ dataset:
     additional_cols: ["t"]
 trainer:
     lr: 0.00005
-    batch_size: 16
+    batch_size: 8
     epochs: 50
     split: [0.90, 0.10]
     early_stopping_patience: 5

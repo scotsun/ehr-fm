@@ -2,6 +2,9 @@
 - [ ] allow attention retrieval from transformer layer
 - [ ] add multiset loss
 
+```
+torchrun --nproc_per_node=1 run/instacart_fm.py --experiment-name fm-base
+```
 
 ## mlflow cmd
 
