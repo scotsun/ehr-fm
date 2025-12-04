@@ -252,10 +252,11 @@ class BaseTrainer(Trainer):
         criterions = self.criterions
         trainer_args = self.trainer_args
 
+        # num_batch
         # total_mlm
         # total_top1_acc, total_top10_acc
         # total_recall@k, total_ndcg@k
-        counter = torch.zeros(5, device=device)
+        counter = torch.zeros(6, device=device)
         with torch.no_grad():
             for batch in tqdm(
                 dataloader, unit="batch", mininterval=0, disable=not verbose
@@ -283,19 +284,21 @@ class BaseTrainer(Trainer):
                 recall10 = recall_at_k(logits, input_ids, set_attention_mask, 10)
                 ndcg10 = ndcg_at_k(logits, input_ids, set_attention_mask, 10)
                 if recall10.item() > 1:
+                    print(recall10.item())
                     raise ValueError("!!!")
-                counter[0] += loss.item()
-                counter[1] += top1_acc.item()
-                counter[2] += top10_acc.item()
-                counter[3] += recall10.item()
-                counter[4] += ndcg10.item()
+                counter[0] += 1
+                counter[1] += loss.item()
+                counter[2] += top1_acc.item()
+                counter[3] += top10_acc.item()
+                counter[4] += recall10.item()
+                counter[5] += ndcg10.item()
         dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
-            (counter[0] / len(dataloader)).item(),
-            (counter[1] / len(dataloader)).item(),
-            (counter[2] / len(dataloader)).item(),
-            (counter[3] / len(dataloader)).item(),
-            (counter[4] / len(dataloader)).item(),
+            (counter[1] / counter[0]).item(),
+            (counter[2] / counter[0]).item(),
+            (counter[3] / counter[0]).item(),
+            (counter[4] / counter[0]).item(),
+            (counter[5] / counter[0]).item(),
         )
 
     def _valid(self, dataloader, verbose, epoch_id):
