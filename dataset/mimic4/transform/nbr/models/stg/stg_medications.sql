@@ -5,33 +5,37 @@
 }}
 
 /*
-Staging: Medications
+Staging: Medications (ETHOS-aligned)
 
-Functions:
-- Add prefix 'MED:' to distinguish medications
-- **No deduplication**: Keep all medication records (including duplicates)
-- Sort and number by starttime
+Data Source: emar (actual administered medications)
+- NOT prescriptions (which is only used for drug→ATC mapping)
 
-ETHOS Strategy:
-- Input (X): Keep all medication events, learn medication frequency
-- Target (Y): Deduplicate by hadm_id during training (handled in Dataset)
+ETHOS Logic (preprocessors.py:363-391):
+1. Filter: event_txt = 'Administered' and medication is not null
+2. Map: medication → ATC code via drug_to_atc lookup table
+3. Time: charttime (actual administration time)
+4. Discard: medications without valid ATC mapping (inner join)
 
 Output:
-- Each row = one medication record
-- Includes precise starttime (second precision)
+- Each row = one administered medication
+- code format: MED:{atc_code}
+- Includes precise charttime
 */
 
-select 
-    subject_id,
-    hadm_id,
-    'MED:' || drug as code,
+select
+    e.subject_id,
+    e.hadm_id,
+    'MED:' || d.atc_code as code,
     'medication' as code_type,
-    starttime as event_time,  -- Medication start time (second precision)
+    e.charttime as event_time,
     row_number() over (
-        partition by subject_id, hadm_id 
-        order by starttime
+        partition by e.subject_id, e.hadm_id
+        order by e.charttime
     ) as seq_num
-from {{ source('main', 'raw_prescriptions') }}
-where drug is not null 
-    and hadm_id is not null
+from {{ source('main', 'raw_emar') }} e
+inner join {{ source('main', 'drug_to_atc') }} d
+    on e.medication = d.drug
+where e.event_txt = 'Administered'
+    and e.medication is not null
+    and e.hadm_id is not null
 

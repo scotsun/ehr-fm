@@ -2,6 +2,7 @@ from pathlib import Path
 
 DATA_PROJECT_ROOT = Path(__file__).parent.parent.parent
 RAW_DATA_DIR = DATA_PROJECT_ROOT / "data/raw_mimic4"
+MAPPING_DIR = DATA_PROJECT_ROOT / "data/mapping"
 EXPORT_DIR = DATA_PROJECT_ROOT / "data/mimic4_tokens.parquet"
 
 if __name__ == "__main__":

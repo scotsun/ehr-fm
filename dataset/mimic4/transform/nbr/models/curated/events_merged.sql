@@ -12,15 +12,15 @@ Functions:
 2. Calculate time offset (hours since admission)
 3. Global time sorting (ETHOS key feature)
 
-ETHOS Strategy:
-- All events sorted by actual occurrence time
-- No grouping by type
-- Preserve time information for subsequent TIME_BIN insertion
+Time Offset Strategy:
+- Diagnoses: event_time=NULL → time_offset_hours=-0.001h (before admission)
+- Other events: calculated from (event_time - admittime)
+- This ensures diagnosis codes appear first in the encounter sequence
 
 Output:
 - Each row = one event (diagnosis/procedure/lab/medication)
-- Sorted by subject_id, visit_seq, time
-- Includes time_offset_hours for TIME_BIN generation
+- Sorted by subject_id, visit_seq, time_offset_hours
+- time_offset_hours preserved for RoPE encoding
 */
 
 -- Step 1: Merge all events

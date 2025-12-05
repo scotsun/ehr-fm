@@ -9,7 +9,7 @@ Data Pipeline:
 
 import dagster as dg
 from dagster_duckdb import DuckDBResource
-from mimic4.constants import RAW_DATA_DIR, EXPORT_DIR
+from mimic4.constants import RAW_DATA_DIR, MAPPING_DIR, EXPORT_DIR
 
 
 # Step 1: Import raw tables to DuckDB
@@ -130,7 +130,258 @@ def raw_labevents(duckdb: DuckDBResource) -> None:
         )
 
 
-# Stage 1: Pre-computed tables (ETHOS Pipeline Foundation)
+@dg.asset(kinds={"duckdb"}, key=["main", "raw_emar"])
+def raw_emar(duckdb: DuckDBResource) -> None:
+    """
+    Import emar.csv to raw_emar table
+
+    Key fields:
+    - subject_id: Patient ID
+    - hadm_id: Hospital admission ID
+    - medication: Drug name (used for ATC mapping)
+    - charttime: Administration time
+    - event_txt: Event type (filter for 'Administered')
+    """
+    with duckdb.get_connection() as conn:
+        conn.execute(
+            f"""
+            create or replace table raw_emar as (
+                select * from read_csv_auto('{RAW_DATA_DIR}/emar.csv', ignore_errors=true)
+            )
+            """
+        )
+
+
+# Mapping tables for code translation
+@dg.asset(kinds={"duckdb"}, key=["main", "mapping_gsn_atc"])
+def mapping_gsn_atc(duckdb: DuckDBResource) -> None:
+    """
+    Import GSN to ATC mapping table
+
+    Source: gsn_atc_ndc_mapping.csv
+    Key fields:
+    - gsn: Generic Sequence Number
+    - atc: ATC code
+    """
+    with duckdb.get_connection() as conn:
+        conn.execute(
+            f"""
+            create or replace table mapping_gsn_atc as (
+                select
+                    cast(gsn as varchar) as gsn,
+                    cast(atc as varchar) as atc
+                from read_csv_auto('{MAPPING_DIR}/gsn_atc_ndc_mapping.csv')
+            )
+            """
+        )
+
+
+@dg.asset(kinds={"duckdb"}, key=["main", "mapping_icd_cm_9_to_10"])
+def mapping_icd_cm_9_to_10(duckdb: DuckDBResource) -> None:
+    """
+    Import ICD-CM (diagnosis) 9 to 10 mapping table
+
+    Source: icd_cm_9_to_10_mapping.csv
+    Key fields:
+    - icd_9: ICD-9 code
+    - icd_10: ICD-10 code
+
+    ETHOS strategy: When one ICD-9 maps to multiple ICD-10, take the shortest one
+    """
+    with duckdb.get_connection() as conn:
+        conn.execute(
+            f"""
+            create or replace table mapping_icd_cm_9_to_10 as (
+                select
+                    cast(icd_9 as varchar) as icd_9,
+                    cast(icd_10 as varchar) as icd_10
+                from read_csv_auto('{MAPPING_DIR}/icd_cm_9_to_10_mapping.csv')
+            )
+            """
+        )
+
+
+@dg.asset(kinds={"duckdb"}, key=["main", "mapping_icd_pcs_9_to_10"])
+def mapping_icd_pcs_9_to_10(duckdb: DuckDBResource) -> None:
+    """
+    Import ICD-PCS (procedure) 9 to 10 mapping table
+
+    Source: icd_pcs_9_to_10_mapping.csv
+    Key fields:
+    - icd_9: ICD-9 procedure code
+    - icd_10: ICD-10-PCS code
+
+    ETHOS strategy: When one ICD-9 maps to multiple ICD-10, take the shortest one
+    """
+    with duckdb.get_connection() as conn:
+        conn.execute(
+            f"""
+            create or replace table mapping_icd_pcs_9_to_10 as (
+                select
+                    cast(icd_9 as varchar) as icd_9,
+                    cast(icd_10 as varchar) as icd_10
+                from read_csv_auto('{MAPPING_DIR}/icd_pcs_9_to_10_mapping.csv')
+            )
+            """
+        )
+
+
+# Stage 1: Pre-computed lookup tables
+
+@dg.asset(
+    kinds={"duckdb"},
+    key=["main", "drug_to_atc"],
+    deps=[
+        dg.AssetKey(["main", "raw_prescriptions"]),
+        dg.AssetKey(["main", "mapping_gsn_atc"])
+    ]
+)
+def drug_to_atc(duckdb: DuckDBResource) -> None:
+    """
+    Build drug name to ATC code lookup table
+
+    ETHOS logic (code_translation.py:13-35):
+    1. From prescriptions, get (drug, gsn) pairs
+    2. GSN field may contain multiple space-separated codes -> split and explode
+    3. Map GSN to ATC via gsn_atc_ndc_mapping
+    4. drop_duplicates() then set_index('drug') -> last ATC wins for each drug
+    5. dropna() -> discard drugs without valid ATC mapping
+
+    Output:
+    - drug: Drug name (from prescriptions)
+    - atc_code: ATC code
+    """
+    with duckdb.get_connection() as conn:
+        print("Building drug_to_atc lookup table...")
+        conn.execute("""
+            create or replace table drug_to_atc as
+            with drug_gsn as (
+                -- Step 1-2: Get drug-gsn pairs, split multiple GSNs
+                select distinct
+                    drug,
+                    trim(unnest(string_split(cast(gsn as varchar), ' '))) as gsn
+                from raw_prescriptions
+                where drug is not null
+                    and gsn is not null
+            ),
+            drug_atc_all as (
+                -- Step 3: Map GSN to ATC
+                select
+                    dg.drug,
+                    m.atc as atc_code
+                from drug_gsn dg
+                join mapping_gsn_atc m on dg.gsn = m.gsn
+                where m.atc is not null
+            ),
+            drug_atc_dedup as (
+                -- Step 4: Deduplicate - keep last occurrence per drug
+                -- (simulates pandas set_index behavior)
+                select
+                    drug,
+                    atc_code,
+                    row_number() over (partition by drug order by atc_code desc) as rn
+                from (select distinct drug, atc_code from drug_atc_all)
+            )
+            -- Step 5: Final lookup table
+            select drug, atc_code
+            from drug_atc_dedup
+            where rn = 1
+        """)
+
+        # Validation
+        result = conn.execute("select count(*) from drug_to_atc").fetchone()[0]
+        print(f"✅ drug_to_atc lookup table created")
+        print(f"   Unique drugs with ATC mapping: {result}")
+
+
+@dg.asset(
+    kinds={"duckdb"},
+    key=["main", "icd_cm_9_to_10"],
+    deps=[dg.AssetKey(["main", "mapping_icd_cm_9_to_10"])]
+)
+def icd_cm_9_to_10(duckdb: DuckDBResource) -> None:
+    """
+    Build ICD-CM (diagnosis) 9 to 10 lookup table
+
+    ETHOS logic (translation_base.py:144-150):
+    1. Load mapping file
+    2. drop_duplicates(subset='icd_9')
+    3. groupby('icd_9').icd_10.apply(lambda v: min(v, key=len))
+       -> When one ICD-9 maps to multiple ICD-10, take the SHORTEST one
+
+    Output:
+    - icd_9: ICD-9 diagnosis code
+    - icd_10: ICD-10 diagnosis code (shortest if multiple)
+    """
+    with duckdb.get_connection() as conn:
+        print("Building icd_cm_9_to_10 lookup table...")
+        conn.execute("""
+            create or replace table icd_cm_9_to_10 as
+            with ranked as (
+                select
+                    icd_9,
+                    icd_10,
+                    row_number() over (
+                        partition by icd_9
+                        order by length(icd_10), icd_10
+                    ) as rn
+                from mapping_icd_cm_9_to_10
+                where icd_9 is not null and icd_10 is not null
+            )
+            select icd_9, icd_10
+            from ranked
+            where rn = 1
+        """)
+
+        # Validation
+        result = conn.execute("select count(*) from icd_cm_9_to_10").fetchone()[0]
+        print(f"✅ icd_cm_9_to_10 lookup table created")
+        print(f"   Unique ICD-9 codes: {result}")
+
+
+@dg.asset(
+    kinds={"duckdb"},
+    key=["main", "icd_pcs_9_to_10"],
+    deps=[dg.AssetKey(["main", "mapping_icd_pcs_9_to_10"])]
+)
+def icd_pcs_9_to_10(duckdb: DuckDBResource) -> None:
+    """
+    Build ICD-PCS (procedure) 9 to 10 lookup table
+
+    ETHOS logic (translation_base.py:144-150):
+    Same as ICD-CM - when one ICD-9 maps to multiple ICD-10, take the SHORTEST one
+
+    Output:
+    - icd_9: ICD-9 procedure code
+    - icd_10: ICD-10-PCS code (shortest if multiple)
+    """
+    with duckdb.get_connection() as conn:
+        print("Building icd_pcs_9_to_10 lookup table...")
+        conn.execute("""
+            create or replace table icd_pcs_9_to_10 as
+            with ranked as (
+                select
+                    icd_9,
+                    icd_10,
+                    row_number() over (
+                        partition by icd_9
+                        order by length(icd_10), icd_10
+                    ) as rn
+                from mapping_icd_pcs_9_to_10
+                where icd_9 is not null and icd_10 is not null
+            )
+            select icd_9, icd_10
+            from ranked
+            where rn = 1
+        """)
+
+        # Validation
+        result = conn.execute("select count(*) from icd_pcs_9_to_10").fetchone()[0]
+        print(f"✅ icd_pcs_9_to_10 lookup table created")
+        print(f"   Unique ICD-9 codes: {result}")
+
+
+# Stage 2: Pre-computed tables (Lab processing)
 @dg.asset(
     kinds={"duckdb"},
     key=["main", "top_200_labs"],
