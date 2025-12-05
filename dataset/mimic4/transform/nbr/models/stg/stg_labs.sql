@@ -6,22 +6,9 @@
 
 /*
 Staging: Lab Events (ETHOS-aligned)
-
-Functions:
-1. Top-200 filtering: Only keep the most common 200 lab types
-2. "Reclaim" strategy: Retrieve labs from 24 hours before admission (custom enhancement)
-3. Value binning: Q1-Q10 quantile discretization
-4. Filter out NULL values (ETHOS: df.valuenum.notna())
-
-ETHOS Strategy (preprocessors.py:394-438):
-- Each lab result becomes TWO tokens: LAB:{itemid} and _Q{1-10}
-- Both tokens share the same timestamp (will be flattened in events_merged)
-- NULL values are DISCARDED (not tokenized)
-
-Output:
-- Two rows per lab result (same charttime)
-- Row 1: code = LAB:{itemid}, code_type = 'lab'
-- Row 2: code = _Q{1-10}, code_type = 'lab_value'
+- Top-200 labs only, NULL values discarded
+- Reclaims labs from 24h before admission (custom enhancement)
+- Output: Two tokens per lab (LAB:{itemid} + _Q{1-10})
 */
 
 -- Step 1: Extend lab data (original + reclaimed)

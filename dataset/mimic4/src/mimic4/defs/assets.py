@@ -434,22 +434,22 @@ def top_200_labs(duckdb: DuckDBResource) -> None:
 def lab_quantiles(duckdb: DuckDBResource) -> None:
     """
     Calculate quantiles for Top-200 labs (Q1-Q10, ETHOS method)
-    
-    Strategy:
-    - Sample 10% of data for calculation (performance optimization, still accurate)
+
+    Strategy (ETHOS-aligned):
+    - Use 100% of data for accurate quantile calculation
     - Only calculate records with values (valuenum is not null)
     - Calculate 9 quantile points (0.1, 0.2, ..., 0.9) for each itemid
-    
+
     Output table structure:
     - itemid: Lab item ID
     - q1-q9: 9 quantile thresholds
-    
+
     Usage:
     - Convert continuous values to Q1-Q10 discrete categories
     - Example: glucose=95 → LAB:50931_Q5 (medium level)
     """
     with duckdb.get_connection() as conn:
-        print("Calculating quantiles (10% sample, estimated 10-20 minutes)...")
+        print("Calculating quantiles (100% data, ETHOS-aligned)...")
         
         conn.execute("""
             create or replace table lab_quantiles as
@@ -464,13 +464,9 @@ def lab_quantiles(duckdb: DuckDBResource) -> None:
                 quantile_cont(valuenum, 0.7) as q7,
                 quantile_cont(valuenum, 0.8) as q8,
                 quantile_cont(valuenum, 0.9) as q9
-            from (
-                select itemid, valuenum
-                from raw_labevents
-                where valuenum is not null
-                    and itemid in (select itemid from top_200_labs)
-                using sample 10%
-            )
+            from raw_labevents
+            where valuenum is not null
+                and itemid in (select itemid from top_200_labs)
             group by itemid
         """)
         
@@ -500,27 +496,24 @@ def lab_quantiles(duckdb: DuckDBResource) -> None:
     kinds={"duckdb"},
     key=["main", "export_tokens"],
     deps=[
-        dg.AssetKey(["main", "tokens_final"]),  # Stage 2: includes TIME_BIN
+        dg.AssetKey(["main", "tokens"]),
     ],
 )
 def export_tokens(duckdb: DuckDBResource) -> None:
     """
     Export final tokens table as subject_id partitioned Parquet files
-    
-    Stage 1 output structure (events_merged):
+
+    Output structure:
     - subject_id: Patient ID (partition key)
     - hadm_id: Hospital admission ID
     - admittime: Admission time
     - visit_seq: Visit sequence
-    - days_since_prior_admission: Relative time (Dataset will cumsum)
-    - code: Unified code (DX:/PR:/LAB:itemid_Q5/MED:)
-    - code_type: Type
-    - event_time: Event timestamp
-    - time_offset_hours: Hours since admission
-    - event_seq: Global sequence (time-sorted)
-    
-    Stage 2 will include:
-    - TIME_BIN tokens (TIME_0-1H, TIME_1-6H, etc.)
+    - days_since_prior_admission: Relative time
+    - code: Unified code (DX:/PR:/LAB:{itemid}/MED:{atc})
+    - code_type: Type (diagnosis/procedure/lab/lab_value/medication)
+    - event_time: Event timestamp (NULL for diagnoses)
+    - time_offset_hours: Hours since admission (for RoPE encoding)
+    - final_seq: Global sequence (time-sorted)
     """
     with duckdb.get_connection() as conn:
         conn.execute("SET preserve_insertion_order = false;")
@@ -528,7 +521,7 @@ def export_tokens(duckdb: DuckDBResource) -> None:
             f"""
             COPY (
                 select *
-                from tokens_final
+                from tokens
                 order by subject_id, visit_seq, final_seq
             )
             TO '{str(EXPORT_DIR)}'

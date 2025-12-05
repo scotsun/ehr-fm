@@ -6,21 +6,9 @@
 
 /*
 Curated: Events Merged
-
-Functions:
-1. Merge 4 types of events (DX + PR + LAB + MED)
-2. Calculate time offset (hours since admission)
-3. Global time sorting (ETHOS key feature)
-
-Time Offset Strategy:
-- Diagnoses: event_time=NULL → time_offset_hours=-0.001h (before admission)
-- Other events: calculated from (event_time - admittime)
-- This ensures diagnosis codes appear first in the encounter sequence
-
-Output:
-- Each row = one event (diagnosis/procedure/lab/medication)
-- Sorted by subject_id, visit_seq, time_offset_hours
-- time_offset_hours preserved for RoPE encoding
+- Merges DX + PR + LAB + MED events
+- Calculates time_offset_hours (diagnoses: -0.001h to appear first)
+- Global time sorting for RoPE encoding
 */
 
 -- Step 1: Merge all events

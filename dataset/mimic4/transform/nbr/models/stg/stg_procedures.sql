@@ -6,19 +6,8 @@
 
 /*
 Staging: Procedures (ETHOS-aligned)
-
-ETHOS Logic (preprocessors.py:313-339):
-1. Check icd_version: if 9, convert to ICD-10-PCS
-2. Time: use chartdate (procedure date)
-3. Preserve seq_num for procedure priority
-
-ICD-9 to ICD-10 conversion (translation_base.py:144-150):
-- When one ICD-9 maps to multiple ICD-10, take the SHORTEST one
-
-Output:
-- Each row = one procedure code (ICD-10-PCS)
-- code format: PR:{icd10_code}
-- event_time = chartdate
+- Converts ICD-9 to ICD-10-PCS (shortest match when multiple)
+- Output: PR:{icd10_code} with chartdate
 */
 
 with procedures_raw as (

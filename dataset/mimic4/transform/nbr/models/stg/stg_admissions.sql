@@ -6,14 +6,7 @@
 
 /*
 Staging: Admissions
-
-Functions:
-- Calculate visit sequence (visit_seq)
-- Calculate days since last admission (days_since_prior_admission)
-
-Output:
-- Each row = one admission
-- Includes patient ID, admission ID, time features
+- Calculates visit_seq and days_since_prior_admission
 */
 
 select 

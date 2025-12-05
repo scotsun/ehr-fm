@@ -6,23 +6,9 @@
 
 /*
 Staging: Diagnoses (ETHOS-aligned)
-
-ETHOS Logic (preprocessors.py:270-310):
-1. Check icd_version: if 9, convert to ICD-10
-2. Preserve seq_num for diagnosis priority
-
-ICD-9 to ICD-10 conversion (translation_base.py:144-150):
-- When one ICD-9 maps to multiple ICD-10, take the SHORTEST one
-
-Custom Design:
-- event_time = NULL (diagnosis has no actual timestamp in MIMIC-IV)
-- events_merged.sql assigns time_offset_hours = -0.001h
-- This ensures diagnoses appear BEFORE other admission events
-
-Output:
-- Each row = one diagnosis code (ICD-10)
-- code format: DX:{icd10_code}
-- event_time = NULL
+- Converts ICD-9 to ICD-10 (shortest match when multiple)
+- event_time = NULL (placed at -0.001h in events_merged)
+- Output: DX:{icd10_code}
 */
 
 with diagnoses_raw as (
@@ -50,21 +36,9 @@ diagnoses_converted as (
     from diagnoses_raw dr
     left join {{ source('main', 'icd_cm_9_to_10') }} m
         on dr.icd_version = 9 and dr.icd_code = m.icd_9
-),
-
--- Join with admissions to validate hadm_id exists
-diagnoses_validated as (
-    select
-        dc.subject_id,
-        dc.hadm_id,
-        dc.icd_code,
-        dc.seq_num
-    from diagnoses_converted dc
-    join {{ ref('stg_admissions') }} a
-        on dc.hadm_id = a.hadm_id
-    where dc.icd_code is not null  -- Drop diagnoses where ICD-9 couldn't be converted
 )
 
+-- Final output (hadm_id validation done in events_merged.sql)
 select
     subject_id,
     hadm_id,
@@ -72,5 +46,6 @@ select
     'diagnosis' as code_type,
     cast(null as timestamp) as event_time,  -- No actual timestamp, will be -0.001h
     seq_num
-from diagnoses_validated
+from diagnoses_converted
+where icd_code is not null  -- Drop diagnoses where ICD-9 couldn't be converted
 

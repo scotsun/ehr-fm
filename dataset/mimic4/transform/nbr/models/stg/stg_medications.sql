@@ -6,20 +6,9 @@
 
 /*
 Staging: Medications (ETHOS-aligned)
-
-Data Source: emar (actual administered medications)
-- NOT prescriptions (which is only used for drug→ATC mapping)
-
-ETHOS Logic (preprocessors.py:363-391):
-1. Filter: event_txt = 'Administered' and medication is not null
-2. Map: medication → ATC code via drug_to_atc lookup table
-3. Time: charttime (actual administration time)
-4. Discard: medications without valid ATC mapping (inner join)
-
-Output:
-- Each row = one administered medication
-- code format: MED:{atc_code}
-- Includes precise charttime
+- Source: emar (administered meds), NOT prescriptions
+- Maps medication name to ATC code
+- Output: MED:{atc_code} with charttime
 */
 
 select
