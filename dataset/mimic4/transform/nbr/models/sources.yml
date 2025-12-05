@@ -6,7 +6,10 @@ sources:
       - name: raw_prescriptions
       - name: raw_procedures_icd
       - name: raw_labevents
+      - name: raw_emar
       - name: top_200_labs
       - name: lab_quantiles
-      - name: events_merged
+      - name: drug_to_atc
+      - name: icd_cm_9_to_10
+      - name: icd_pcs_9_to_10
 

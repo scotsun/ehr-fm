@@ -7,8 +7,10 @@
 /*
 Curated: Events Merged
 - Merges DX + PR + LAB + MED events
-- Calculates time_offset_hours (diagnoses: -0.001h to appear first)
-- Global time sorting for RoPE encoding
+- Time offset strategy:
+  - Diagnoses: -0.001h (first)
+  - Procedures before admission: 0.001h (after diagnoses)
+  - Others: actual time offset from admittime
 */
 
 -- Step 1: Merge all events
@@ -24,7 +26,7 @@ with all_events as (
 
 -- Step 2: Join admission info and calculate time offset
 events_with_time as (
-    select 
+    select
         a.subject_id,
         a.hadm_id,
         a.admittime,
@@ -34,14 +36,17 @@ events_with_time as (
         e.code_type,
         e.event_time,
         e.seq_num,
-        
+
         -- Calculate time offset (hours)
-        -- Strategy: diagnoses have no time, place at front (-0.001 hours)
-        case 
+        case
+            -- Diagnoses: no time, place first (-0.001h)
             when e.event_time is null then -0.001
+            -- Procedures before admission: place after diagnoses (0.001h)
+            when e.code_type = 'procedure' and e.event_time < a.admittime then 0.001
+            -- Others: actual time offset
             else extract(epoch from (e.event_time - a.admittime)) / 3600.0
         end as time_offset_hours
-        
+
     from {{ ref('stg_admissions') }} a
     join all_events e on a.hadm_id = e.hadm_id
 ),

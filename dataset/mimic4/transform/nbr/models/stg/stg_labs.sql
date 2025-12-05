@@ -8,7 +8,7 @@
 Staging: Lab Events (ETHOS-aligned)
 - Top-200 labs only, NULL values discarded
 - Reclaims labs from 24h before admission (custom enhancement)
-- Output: Two tokens per lab (LAB:{itemid} + _Q{1-10})
+- Output: Single token per lab: LAB:{itemid}_Q{1-10}
 */
 
 -- Step 1: Extend lab data (original + reclaimed)
@@ -69,15 +69,15 @@ labs_extended as (
     select * from labs_reclaimed
 ),
 
--- Step 2: Value binning (Q1-Q10)
--- Note: NULL values already filtered out in Step 1
+-- Step 2: Value binning and create single combined token
 labs_binned as (
     select
         l.subject_id,
         l.hadm_id,
         l.itemid,
         l.charttime,
-        case
+        -- Combined token: LAB:{itemid}_Q{1-10}
+        'LAB:' || l.itemid || case
             when l.valuenum <= q.q1 then '_Q1'
             when l.valuenum <= q.q2 then '_Q2'
             when l.valuenum <= q.q3 then '_Q3'
@@ -88,54 +88,22 @@ labs_binned as (
             when l.valuenum <= q.q8 then '_Q8'
             when l.valuenum <= q.q9 then '_Q9'
             else '_Q10'
-        end as quantile_token
+        end as code
     from labs_extended l
     left join {{ source('main', 'lab_quantiles') }} q
         on l.itemid = q.itemid
-),
-
--- Step 3: Split into two tokens per lab
--- Token 1: LAB:{itemid}
-lab_tokens as (
-    select
-        subject_id,
-        hadm_id,
-        'LAB:' || itemid as code,
-        'lab' as code_type,
-        charttime as event_time,
-        1 as token_order  -- Lab name comes first
-    from labs_binned
-),
-
--- Token 2: _Q{1-10}
-quantile_tokens as (
-    select
-        subject_id,
-        hadm_id,
-        quantile_token as code,
-        'lab_value' as code_type,
-        charttime as event_time,
-        2 as token_order  -- Quantile comes second
-    from labs_binned
-),
-
--- Combine both tokens
-all_lab_tokens as (
-    select * from lab_tokens
-    union all
-    select * from quantile_tokens
 )
 
--- Final output with seq_num
+-- Final output
 select
     subject_id,
     hadm_id,
     code,
-    code_type,
-    event_time,
+    'lab' as code_type,
+    charttime as event_time,
     row_number() over (
         partition by subject_id, hadm_id
-        order by event_time, token_order
+        order by charttime
     ) as seq_num
-from all_lab_tokens
+from labs_binned
 
