@@ -5,10 +5,9 @@
 }}
 
 /*
-Staging: Medications (ETHOS-aligned)
-- Source: emar (administered meds), NOT prescriptions
-- Maps medication name to ATC code
-- Output: MED:{atc_code} with charttime
+Staging: Medications
+- Source: emar (administered meds)
+- Output: MED:{atc_code}
 */
 
 select
@@ -24,7 +23,11 @@ select
 from {{ source('main', 'raw_emar') }} e
 inner join {{ source('main', 'drug_to_atc') }} d
     on e.medication = d.drug
+inner join {{ ref('stg_admissions') }} a
+    on e.hadm_id = a.hadm_id
+    and e.subject_id = a.subject_id
 where e.event_txt = 'Administered'
     and e.medication is not null
     and e.hadm_id is not null
+    and e.charttime >= (a.admittime - interval '24 hours')
 

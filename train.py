@@ -46,10 +46,10 @@ def parse_args():
     # ========================================================================
     parser.add_argument("--d_model", type=int, default=768)
     parser.add_argument("--n_heads", type=int, default=12)
-    parser.add_argument("--n_blocks", type=int, default=6)
+    parser.add_argument("--n_blocks", type=int, default=8)
     parser.add_argument("--d_ff", type=int, default=3072)
-    parser.add_argument("--max_seg", type=int, default=16)
-    parser.add_argument("--max_seq_len", type=int, default=256)
+    parser.add_argument("--max_seg", type=int, default=8)
+    parser.add_argument("--max_seq_len", type=int, default=512)
     parser.add_argument("--swe_rope", type=lambda x: x.lower() == 'true', 
                        default=True,
                        help="Whether to use RoPE in SWE")

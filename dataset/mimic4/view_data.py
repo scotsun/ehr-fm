@@ -28,12 +28,14 @@ def load_patient_data(subject_id):
     """Load single patient data"""
     patient_dir = PARQUET_DIR / f"subject_id={subject_id}"
     parquet_file = patient_dir / "data_0.parquet"
-    
+
     if not parquet_file.exists():
         print(f"❌ Patient {subject_id} data does not exist")
         return None
-    
-    df = pd.read_parquet(parquet_file)
+
+    # Use ParquetFile to avoid schema inference issues
+    pf = pq.ParquetFile(parquet_file)
+    df = pf.read().to_pandas()
     return df
 
 def display_patient_summary(df, subject_id):
@@ -74,13 +76,12 @@ def display_patient_summary(df, subject_id):
         days_str = f"{row['days_since_prior']:.0f}" if pd.notna(row['days_since_prior']) else "N/A"
         print(f"{int(row['visit_seq']):>6} {str(row['admittime'])[:19]:>20} {days_str:>16} {int(row['n_events']):>8}")
     
-    # Check TIME_BIN and LAB binning
-    has_time_bin = (df['code_type'] == 'time_bin').any()
-    has_lab_binning = df[df['code_type'] == 'lab']['code'].str.contains('_Q\\d+|_NULL').any() if 'lab' in df['code_type'].values else False
-    
+    # Check LAB binning (format: LAB:{itemid}_Q{1-10})
+    lab_codes = df[df['code_type'] == 'lab']['code'] if 'lab' in df['code_type'].values else pd.Series()
+    has_lab_binning = lab_codes.str.contains('_Q\\d+').any() if len(lab_codes) > 0 else False
+
     print(f"\n✅ Data Quality Check:")
-    print(f"  - TIME_BIN tokens: {'✓' if has_time_bin else '✗'}")
-    print(f"  - LAB binning: {'✓' if has_lab_binning else '✗'}")
+    print(f"  - LAB quantile binning: {'✓' if has_lab_binning else '✗'}")
     
     return df
 

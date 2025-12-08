@@ -48,4 +48,5 @@ select
     seq_num
 from diagnoses_converted
 where icd_code is not null  -- Drop diagnoses where ICD-9 couldn't be converted
+    and icd_code != 'NoDx'  -- Exclude CMS GEM placeholder for unmappable ICD-9 codes
 

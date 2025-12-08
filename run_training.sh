@@ -2,9 +2,8 @@
 #SBATCH --job-name=hat_mimic4
 #SBATCH --output=logs/train_%j.log
 #SBATCH --error=logs/train_%j.err
-#SBATCH --partition=h200alloc
+#SBATCH --partition=h200ea
 #SBATCH --account=engelhardlab
-#SBATCH --qos=h200alloc-u
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=120G
@@ -15,7 +14,7 @@
 
 # ============================================================================
 # HAT Model Training - MIMIC-IV on H200 GPU (Optimized)
-# Context: max_seg=16, max_seq_len=256 (4,096 tokens/patient)
+# Context: max_seg=8, max_seq_len=512 (4,096 tokens/patient)
 # Effective batch size: 32 × 2 = 64 patients
 # Masking: Token-level (basic BERT-style)
 # Mixed Precision: AMP enabled (FP16 training for 2-3x speedup)
@@ -53,11 +52,11 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 echo ""
 
 echo "Training Configuration:"
-echo "  Context window: 16 segments × 256 tokens = 4,096 tokens/patient"
+echo "  Context window: 8 segments × 512 tokens = 4,096 tokens/patient"
 echo "  Batch size: 32 (real) × 2 (accumulation) = 64 (effective)"
 echo "  Masking strategy: token-level (15% mask probability)"
 echo "  Mixed Precision: AMP enabled (FP16)"
-echo "  Model: 6 layers, 768 dim, 12 heads"
+echo "  Model: 8 layers, 768 dim, 12 heads"
 echo "  Checkpoint: Save every epoch after epoch 5 (keep last 3)"
 echo "  Output: ${OUTPUT_DIR}"
 echo ""
@@ -72,11 +71,11 @@ python train.py \
     --token_mask_prob 0.15 \
     --d_model 768 \
     --n_heads 12 \
-    --n_blocks 6 \
+    --n_blocks 8 \
     --d_ff 3072 \
     --dropout 0.1 \
-    --max_seg 16 \
-    --max_seq_len 256 \
+    --max_seg 8 \
+    --max_seq_len 512 \
     --swe_rope True \
     --learning_rate 5e-5 \
     --patience 10 \
