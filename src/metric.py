@@ -1,7 +1,7 @@
 import torch
 
 
-def topk_accuracy(logits, labels, k=1):
+def topk_accuracy(logits: torch.Tensor, labels: torch.Tensor, k=1):
     masked_position = labels != -100
     if not masked_position.any():
         return 0.0
@@ -15,13 +15,31 @@ def topk_accuracy(logits, labels, k=1):
     return correct.float().mean()
 
 
-def recall_at_k(logits, input_ids, set_attention_mask, k=10):
-    device = logits.device
-    batch_size, vocab_size = logits.size(0), logits.size(-1)
-
+def pred_and_target_sets(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    set_attention_mask: torch.Tensor,
+    k: int,
+):
     last_set_id = set_attention_mask.sum(dim=1) - 1
     t_tokens = input_ids[range(len(last_set_id)), last_set_id, 1 : k + 1]
     p_tokens = logits[range(len(last_set_id)), last_set_id, 1 : k + 1].argmax(dim=-1)
+    # p_tokens = torch.topk(logits, k=k, dim=-1).indices[
+    #     range(len(last_set_id)), last_set_id, 1 : k + 1
+    # ]
+    return p_tokens, t_tokens
+
+
+def recall_at_k(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    set_attention_mask: torch.Tensor,
+    k=10,
+):
+    device = logits.device
+    batch_size, vocab_size = logits.size(0), logits.size(-1)
+
+    p_tokens, t_tokens = pred_and_target_sets(logits, input_ids, set_attention_mask, k)
     # (batch_size, k)
 
     t_setsize = (t_tokens > 3).sum(dim=-1)
@@ -38,12 +56,15 @@ def recall_at_k(logits, input_ids, set_attention_mask, k=10):
     return out[torch.isfinite(out)].mean()
 
 
-def ndcg_at_k(logits, input_ids, set_attention_mask, k=10):
+def ndcg_at_k(
+    logits: torch.Tensor,
+    input_ids: torch.Tensor,
+    set_attention_mask: torch.Tensor,
+    k=10,
+):
     device = logits.device
 
-    last_set_id = set_attention_mask.sum(dim=1) - 1
-    t_tokens = input_ids[range(len(last_set_id)), last_set_id, 1 : k + 1]
-    p_tokens = logits[range(len(last_set_id)), last_set_id, 1 : k + 1].argmax(dim=-1)
+    p_tokens, t_tokens = pred_and_target_sets(logits, input_ids, set_attention_mask, k)
     # (batch_size, k)
 
     t_setsize = (t_tokens > 3).sum(dim=-1)

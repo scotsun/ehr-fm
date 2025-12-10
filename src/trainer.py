@@ -15,7 +15,7 @@ from mlflow.models import ModelSignature
 from tokenizers import Tokenizer
 from tqdm import tqdm
 
-from src.utils.data_utils import random_masking
+from src.utils.data_utils import random_masking, masking_last_set
 from src.models.base import FMBase
 from src.metric import topk_accuracy, recall_at_k, ndcg_at_k
 
@@ -212,7 +212,7 @@ class BaseTrainer(Trainer):
                 t = batch["t"].to(device)
 
                 masked_input_ids, labels = random_masking(
-                    input_ids, self.tokenizer, trainer_args["mlm_probability"]
+                    input_ids.clone(), self.tokenizer, trainer_args["mlm_probability"]
                 )
                 if (labels == -100).all():
                     continue
@@ -233,19 +233,14 @@ class BaseTrainer(Trainer):
                 scaler.step(optimizer)
                 scaler.update()
 
-                recall10 = recall_at_k(logits, input_ids, set_attention_mask, 10)
-                ndcg10 = ndcg_at_k(logits, input_ids, set_attention_mask, 10)
-
-                bar.set_postfix(
-                    mlm_loss=float(loss), recall10=float(recall10), ndcg10=float(ndcg10)
-                )
+                bar.set_postfix(mlm_loss=float(loss))
 
                 cur_step = epoch_id * len(dataloader) + batch_id
                 if self._is_main_process() and cur_step % 100 == 0:
                     mlflow.log_metrics({"train_mlm_loss": float(loss)}, step=cur_step)
         return
 
-    def evaluate(self, dataloader: DataLoader, verbose: bool) -> float:
+    def evaluate(self, dataloader: DataLoader, verbose: bool) -> torch.Tensor:
         model: FMBase = self.model
         model.eval()
         device = self.device
@@ -266,12 +261,21 @@ class BaseTrainer(Trainer):
                 set_attention_mask = batch["set_attention_mask"].to(device)
                 t = batch["t"].to(device)
 
+                masked_last_set_input_ids = masking_last_set(
+                    input_ids.clone(), set_attention_mask, self.tokenizer
+                )
                 masked_input_ids, labels = random_masking(
-                    input_ids, self.tokenizer, trainer_args["mlm_probability"]
+                    input_ids.clone(), self.tokenizer, trainer_args["mlm_probability"]
                 )
                 with autocast(device_type="cuda", dtype=torch.float16):
                     logits, _ = model(
                         input_ids=masked_input_ids,
+                        attention_mask=attention_mask,
+                        set_attention_mask=set_attention_mask,
+                        t=t,
+                    )
+                    masked_last_set_logits, _ = model(
+                        input_ids=masked_last_set_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
@@ -281,15 +285,20 @@ class BaseTrainer(Trainer):
                     )
                 top1_acc = topk_accuracy(logits, labels, 1)
                 top10_acc = topk_accuracy(logits, labels, 10)
-                recall10 = recall_at_k(logits, input_ids, set_attention_mask, 10)
-                ndcg10 = ndcg_at_k(logits, input_ids, set_attention_mask, 10)
 
+                recall10 = recall_at_k(
+                    masked_last_set_logits, input_ids, set_attention_mask, 10
+                )
+                ndcg10 = ndcg_at_k(
+                    masked_last_set_logits, input_ids, set_attention_mask, 10
+                )
                 counter[0] += 1
                 counter[1] += loss.item()
                 counter[2] += top1_acc.item()
                 counter[3] += top10_acc.item()
                 counter[4] += recall10.item()
                 counter[5] += ndcg10.item()
+
         dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
             (counter[1] / counter[0]).item(),

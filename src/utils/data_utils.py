@@ -160,7 +160,41 @@ class SeqSet(Dataset):
         return torch.tensor(padded_list, dtype=torch.float32)
 
 
+def masking_last_set(
+    input_ids: torch.Tensor, set_attention_mask: torch.Tensor, tokenizer: Tokenizer
+):
+    """mask the last set in seq"""
+    last_set_id = set_attention_mask.sum(dim=1) - 1
+    input_ids[range(len(last_set_id)), last_set_id] = tokenizer.token_to_id("[MASK]")
+    input_ids[range(len(last_set_id)), last_set_id, 0] = tokenizer.token_to_id("[CLS]")
+    return input_ids
+
+
+def random_masking_set(
+    input_ids: torch.Tensor,
+    set_attention_mask: torch.Tensor,
+    tokenizer: Tokenizer,
+    mask_probability=0.3,
+):
+    """random masking set for set-level loss"""
+    labels = input_ids.clone()
+    device = input_ids.device
+
+    set_mask = set_attention_mask * (
+        torch.rand_like(set_attention_mask, dtype=torch.float32, device=device)
+        < mask_probability
+    )
+
+    labels[~set_mask.unsqueeze(2).repeat(1, 1, labels.shape[2]).bool()] = -100
+    input_ids[set_mask.unsqueeze(2).repeat(1, 1, input_ids.shape[2]).bool()] = (
+        tokenizer.token_to_id("[MASK]")
+    )
+
+    return input_ids, labels
+
+
 def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probability=0.15):
+    """random masking for token-level mlm"""
     labels = input_ids.clone()
     device = input_ids.device
 
