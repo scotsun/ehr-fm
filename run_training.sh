@@ -3,7 +3,7 @@
 #SBATCH --output=logs/train_%j.log
 #SBATCH --error=logs/train_%j.err
 #SBATCH --partition=h200ea
-#SBATCH --account=engelhardlab
+#SBATCH --account=h200ea
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=120G
@@ -15,7 +15,7 @@
 # ============================================================================
 # HAT Model Training - MIMIC-IV on H200 GPU (Optimized)
 # Context: max_seg=8, max_seq_len=512 (4,096 tokens/patient)
-# Effective batch size: 32 × 2 = 64 patients
+# Effective batch size: 24 × 2 = 48 patients
 # Masking: Token-level (basic BERT-style)
 # Mixed Precision: AMP enabled (FP16 training for 2-3x speedup)
 # ============================================================================
@@ -53,7 +53,7 @@ echo ""
 
 echo "Training Configuration:"
 echo "  Context window: 8 segments × 512 tokens = 4,096 tokens/patient"
-echo "  Batch size: 32 (real) × 2 (accumulation) = 64 (effective)"
+echo "  Batch size: 24 (real) × 2 (accumulation) = 48 (effective)"
 echo "  Masking strategy: token-level (15% mask probability)"
 echo "  Mixed Precision: AMP enabled (FP16)"
 echo "  Model: 8 layers, 768 dim, 12 heads"
@@ -65,7 +65,7 @@ echo ""
 python train.py \
     --data_path /hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet \
     --output_dir "${OUTPUT_DIR}" \
-    --batch_size 32 \
+    --batch_size 24 \
     --num_epochs 100 \
     --masking_strategy token \
     --token_mask_prob 0.15 \

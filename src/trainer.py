@@ -446,10 +446,10 @@ class BaseTrainer(Trainer):
         log all the metrics in mlflow;
         return the metric for save-best/early-stop.
         """
-        if verbose:
-            valid_mlm = self.evaluate(dataloader, verbose, epoch_id)
-            if self.use_mlflow:
-                mlflow.log_metrics({"val_mlm_loss": valid_mlm}, step=epoch_id)
+        # Always evaluate (needed for early stopping regardless of verbose)
+        valid_mlm = self.evaluate(dataloader, verbose, epoch_id)
+        if verbose and self.use_mlflow:
+            mlflow.log_metrics({"val_mlm_loss": valid_mlm}, step=epoch_id)
         if self.early_stopping:
             self.early_stopping.step(valid_mlm, self.model)
         return valid_mlm

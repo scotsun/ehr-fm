@@ -72,10 +72,16 @@ class FMTransformerEncoder(nn.Module):
                 for _ in range(config.n_blocks)
             ]
         )
+        # Final LayerNorm (required for Pre-Norm architecture)
+        if config.norm_type == "layer":
+            self.final_norm = nn.LayerNorm(config.d_model)
+        else:
+            self.final_norm = nn.RMSNorm(config.d_model)
 
     def forward(self, h, attention_mask, segment_attention_mask, segment_time=None, token_time=None):
         for block in self.blocks:
             h = block(h, attention_mask, segment_attention_mask, segment_time, token_time)
+        h = self.final_norm(h)
         return h
 
 

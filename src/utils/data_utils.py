@@ -288,7 +288,7 @@ def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probabilit
         & ~indices_replaced
     )
     random_words = torch.randint(
-        tokenizer.get_vocab_size(), labels.shape, dtype=torch.int64, device=device
+        4, tokenizer.get_vocab_size(), labels.shape, dtype=torch.int64, device=device
     )
     input_ids[indices_random] = random_words[indices_random]
 

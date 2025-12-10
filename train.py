@@ -174,7 +174,7 @@ def main():
             "tokenizer_path": str(Path(args.output_dir) / "tokenizer.json"),
             "patient_id_col": partition_col,
             "token_col": "code",
-            "min_frequency": 1,
+            "min_frequency": 5,
         })
         vocab_size = tokenizer.get_vocab_size()
         print(f"Vocab size: {vocab_size}\n")
@@ -229,7 +229,7 @@ def main():
             "tokenizer_path": str(Path(args.output_dir) / "tokenizer.json"),
             "patient_id_col": partition_col,
             "token_col": "code",
-            "min_frequency": 1,
+            "min_frequency": 5,
         })
         vocab_size = tokenizer.get_vocab_size()
         print(f"Vocab size: {vocab_size}\n")
