@@ -263,7 +263,7 @@ class BaseTrainer(Trainer):
         device: torch.device,
         local_rank: int,
         use_encounter_masking: bool = False,
-        encounter_mask_prob: float = 0.3,
+        encounter_mask_prob: float = 0.2,
         token_mask_prob: float = 0.15,
         use_mlflow: bool = True,
         gradient_accumulation_steps: int = 1,

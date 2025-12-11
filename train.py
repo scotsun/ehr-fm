@@ -58,7 +58,7 @@ def parse_args():
     # TRAINING PARAMETERS - Good defaults
     # ========================================================================
     parser.add_argument("--learning_rate", type=float, default=5e-5)
-    parser.add_argument("--encounter_mask_prob", type=float, default=0.3)
+    parser.add_argument("--encounter_mask_prob", type=float, default=0.2)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--dropout", type=float, default=0.1)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2,
