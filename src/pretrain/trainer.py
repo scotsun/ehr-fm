@@ -11,7 +11,7 @@ from tqdm import tqdm
 import mlflow
 from tokenizers import Tokenizer
 
-from src.utils.data_utils import random_masking
+from src.pretrain.data_utils import random_masking
 
 
 class CheckpointManager:
@@ -320,7 +320,7 @@ class BaseTrainer(Trainer):
 
                 # Use encounter masking or token masking
                 if self.use_encounter_masking:
-                    from src.utils.encounter_masking import encounter_masking
+                    from src.pretrain.masking import encounter_masking
                     masked_input_ids, labels, enc_mask = encounter_masking(
                         input_ids, segment_attention_mask, self.tokenizer, self.encounter_mask_prob
                     )
@@ -406,7 +406,7 @@ class BaseTrainer(Trainer):
 
                 # Use encounter masking or token masking
                 if self.use_encounter_masking:
-                    from src.utils.encounter_masking import encounter_masking
+                    from src.pretrain.masking import encounter_masking
                     masked_input_ids, labels, _ = encounter_masking(
                         input_ids, segment_attention_mask, self.tokenizer, self.encounter_mask_prob
                     )

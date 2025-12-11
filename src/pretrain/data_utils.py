@@ -1,4 +1,5 @@
 import torch
+import numpy as np
 from torch.utils.data import Dataset
 from tokenizers import Tokenizer
 from pathlib import Path
@@ -193,9 +194,6 @@ class EHRDataset(Dataset):
         Returns:
             torch.Tensor: Time feature tensor
         """
-        import torch
-        import numpy as np
-        
         # handle NaN/None (first visit/order)
         times_clean = [0.0 if (t is None or np.isnan(t)) else float(t) for t in times]
         
@@ -225,9 +223,6 @@ class EHRDataset(Dataset):
         Returns:
             torch.Tensor: shape (max_seg, max_seq_len)
         """
-        import torch
-        import numpy as np
-        
         # Truncate/pad segments
         if len(token_times_list) > self.max_seg:
             token_times_list = token_times_list[:self.max_seg]

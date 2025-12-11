@@ -18,9 +18,9 @@ import argparse
 from tqdm import tqdm
 
 from src.tokenizer import get_tokenizer
-from src.utils.data_utils import EHRDataset
+from src.pretrain.data_utils import EHRDataset
 from src.fm import FMConfig, FMBase
-from src.trainer import BaseTrainer, EarlyStopping, CheckpointManager
+from src.pretrain.trainer import BaseTrainer, EarlyStopping, CheckpointManager
 
 def parse_args():
     parser = argparse.ArgumentParser(description="HAT Model Training")

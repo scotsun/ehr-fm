@@ -16,8 +16,6 @@ class SimCSE(nn.Module):
         h2 = self.model.encode(input_ids, attention_mask, segment_attention_mask)[
             :, :, 0, :
         ]
-        print(h1)
-        print(h2)
         h1, h2 = h1.view(-1, h1.shape[-1]), h2.view(-1, h2.shape[-1])
         # h (2*batch_size, d_model)
         h = F.normalize(torch.cat([h1, h2], dim=0), dim=1)
