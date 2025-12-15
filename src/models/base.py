@@ -2,7 +2,7 @@ import torch.nn as nn
 from transformers.modeling_utils import PreTrainedModel
 
 from . import FMConfig, FMEmbeddings
-from src.layers import HierarchicalTransformerBlock, T2V
+from src.layers import HierarchicalTransformerBlock, T2V, FFNSwiGLUBlock
 
 
 class FMTransformerEncoder(nn.Module):
@@ -34,7 +34,7 @@ class FMTransformerEncoder(nn.Module):
 
 class FMBase(PreTrainedModel):
     config_class = FMConfig
-    base_model_prefix = "fm-base"
+    model_type = "fm-base"
 
     def __init__(self, config: FMConfig):
         super().__init__(config)
@@ -57,3 +57,33 @@ class FMBase(PreTrainedModel):
         h = self.transformer_encoder(h, attention_mask, set_attention_mask, t)
         # (batch, max_seq, max_set_size, d_model)
         return h
+
+
+class FMBaseWithHeads(PreTrainedModel):
+    config_class = FMConfig
+    model_type = "fm-base-with-heads"
+
+    def __init__(self, config: FMConfig):
+        super().__init__(config)
+        self.transformer = FMBase(config)
+        self.mlp_dm = FFNSwiGLUBlock(
+            d_model=config.d_model, d_ff=config.d_ff, d_out=config.vocab_size
+        )
+        # TODO: self.mlp_tte
+
+    def forward(self, input_ids, attention_mask, set_attention_mask, t):
+        # logits_mlm: (batch, max_seq, max_set_size, vocab_size)
+        # h: (batch, max_seq, max_set_size, d_model)
+        logits_mlm, h = self.transformer(
+            input_ids, attention_mask, set_attention_mask, t
+        )
+        # h_cls: (M < batch * max_seq, d_model) where M is the total n of observed sets
+        h_cls = h[set_attention_mask][:, 0, :]
+        # logits_dm: (M < batch * max_seq, vocab_size)
+        logits_dm = self.mlp_dm(h_cls)
+        # TODO: logits_tte = self.mlp_tte(t)
+
+        return logits_mlm, logits_dm, h
+
+    def encode(self, input_ids, attention_mask, set_attention_mask, t):
+        return self.transformer.encode(input_ids, attention_mask, set_attention_mask, t)

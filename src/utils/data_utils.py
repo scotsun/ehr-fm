@@ -185,12 +185,12 @@ def random_masking_set(
         < mask_probability
     )
 
-    labels[~set_mask.unsqueeze(2).repeat(1, 1, labels.shape[2]).bool()] = -100
-    input_ids[set_mask.unsqueeze(2).repeat(1, 1, input_ids.shape[2]).bool()] = (
-        tokenizer.token_to_id("[MASK]")
-    )
+    labels[~set_mask] = -100
+    input_ids[set_mask] = tokenizer.token_to_id("[MASK]")
+    _b_idx, s_idx = set_mask.nonzero(as_tuple=True)
+    input_ids[_b_idx, s_idx, 0] = tokenizer.token_to_id("[CLS]")
 
-    return input_ids, labels
+    return input_ids, labels, set_mask
 
 
 def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probability=0.15):

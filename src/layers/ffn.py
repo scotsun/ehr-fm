@@ -3,11 +3,18 @@ import torch.nn.functional as F
 
 
 class FFNSwiGLUBlock(nn.Module):
-    def __init__(self, d_model: int, d_ff: int):
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        d_out: int | None = None,
+    ):
         super().__init__()
+        if d_out is None:
+            d_out = d_model
         self.linear_gate = nn.Linear(d_model, d_ff)
         self.linear_up = nn.Linear(d_model, d_ff)
-        self.linear_down = nn.Linear(d_ff, d_model)
+        self.linear_down = nn.Linear(d_ff, d_out)
 
     def forward(self, x):
         gate_output = self.linear_gate(x)
@@ -17,10 +24,18 @@ class FFNSwiGLUBlock(nn.Module):
 
 
 class FFNLUBlock(nn.Module):
-    def __init__(self, d_model: int, d_ff: int, activation: str = "relu"):
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int,
+        d_out: int | None = None,
+        activation: str = "relu",
+    ):
         super().__init__()
+        if d_out is None:
+            d_out = d_model
         self.linear_up = nn.Linear(d_model, d_ff)
-        self.linear_down = nn.Linear(d_ff, d_model)
+        self.linear_down = nn.Linear(d_ff, d_out)
         if activation == "relu":
             self.activation = nn.ReLU()
         elif activation == "gelu":

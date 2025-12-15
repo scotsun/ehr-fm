@@ -6,7 +6,7 @@ import torch.distributed as dist
 import argparse
 
 from torch.optim import AdamW
-from torch.nn import CrossEntropyLoss
+from torch.nn import CrossEntropyLoss, KLDivLoss
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, random_split, DistributedSampler
 
@@ -16,9 +16,9 @@ from setproctitle import setproctitle
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.utils.data_utils import SeqSet
-from src.trainer import BaseTrainer, EarlyStopping
+from src.trainer import BaseTrainer, BaseWithHeadsTrainer, EarlyStopping
 from src.models import FMConfig
-from src.models.base import FMBase
+from src.models.base import FMBase, FMBaseWithHeads
 from src.utils.model_utils import build_model
 from src.utils.train_utils import (
     load_cfg,
@@ -58,15 +58,19 @@ def main():
         trainer=cfg_dict["trainer"],
         **cfg_dict["model"],
     )
-    model = build_model(cfg, FMBase, device)
+    model = build_model(cfg, FMBaseWithHeads, device)
 
     signature = make_fmbase_signature(cfg)
 
-    trainer = BaseTrainer(
+    trainer = BaseWithHeadsTrainer(
         model=model,
         tokenizer=tk,
         optimizer=AdamW(model.parameters(), lr=cfg.trainer["lr"]),
-        criterions={"cross_entropy": CrossEntropyLoss(ignore_index=-100)},
+        criterions={
+            "cross_entropy": CrossEntropyLoss(ignore_index=-100),
+            "kl_div": KLDivLoss(reduction="batchmean"),
+        },
+        # criterions={"cross_entropy": CrossEntropyLoss(ignore_index=-100)},
         early_stopping=EarlyStopping(
             patience=cfg.trainer["early_stopping_patience"],
             mode=cfg.trainer["early_stopping_mode"],
