@@ -514,12 +514,12 @@ class BaseWithHeadsTrainer(Trainer):
 
         dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
-            counter[1] / counter[0],
-            counter[2] / counter[0],
-            counter[3] / counter[0],
-            counter[4] / counter[0],
-            counter[5] / counter[0],
-            counter[6] / counter[0],
+            (counter[1] / counter[0]).item(),
+            (counter[2] / counter[0]).item(),
+            (counter[3] / counter[0]).item(),
+            (counter[4] / counter[0]).item(),
+            (counter[5] / counter[0]).item(),
+            (counter[6] / counter[0]).item(),
         )
 
     def _valid(self, dataloader, verbose, epoch_id):
