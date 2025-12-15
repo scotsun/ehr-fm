@@ -390,7 +390,9 @@ class BaseWithHeadsTrainer(Trainer):
 
                 obs_set_tokens = input_ids[set_attention_mask][:, 1:]
                 target_dist = torch.zeros(
-                    input_ids.size(0), self.tokenizer.get_vocab_size(), device=device
+                    obs_set_tokens.size(0),
+                    self.tokenizer.get_vocab_size(),
+                    device=device,
                 )
                 target_dist.scatter_add_(
                     1,
@@ -412,7 +414,7 @@ class BaseWithHeadsTrainer(Trainer):
                         labels.view(-1),
                     )
                     dm_loss = criterions["kl_div"](
-                        F.log_softmax(logits_dm), target_dist
+                        F.log_softmax(logits_dm, dim=-1), target_dist
                     )
 
                 scaler.scale(mlm_loss + dm_loss).backward()
@@ -461,7 +463,9 @@ class BaseWithHeadsTrainer(Trainer):
 
                 obs_set_tokens = input_ids[set_attention_mask][:, 1:]
                 target_dist = torch.zeros(
-                    input_ids.size(0), self.tokenizer.get_vocab_size(), device=device
+                    obs_set_tokens.size(0),
+                    self.tokenizer.get_vocab_size(),
+                    device=device,
                 )
                 target_dist.scatter_add_(
                     1,
