@@ -489,7 +489,7 @@ class BaseWithHeadsTrainer(Trainer):
                         F.log_softmax(logits_dm), target_dist
                     )
 
-                    masked_last_set_logits, _ = model(
+                    masked_last_set_logits, _, _ = model(
                         input_ids=masked_last_set_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
