@@ -58,17 +58,17 @@ def main():
         trainer=cfg_dict["trainer"],
         **cfg_dict["model"],
     )
-    model = build_model(cfg, FMBaseWithHeads, device)
+    model = build_model(cfg, FMBase, device)
 
     signature = make_fmbase_signature(cfg)
 
-    trainer = BaseWithHeadsTrainer(
+    trainer = BaseTrainer(
         model=model,
         tokenizer=tk,
         optimizer=AdamW(model.parameters(), lr=cfg.trainer["lr"]),
         criterions={
             "cross_entropy": CrossEntropyLoss(ignore_index=-100),
-            "kl_div": KLDivLoss(reduction="batchmean"),
+            # "kl_div": KLDivLoss(reduction="batchmean"),
         },
         # criterions={"cross_entropy": CrossEntropyLoss(ignore_index=-100)},
         early_stopping=EarlyStopping(
