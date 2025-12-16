@@ -5,9 +5,9 @@ from . import FMConfig, FMEmbeddings
 from src.layers import TransformerBlock, T2V
 
 
-class FMBehrt(PreTrainedModel):
+class FMBert(PreTrainedModel):
     config_class = FMConfig
-    model_type = "fm-behrt"
+    model_type = "fm-bert"
 
     def __init__(self, config: FMConfig):
         super().__init__(config)
