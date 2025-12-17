@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=hat_finetune
-#SBATCH --output=logs/finetune_%j.log
-#SBATCH --error=logs/finetune_%j.err
+#SBATCH --output=finetune_logs/finetune_%j.log
+#SBATCH --error=finetune_logs/finetune_%j.err
 #SBATCH --partition=h200ea
 #SBATCH --account=h200ea
 #SBATCH --gres=gpu:h200:1
@@ -35,7 +35,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd /hpc/group/engelhardlab/hg176/ehr-fm
 
 # Create output directories
-mkdir -p checkpoints/finetune logs
+mkdir -p checkpoints/finetune finetune_logs
 
 # Display GPU info
 echo ""
@@ -44,19 +44,20 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 echo ""
 
 # ==================== Configuration ====================
-PRETRAINED="checkpoints/best_model.pt"
-DATA_PATH="dataset/mimic4/data/mimic4_tokens.parquet"
-LABELS_PATH="dataset/mimic4/data/downstream_labels.csv"
-TOKENIZER_PATH="tokenizer.json"
-OUTPUT_DIR="checkpoints/finetune"
+# Use the best pretrain from 20251210_081108
+PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251210_081108/best_model.pt"
+DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
+LABELS_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/downstream_labels.csv"
+TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251210_081108/tokenizer.json"
+OUTPUT_DIR="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/finetune"
 
-# Training hyperparameters (match pre-training config)
+# Training hyperparameters
 LR=2e-5
 BATCH_SIZE=32
 EPOCHS=10
 WARMUP_RATIO=0.1
-MAX_SEG=8        # Must match pre-training (was 8)
-MAX_SEQ_LEN=512  # Must match pre-training (was 512)
+MAX_SEG=8      
+MAX_SEQ_LEN=512  
 
 # ==================== Parse Arguments ====================
 TASK=${1:-mortality}  # Default to mortality if not specified
@@ -117,6 +118,6 @@ echo ""
 echo "=========================================="
 echo "Fine-tuning completed!"
 echo "End: $(date)"
-echo "Log: logs/finetune_${SLURM_JOB_ID}.log"
+echo "Log: finetune_logs/finetune_${SLURM_JOB_ID}.log"
 echo "Results: $OUTPUT_DIR"
 echo "=========================================="
