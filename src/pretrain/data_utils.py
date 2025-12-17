@@ -175,7 +175,7 @@ class EHRDataset(Dataset):
     def pad_segment(self, tokens):
         if len(tokens) > self.max_seg:
             seg_attn = torch.ones(self.max_seg)
-            tokens = tokens[: self.max_seg]
+            tokens = tokens[-self.max_seg:]
         else:
             seg_attn = torch.cat(
                 [torch.ones(len(tokens)), torch.zeros(self.max_seg - len(tokens))]
@@ -205,7 +205,7 @@ class EHRDataset(Dataset):
         
         # Pad/truncate
         if len(times_cumsum) > self.max_seg:
-            times_final = times_cumsum[: self.max_seg]
+            times_final = times_cumsum[-self.max_seg:]
         else:
             # pad with last time value (representing no future visits)
             last_time = times_cumsum[-1] if times_cumsum else 0.0
@@ -225,7 +225,7 @@ class EHRDataset(Dataset):
         """
         # Truncate/pad segments
         if len(token_times_list) > self.max_seg:
-            token_times_list = token_times_list[:self.max_seg]
+            token_times_list = token_times_list[-self.max_seg:]
         else:
             # Pad with empty lists
             token_times_list = token_times_list + [[]] * (self.max_seg - len(token_times_list))
