@@ -20,13 +20,15 @@ class DownstreamTask(Enum):
     ABNORMAL_LAB = "abnormal_lab"
 
 
-# All tasks use include_current=True (standard practice in BEHRT, Med-BERT, CLMBR)
+# Task configurations for prediction time points
+# - "admission_48h": Use only first 48 hours of current admission (for predicting future outcomes)
+# - "discharge": Use entire admission (for summarizing or predicting post-discharge events)
 TASK_CONFIGS = {
-    DownstreamTask.MORTALITY: {"prediction_time": "discharge", "include_current": True},
-    DownstreamTask.PROLONGED_LOS: {"prediction_time": "discharge", "include_current": True},
-    DownstreamTask.READMISSION_30D: {"prediction_time": "discharge", "include_current": True},
-    DownstreamTask.ICD_CHAPTER: {"prediction_time": "discharge", "include_current": True},
-    DownstreamTask.ABNORMAL_LAB: {"prediction_time": "discharge", "include_current": True},
+    DownstreamTask.MORTALITY: {"prediction_time": "admission_48h", "max_hours": 48},
+    DownstreamTask.PROLONGED_LOS: {"prediction_time": "admission_48h", "max_hours": 48},
+    DownstreamTask.READMISSION_30D: {"prediction_time": "discharge", "max_hours": None},
+    DownstreamTask.ICD_CHAPTER: {"prediction_time": "discharge", "max_hours": None},
+    DownstreamTask.ABNORMAL_LAB: {"prediction_time": "discharge", "max_hours": None},
 }
 
 
@@ -57,6 +59,7 @@ class FinetuneDataset(Dataset):
         self.tokenizer.enable_truncation(max_length=max_seq_len)
 
         self.task = task
+        self.task_config = TASK_CONFIGS[task]
         self.max_seg = max_seg
         self.max_seq_len = max_seq_len
         self.patient_id_col = patient_id_col
@@ -141,9 +144,26 @@ class FinetuneDataset(Dataset):
 
         grouped = history_data.groupby(self.enc_id_col)
 
+        # Get max_hours for time-based truncation (only applies to target admission)
+        max_hours = self.task_config.get("max_hours")
+
         encounter_data = []
         for enc_id, group in grouped:
+            # For target admission with max_hours set, filter events by time
+            if enc_id == target_hadm_id and max_hours is not None:
+                if self.token_time_col and self.token_time_col in group.columns:
+                    group = group[group[self.token_time_col] <= max_hours]
+                if len(group) == 0:
+                    # Keep at least diagnosis codes (time_offset_hours < 0)
+                    group = history_data[
+                        (history_data[self.enc_id_col] == enc_id) &
+                        (history_data[self.token_time_col] <= 0)
+                    ]
+
             tokens = group[self.token_col].tolist()
+            if len(tokens) == 0:
+                continue  # Skip empty encounters
+
             time_val = group[self.time_col].iloc[0] if self.time_col and self.time_col in group.columns else None
             sort_val = group[self.sort_col].iloc[0] if self.sort_col and self.sort_col in group.columns else None
             token_times = group[self.token_time_col].tolist() if self.token_time_col and self.token_time_col in group.columns else None

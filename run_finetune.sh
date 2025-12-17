@@ -52,7 +52,7 @@ TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251210_08
 OUTPUT_DIR="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/finetune"
 
 # Training hyperparameters
-LR=2e-5
+LR=1e-5
 BATCH_SIZE=32
 EPOCHS=10
 WARMUP_RATIO=0.1
