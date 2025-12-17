@@ -363,29 +363,27 @@ class FinetuneTrainer:
             metrics["true_positive_rate"] = all_labels.mean()
         else:
             all_probs = np.vstack(all_probs)
-            try:
-                metrics["auroc"] = roc_auc_score(all_labels, all_probs, multi_class="ovr", average="macro")
-            except ValueError:
-                metrics["auroc"] = 0.0
 
-            try:
-                # Weighted average AUPRC by class frequency
-                auprc_scores = []
-                class_weights = []
-                for i in range(self.model.num_classes):
-                    binary_labels = (all_labels == i).astype(int)
-                    class_count = binary_labels.sum()
-                    if class_count > 0:
-                        auprc_scores.append(average_precision_score(binary_labels, all_probs[:, i]))
-                        class_weights.append(class_count)
-                if auprc_scores:
-                    total_weight = sum(class_weights)
-                    metrics["auprc"] = sum(s * w for s, w in zip(auprc_scores, class_weights)) / total_weight
-                    metrics["auprc_macro"] = np.mean(auprc_scores)
-                else:
-                    metrics["auprc"] = 0.0
-                    metrics["auprc_macro"] = 0.0
-            except ValueError:
+            # Compute per-class AUROC and AUPRC (one-vs-rest)
+            auroc_scores = []
+            auprc_scores = []
+            class_weights = []
+            for i in range(self.model.num_classes):
+                binary_labels = (all_labels == i).astype(int)
+                class_count = binary_labels.sum()
+                # Need both positive and negative samples
+                if class_count > 0 and class_count < len(all_labels):
+                    auroc_scores.append(roc_auc_score(binary_labels, all_probs[:, i]))
+                    auprc_scores.append(average_precision_score(binary_labels, all_probs[:, i]))
+                    class_weights.append(class_count)
+
+            if auroc_scores:
+                total_weight = sum(class_weights)
+                metrics["auroc"] = np.mean(auroc_scores)  # macro average
+                metrics["auprc"] = sum(s * w for s, w in zip(auprc_scores, class_weights)) / total_weight
+                metrics["auprc_macro"] = np.mean(auprc_scores)
+            else:
+                metrics["auroc"] = 0.0
                 metrics["auprc"] = 0.0
                 metrics["auprc_macro"] = 0.0
 
