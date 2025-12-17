@@ -50,13 +50,13 @@ LABELS_PATH="dataset/mimic4/data/downstream_labels.csv"
 TOKENIZER_PATH="tokenizer.json"
 OUTPUT_DIR="checkpoints/finetune"
 
-# Training hyperparameters
+# Training hyperparameters (match pre-training config)
 LR=2e-5
 BATCH_SIZE=32
 EPOCHS=10
 WARMUP_RATIO=0.1
-MAX_SEG=32
-MAX_SEQ_LEN=512
+MAX_SEG=8        # Must match pre-training (was 8)
+MAX_SEQ_LEN=512  # Must match pre-training (was 512)
 
 # ==================== Parse Arguments ====================
 TASK=${1:-mortality}  # Default to mortality if not specified
