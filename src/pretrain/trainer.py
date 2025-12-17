@@ -148,7 +148,10 @@ class CheckpointManager:
         if unexpected:
             print(f"⚠️  Unexpected keys (ignored): {unexpected}")
 
-        if checkpoint['optimizer_state_dict'] is not None:
+        # Skip optimizer loading if model structure changed
+        if missing or unexpected:
+            print("⚠️  Skipping optimizer state (model structure changed)")
+        elif checkpoint['optimizer_state_dict'] is not None:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if scaler is not None and 'scaler_state_dict' in checkpoint:
             scaler.load_state_dict(checkpoint['scaler_state_dict'])
