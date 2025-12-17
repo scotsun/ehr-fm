@@ -141,7 +141,13 @@ class CheckpointManager:
         print(f"📂 Loading checkpoint: {path}")
         checkpoint = torch.load(path, weights_only=False)
 
-        model.load_state_dict(checkpoint['model_state_dict'])
+        # Use strict=False for backward compatibility (e.g., old checkpoint without T2V)
+        missing, unexpected = model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        if missing:
+            print(f"⚠️  Missing keys (will be randomly initialized): {missing}")
+        if unexpected:
+            print(f"⚠️  Unexpected keys (ignored): {unexpected}")
+
         if checkpoint['optimizer_state_dict'] is not None:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         if scaler is not None and 'scaler_state_dict' in checkpoint:

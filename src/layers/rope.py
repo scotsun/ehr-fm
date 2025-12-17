@@ -65,37 +65,23 @@ class RoPE(nn.Module):
 
 class T2V(nn.Module):
     """
-    Time2Vec (T2V)
-    Input shape: (batch, seq_len)
-    Output shape: (batch, seq_len, d)
+    Time2Vec: learnable time encoding.
+    Input: (batch, max_seg, max_seq_len) -> Output: (batch, max_seg, max_seq_len, d_model)
     """
 
-    def __init__(self, d, scale, f=torch.sin):
+    def __init__(self, d_model: int, scale: float = 1.0):
         super().__init__()
+        self.d_model = d_model
         self.scale = scale
-        self.f = f
-        self.w0 = nn.Parameter(torch.rand(1, 1))
-        self.b0 = nn.Parameter(torch.rand(1, 1))
-        self.w = nn.Parameter(torch.rand(1, d - 1))
-        self.b = nn.Parameter(torch.rand(1, d - 1))
-        self.register_parameter("w0", self.w0)
-        self.register_parameter("b0", self.b0)
-        self.register_parameter("w", self.w)
-        self.register_parameter("b", self.b)
+        self.w0 = nn.Parameter(torch.randn(1, 1) * 0.02)
+        self.b0 = nn.Parameter(torch.zeros(1, 1))
+        self.w = nn.Parameter(torch.randn(1, d_model - 1) * 0.02)
+        self.b = nn.Parameter(torch.zeros(1, d_model - 1))
 
     def forward(self, t):
-        # x: (batch, 1)
+        original_shape = t.shape
+        t = t.reshape(-1, 1)
         v0 = self.scale * t @ self.w0 + self.b0
-        v = self.f(self.scale * t @ self.w + self.b)
-        return torch.cat([v0, v], dim=-1)
-
-
-def main():
-    t2v = T2V(5, 1.0)
-    x = torch.rand(2, 1)
-    print(t2v(x).shape)
-    print(t2v(x))
-
-
-if __name__ == "__main__":
-    main()
+        v = torch.sin(self.scale * t @ self.w + self.b)
+        out = torch.cat([v0, v], dim=-1)
+        return out.reshape(*original_shape, self.d_model)

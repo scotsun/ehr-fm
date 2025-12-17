@@ -50,9 +50,14 @@ def parse_args():
     parser.add_argument("--d_ff", type=int, default=3072)
     parser.add_argument("--max_seg", type=int, default=8)
     parser.add_argument("--max_seq_len", type=int, default=512)
-    parser.add_argument("--swe_rope", type=lambda x: x.lower() == 'true', 
+    parser.add_argument("--swe_rope", type=lambda x: x.lower() == 'true',
                        default=True,
                        help="Whether to use RoPE in SWE")
+    parser.add_argument("--use_t2v", type=lambda x: x.lower() == 'true',
+                       default=True,
+                       help="Whether to use Time2Vec encoding")
+    parser.add_argument("--t2v_scale", type=float, default=1.0,
+                       help="Time2Vec scale factor")
     
     # ========================================================================
     # TRAINING PARAMETERS - Good defaults
@@ -298,7 +303,7 @@ def main():
     model = FMBase(FMConfig(
         vocab_size=vocab_size, d_model=args.d_model, n_blocks=args.n_blocks,
         n_heads=args.n_heads, d_ff=args.d_ff, dropout=args.dropout,
-        swe_rope=args.swe_rope
+        swe_rope=args.swe_rope, use_t2v=args.use_t2v, t2v_scale=args.t2v_scale
     ))
     
     # Move model to device (GPU if available)
@@ -307,6 +312,7 @@ def main():
     
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"SWE RoPE: {'Enabled' if args.swe_rope else 'Disabled'} (CSE RoPE: Always Enabled)")
+    print(f"T2V: {'Enabled' if args.use_t2v else 'Disabled'}" + (f" (scale={args.t2v_scale})" if args.use_t2v else ""))
     print(f"Device: {device}\n")
     
     # Trainer
@@ -387,6 +393,8 @@ def main():
             "n_blocks": args.n_blocks,
             "max_seg": args.max_seg,
             "max_seq_len": args.max_seq_len,
+            "use_t2v": args.use_t2v,
+            "t2v_scale": args.t2v_scale,
         })
         print(f"✅ MLflow run started: {run_name}")
         print(f"   Run ID: {mlflow_run.info.run_id}\n")

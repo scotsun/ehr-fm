@@ -3,6 +3,7 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers import PretrainedConfig
 
 from src.layers.hierarchical import HierarchicalTransformerBlock
+from src.layers.rope import T2V
 
 
 class FMConfig(PretrainedConfig):
@@ -21,7 +22,9 @@ class FMConfig(PretrainedConfig):
         pad_token_id: int = 0,
         weight_tying: bool = False,
         attn_backend: str = "base",
-        swe_rope: bool = True,  # Whether SWE uses RoPE
+        swe_rope: bool = True,
+        use_t2v: bool = True,
+        t2v_scale: float = 1.0,
         **kwargs,
     ):
         super().__init__(pad_token_id=pad_token_id, **kwargs)
@@ -36,6 +39,8 @@ class FMConfig(PretrainedConfig):
         self.weight_tying = weight_tying
         self.attn_backend = attn_backend
         self.swe_rope = swe_rope
+        self.use_t2v = use_t2v
+        self.t2v_scale = t2v_scale
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -92,6 +97,8 @@ class FMBase(PreTrainedModel):
     def __init__(self, config: PretrainedConfig):
         super().__init__(config)
         self.embeddings = FMEmbeddings(config)
+        if config.use_t2v:
+            self.t2v = T2V(config.d_model, config.t2v_scale)
         self.transformer_encoder = FMTransformerEncoder(config)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size)
         if config.weight_tying:
@@ -105,6 +112,7 @@ class FMBase(PreTrainedModel):
 
     def encode(self, input_ids, attention_mask, segment_attention_mask, segment_time=None, token_time=None):
         h = self.embeddings(input_ids)
+        if hasattr(self, 't2v') and token_time is not None:
+            h = h + self.t2v(token_time)
         h = self.transformer_encoder(h, attention_mask, segment_attention_mask, segment_time, token_time)
-        # (batch, max_seg, max_seq_len, d_model)
         return h

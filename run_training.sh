@@ -57,6 +57,7 @@ echo "  Batch size: 24 (real) × 2 (accumulation) = 48 (effective)"
 echo "  Masking strategy: token-level (15% mask probability)"
 echo "  Mixed Precision: AMP enabled (FP16)"
 echo "  Model: 8 layers, 768 dim, 12 heads"
+echo "  Time encoding: T2V (scale=1.0) + RoPE"
 echo "  Checkpoint: Save every epoch after epoch 5 (keep last 3)"
 echo "  Output: ${OUTPUT_DIR}"
 echo ""
@@ -77,6 +78,8 @@ python train.py \
     --max_seg 8 \
     --max_seq_len 512 \
     --swe_rope True \
+    --use_t2v True \
+    --t2v_scale 1.0 \
     --learning_rate 5e-5 \
     --patience 10 \
     --gradient_accumulation_steps 2 \
