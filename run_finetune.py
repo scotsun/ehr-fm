@@ -103,8 +103,8 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
     parser.add_argument("--warmup-ratio", type=float, default=0.1, help="Warmup ratio")
-    parser.add_argument("--weight-decay", type=float, default=0.01, help="Weight decay")
-    parser.add_argument("--max-seg", type=int, default=32, help="Max segments")
+    parser.add_argument("--weight-decay", type=float, default=0.001, help="Weight decay")
+    parser.add_argument("--max-seg", type=int, default=8, help="Max segments")
     parser.add_argument("--max-seq-len", type=int, default=512, help="Max sequence length")
     parser.add_argument(
         "--gradient-accumulation", type=int, default=1, help="Gradient accumulation steps"

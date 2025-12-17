@@ -96,6 +96,7 @@ if [ "$TASK" == "all" ]; then
         --warmup-ratio $WARMUP_RATIO \
         --max-seg $MAX_SEG \
         --max-seq-len $MAX_SEQ_LEN \
+        --freeze-encoder \
         $WANDB_FLAG
 else
     python run_finetune.py \
@@ -111,6 +112,7 @@ else
         --warmup-ratio $WARMUP_RATIO \
         --max-seg $MAX_SEG \
         --max-seq-len $MAX_SEQ_LEN \
+        --freeze-encoder \
         $WANDB_FLAG
 fi
 
