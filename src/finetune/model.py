@@ -243,8 +243,44 @@ def create_finetune_model(
         if isinstance(config, dict):
             config = FMConfig(**config)
     else:
-        # Use default config (you may need to adjust this)
-        config = FMConfig()
+        # Infer config from state_dict
+        state_dict = checkpoint['model_state_dict']
+
+        # Get vocab_size and d_model from embedding weight
+        embed_key = None
+        for k in state_dict.keys():
+            if 'embeddings.embeddings.weight' in k:
+                embed_key = k
+                break
+
+        if embed_key:
+            vocab_size, d_model = state_dict[embed_key].shape
+        else:
+            vocab_size, d_model = 15000, 768
+
+        # Get d_ff from FFN layer
+        d_ff = 2048
+        for k, v in state_dict.items():
+            if 'ffn_block.linear_gate.weight' in k:
+                d_ff = v.shape[0]
+                break
+
+        # Count number of blocks
+        n_blocks = 0
+        for k in state_dict.keys():
+            if 'transformer_encoder.blocks.' in k:
+                block_idx = int(k.split('transformer_encoder.blocks.')[1].split('.')[0])
+                n_blocks = max(n_blocks, block_idx + 1)
+        if n_blocks == 0:
+            n_blocks = 6
+
+        config = FMConfig(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            d_ff=d_ff,
+            n_blocks=n_blocks,
+        )
+        print(f"Inferred config: vocab_size={vocab_size}, d_model={d_model}, d_ff={d_ff}, n_blocks={n_blocks}")
 
     # Create model
     model = HATForSequenceClassification(

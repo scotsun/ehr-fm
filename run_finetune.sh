@@ -1,18 +1,53 @@
 #!/bin/bash
-# Fine-tuning script for HAT downstream tasks
-#
-# Usage:
-#   ./run_finetune.sh mortality           # Single task
-#   ./run_finetune.sh all                 # All tasks
-#   ./run_finetune.sh mortality --wandb   # With wandb logging
+#SBATCH --job-name=hat_finetune
+#SBATCH --output=logs/finetune_%j.log
+#SBATCH --error=logs/finetune_%j.err
+#SBATCH --partition=h200ea
+#SBATCH --account=h200ea
+#SBATCH --gres=gpu:h200:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=4:00:00
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=hg176@duke.edu
 
-set -e
+# ============================================================================
+# HAT Fine-tuning for Downstream Tasks on H200 GPU
+# Tasks: mortality, readmission_30d, prolonged_los, icd_chapter
+# ============================================================================
+
+echo "=========================================="
+echo "HAT Fine-tuning for Downstream Tasks"
+echo "Job ID: $SLURM_JOB_ID"
+echo "Node: $SLURM_NODELIST"
+echo "Start: $(date)"
+echo "=========================================="
+
+# Load conda environment
+source /hpc/group/rekerlab/apps/miniforge3/etc/profile.d/conda.sh
+conda activate hat
+echo "Activated hat environment"
+
+# Set environment variables
+export PYTHONPATH="${PYTHONPATH}:$(pwd)"
+export TOKENIZERS_PARALLELISM=false
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+cd /hpc/group/engelhardlab/hg176/ehr-fm
+
+# Create output directories
+mkdir -p checkpoints/finetune logs
+
+# Display GPU info
+echo ""
+echo "GPU Information:"
+nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
+echo ""
 
 # ==================== Configuration ====================
-PRETRAINED="checkpoints/best.pt"           # Path to pre-trained checkpoint
+PRETRAINED="checkpoints/best_model.pt"
 DATA_PATH="dataset/mimic4/data/mimic4_tokens.parquet"
 LABELS_PATH="dataset/mimic4/data/downstream_labels.csv"
-TOKENIZER_PATH="dataset/mimic4/data/mapping/mimic4_tokenizer.json"
+TOKENIZER_PATH="tokenizer.json"
 OUTPUT_DIR="checkpoints/finetune"
 
 # Training hyperparameters
@@ -24,8 +59,7 @@ MAX_SEG=32
 MAX_SEQ_LEN=512
 
 # ==================== Parse Arguments ====================
-TASK=$1
-shift || true  # Remove first argument
+TASK=${1:-mortality}  # Default to mortality if not specified
 
 # Check if --wandb flag is present
 WANDB_FLAG=""
@@ -35,17 +69,18 @@ for arg in "$@"; do
     fi
 done
 
-# ==================== Run Fine-tuning ====================
-echo "=============================================="
-echo "HAT Fine-tuning for Downstream Tasks"
-echo "=============================================="
-echo "Task:        $TASK"
-echo "Pretrained:  $PRETRAINED"
-echo "LR:          $LR"
-echo "Batch size:  $BATCH_SIZE"
-echo "Epochs:      $EPOCHS"
-echo "=============================================="
+echo "Configuration:"
+echo "  Task:        $TASK"
+echo "  Pretrained:  $PRETRAINED"
+echo "  LR:          $LR"
+echo "  Batch size:  $BATCH_SIZE"
+echo "  Epochs:      $EPOCHS"
+echo "  Max seg:     $MAX_SEG"
+echo "  Max seq len: $MAX_SEQ_LEN"
+echo "=========================================="
+echo ""
 
+# ==================== Run Fine-tuning ====================
 if [ "$TASK" == "all" ]; then
     python run_finetune.py \
         --all \
@@ -79,5 +114,9 @@ else
 fi
 
 echo ""
-echo "Fine-tuning complete!"
-echo "Results saved to: $OUTPUT_DIR"
+echo "=========================================="
+echo "Fine-tuning completed!"
+echo "End: $(date)"
+echo "Log: logs/finetune_${SLURM_JOB_ID}.log"
+echo "Results: $OUTPUT_DIR"
+echo "=========================================="
