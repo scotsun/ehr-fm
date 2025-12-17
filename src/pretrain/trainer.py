@@ -74,6 +74,7 @@ class CheckpointManager:
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'loss': loss,
+            'config': model.config.to_dict() if hasattr(model, 'config') else None,
         }
         if scaler is not None:
             checkpoint['scaler_state_dict'] = scaler.state_dict()
@@ -108,6 +109,7 @@ class CheckpointManager:
             'optimizer_state_dict': self._optimizer.state_dict() if self._optimizer else None,
             'loss': self._best_loss,
             'emergency': True,
+            'config': self._model.config.to_dict() if hasattr(self._model, 'config') else None,
         }
         if self._scaler is not None:
             checkpoint['scaler_state_dict'] = self._scaler.state_dict()
