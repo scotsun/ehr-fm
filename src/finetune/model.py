@@ -1,14 +1,8 @@
-"""
-Fine-tuning Model for HAT downstream tasks.
-
-Adds a classification head on top of pre-trained HAT encoder.
-Uses the [CLS] token from the last valid segment for classification.
-"""
+"""Fine-tuning Model for HAT downstream tasks."""
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional
 
 from src.fm import FMBase, FMConfig
 
@@ -21,7 +15,7 @@ class ClassificationHead(nn.Module):
         d_model: int,
         num_classes: int,
         dropout: float = 0.1,
-        pooling: str = "last_cls",  # "last_cls", "mean_cls", "attention"
+        pooling: str = "last_cls",
     ):
         super().__init__()
         self.pooling = pooling
@@ -45,48 +39,31 @@ class ClassificationHead(nn.Module):
         """
         Args:
             hidden_states: (batch, max_seg, max_seq_len, d_model)
-            segment_attention_mask: (batch, max_seg) - 1 for valid segments
-
+            segment_attention_mask: (batch, max_seg)
         Returns:
             logits: (batch, num_classes)
         """
-        # Extract [CLS] tokens from all segments: (batch, max_seg, d_model)
-        cls_tokens = hidden_states[:, :, 0, :]
+        cls_tokens = hidden_states[:, :, 0, :]  # (batch, max_seg, d_model)
 
         if self.pooling == "last_cls":
-            # Get the last valid segment's [CLS] token
-            # segment_attention_mask: (batch, max_seg)
-            # We want the last 1 in each row
-            # Sum along dim=1 gives the count of valid segments
-            valid_counts = segment_attention_mask.sum(dim=1).long()  # (batch,)
+            valid_counts = segment_attention_mask.sum(dim=1).long()
             batch_size = cls_tokens.shape[0]
-
-            # Get indices of last valid segment
-            last_indices = (valid_counts - 1).clamp(min=0)  # (batch,)
-
-            # Gather the [CLS] token from last valid segment
+            last_indices = (valid_counts - 1).clamp(min=0)
             batch_indices = torch.arange(batch_size, device=cls_tokens.device)
-            pooled = cls_tokens[batch_indices, last_indices]  # (batch, d_model)
+            pooled = cls_tokens[batch_indices, last_indices]
 
         elif self.pooling == "mean_cls":
-            # Mean pooling over valid [CLS] tokens
-            mask = segment_attention_mask.unsqueeze(-1)  # (batch, max_seg, 1)
+            mask = segment_attention_mask.unsqueeze(-1)
             pooled = (cls_tokens * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
 
         elif self.pooling == "attention":
-            # Attention-weighted pooling
-            attn_scores = self.attention(cls_tokens).squeeze(-1)  # (batch, max_seg)
-            # Mask invalid segments
-            attn_scores = attn_scores.masked_fill(
-                segment_attention_mask == 0, float('-inf')
-            )
-            attn_weights = F.softmax(attn_scores, dim=1)  # (batch, max_seg)
+            attn_scores = self.attention(cls_tokens).squeeze(-1)
+            attn_scores = attn_scores.masked_fill(segment_attention_mask == 0, float('-inf'))
+            attn_weights = F.softmax(attn_scores, dim=1)
             pooled = (cls_tokens * attn_weights.unsqueeze(-1)).sum(dim=1)
 
         pooled = self.dropout(pooled)
-        logits = self.classifier(pooled)
-
-        return logits
+        return self.classifier(pooled)
 
 
 class HATForSequenceClassification(nn.Module):
@@ -104,10 +81,7 @@ class HATForSequenceClassification(nn.Module):
         self.config = config
         self.num_classes = num_classes
 
-        # Pre-trained encoder (will load weights separately)
         self.encoder = FMBase(config)
-
-        # Classification head
         self.classifier = ClassificationHead(
             d_model=config.d_model,
             num_classes=num_classes,
@@ -115,17 +89,14 @@ class HATForSequenceClassification(nn.Module):
             pooling=pooling,
         )
 
-        # Optionally freeze encoder
         if freeze_encoder:
             self.freeze_encoder()
 
     def freeze_encoder(self):
-        """Freeze encoder parameters for feature extraction mode."""
         for param in self.encoder.parameters():
             param.requires_grad = False
 
     def unfreeze_encoder(self):
-        """Unfreeze encoder parameters for full fine-tuning."""
         for param in self.encoder.parameters():
             param.requires_grad = True
 
@@ -133,7 +104,6 @@ class HATForSequenceClassification(nn.Module):
         """Load pre-trained encoder weights from checkpoint."""
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
-        # Handle different checkpoint formats
         if 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
         elif 'state_dict' in checkpoint:
@@ -141,7 +111,7 @@ class HATForSequenceClassification(nn.Module):
         else:
             state_dict = checkpoint
 
-        # Remove 'encoder.' prefix if present (from HF format)
+        # Add 'encoder.' prefix if not present
         new_state_dict = {}
         for k, v in state_dict.items():
             if k.startswith('encoder.'):
@@ -149,12 +119,7 @@ class HATForSequenceClassification(nn.Module):
             else:
                 new_state_dict[f'encoder.{k}'] = v
 
-        # Load encoder weights (ignore classifier weights)
-        encoder_state_dict = {
-            k: v for k, v in new_state_dict.items()
-            if k.startswith('encoder.')
-        }
-
+        encoder_state_dict = {k: v for k, v in new_state_dict.items() if k.startswith('encoder.')}
         missing, unexpected = self.load_state_dict(encoder_state_dict, strict=False)
 
         # Filter out expected missing keys (classifier)
@@ -181,12 +146,10 @@ class HATForSequenceClassification(nn.Module):
             segment_attention_mask: (batch, max_seg)
             segment_time: (batch, max_seg) - optional
             token_time: (batch, max_seg, max_seq_len) - optional
-            labels: (batch,) - optional, for computing loss
-
+            labels: (batch,) - optional
         Returns:
             dict with 'loss' (if labels provided) and 'logits'
         """
-        # Encode
         hidden_states = self.encoder.encode(
             input_ids,
             attention_mask,
@@ -195,24 +158,19 @@ class HATForSequenceClassification(nn.Module):
             token_time,
         )
 
-        # Classify
         logits = self.classifier(hidden_states, segment_attention_mask)
-
         output = {"logits": logits}
 
         if labels is not None:
-            # Cross-entropy works for both binary and multi-class classification
-            loss = F.cross_entropy(logits, labels)
-            output["loss"] = loss
+            output["loss"] = F.cross_entropy(logits, labels)
 
         return output
 
     def predict_proba(self, logits):
         """Convert logits to probabilities."""
         if self.num_classes == 2:
-            return F.softmax(logits, dim=-1)[:, 1]  # Return positive class prob
-        else:
-            return F.softmax(logits, dim=-1)
+            return F.softmax(logits, dim=-1)[:, 1]
+        return F.softmax(logits, dim=-1)
 
 
 def create_finetune_model(
@@ -222,20 +180,7 @@ def create_finetune_model(
     pooling: str = "last_cls",
     freeze_encoder: bool = False,
 ) -> HATForSequenceClassification:
-    """
-    Create a fine-tuning model from pre-trained checkpoint.
-
-    Args:
-        pretrained_path: Path to pre-trained checkpoint
-        num_classes: Number of output classes
-        dropout: Dropout rate for classifier
-        pooling: Pooling strategy ("last_cls", "mean_cls", "attention")
-        freeze_encoder: Whether to freeze encoder weights
-
-    Returns:
-        HATForSequenceClassification model with loaded weights
-    """
-    # Load config from checkpoint
+    """Create a fine-tuning model from pre-trained checkpoint."""
     checkpoint = torch.load(pretrained_path, map_location='cpu')
 
     if 'config' in checkpoint:
@@ -244,7 +189,10 @@ def create_finetune_model(
             config = FMConfig(**config)
     else:
         # Infer config from state_dict
-        state_dict = checkpoint['model_state_dict']
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
 
         # Get vocab_size and d_model from embedding weight
         embed_key = None
@@ -265,7 +213,10 @@ def create_finetune_model(
                 d_ff = v.shape[0]
                 break
 
-        # Count number of blocks
+        # Infer n_heads (assume head_dim=64)
+        n_heads = d_model // 64
+
+        # Count transformer blocks
         n_blocks = 0
         for k in state_dict.keys():
             if 'transformer_encoder.blocks.' in k:
@@ -279,10 +230,10 @@ def create_finetune_model(
             d_model=d_model,
             d_ff=d_ff,
             n_blocks=n_blocks,
+            n_heads=n_heads,
         )
-        print(f"Inferred config: vocab_size={vocab_size}, d_model={d_model}, d_ff={d_ff}, n_blocks={n_blocks}")
+        print(f"Inferred config: vocab_size={vocab_size}, d_model={d_model}, d_ff={d_ff}, n_blocks={n_blocks}, n_heads={n_heads}")
 
-    # Create model
     model = HATForSequenceClassification(
         config=config,
         num_classes=num_classes,
@@ -291,7 +242,5 @@ def create_finetune_model(
         freeze_encoder=freeze_encoder,
     )
 
-    # Load pre-trained weights
     model.load_pretrained(pretrained_path, strict=False)
-
     return model

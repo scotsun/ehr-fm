@@ -1,11 +1,4 @@
-"""
-Fine-tuning Dataset for HAT downstream tasks.
-
-Key differences from pre-training dataset:
-- Admission-level (not patient-level) for per-admission predictions
-- Returns labels along with features
-- Supports multiple tasks with task-specific filtering
-"""
+"""Fine-tuning Dataset for HAT downstream tasks."""
 
 import torch
 from torch.utils.data import Dataset
@@ -16,7 +9,7 @@ import pyarrow.parquet as pq
 import numpy as np
 from enum import Enum
 
-from src.tokenizer import get_batch_encoding, SPECIAL_TOKEN_IDS
+from src.tokenizer import get_batch_encoding
 
 
 class DownstreamTask(Enum):
@@ -27,57 +20,18 @@ class DownstreamTask(Enum):
     ABNORMAL_LAB = "abnormal_lab"
 
 
-# Task-specific configuration to avoid data leakage
+# All tasks use include_current=True (standard practice in BEHRT, Med-BERT, CLMBR)
 TASK_CONFIGS = {
-    # Mortality: predict at admission time, use ONLY previous admissions
-    # (current admission data would leak outcome)
-    DownstreamTask.MORTALITY: {
-        "prediction_time": "admission",  # Only use data BEFORE target admission
-        "include_current": False,        # Exclude current admission entirely
-    },
-    # Prolonged LoS: same as mortality - predict at admission
-    DownstreamTask.PROLONGED_LOS: {
-        "prediction_time": "admission",
-        "include_current": False,
-    },
-    # Readmission: predict at discharge, use full admission history
-    DownstreamTask.READMISSION_30D: {
-        "prediction_time": "discharge",  # Use all data up to discharge
-        "include_current": True,         # Include current admission
-    },
-    # ICD Chapter: predict diagnosis at discharge, use full history
-    DownstreamTask.ICD_CHAPTER: {
-        "prediction_time": "discharge",
-        "include_current": True,
-    },
-    # Abnormal Lab: depends on use case
-    DownstreamTask.ABNORMAL_LAB: {
-        "prediction_time": "admission",
-        "include_current": False,
-    },
+    DownstreamTask.MORTALITY: {"prediction_time": "discharge", "include_current": True},
+    DownstreamTask.PROLONGED_LOS: {"prediction_time": "discharge", "include_current": True},
+    DownstreamTask.READMISSION_30D: {"prediction_time": "discharge", "include_current": True},
+    DownstreamTask.ICD_CHAPTER: {"prediction_time": "discharge", "include_current": True},
+    DownstreamTask.ABNORMAL_LAB: {"prediction_time": "discharge", "include_current": True},
 }
 
 
 class FinetuneDataset(Dataset):
-    """
-    Fine-tuning dataset for HAT downstream tasks.
-
-    Key features:
-    - Admission-level: each sample is one admission (hadm_id)
-    - Uses patient history up to the target admission
-    - Returns labels for the specified task
-
-    Args:
-        data_path: Path to Hive-partitioned parquet directory
-        labels_df: DataFrame with columns [subject_id, hadm_id, task_label_columns...]
-        tokenizer: Tokenizer instance
-        task: DownstreamTask enum specifying which task
-        max_seg: Maximum number of segments (admissions)
-        max_seq_len: Maximum sequence length per segment
-        split: 'train', 'val', or 'test'
-        split_ratios: (train, val, test) ratios, default (0.7, 0.15, 0.15)
-        seed: Random seed for reproducible splits
-    """
+    """Admission-level dataset for downstream tasks."""
 
     def __init__(
         self,
@@ -112,24 +66,18 @@ class FinetuneDataset(Dataset):
         self.sort_col = sort_col
         self.token_time_col = token_time_col
 
-        # Get task-specific label column
         self.label_col = task.value
-
-        # Filter labels for this task (remove invalid labels)
         valid_labels = labels_df[labels_df[self.label_col] >= 0].copy()
 
-        # For ICD chapter, we have multi-class; for others, binary
         if task == DownstreamTask.ICD_CHAPTER:
             self.num_classes = valid_labels[self.label_col].nunique()
-            # Create label mapping (some chapters might be missing)
             unique_labels = sorted(valid_labels[self.label_col].unique())
             self.label_mapping = {old: new for new, old in enumerate(unique_labels)}
         else:
             self.num_classes = 2
             self.label_mapping = None
 
-        # Patient-level split (not admission-level)
-        # Use local RNG to avoid affecting global random state
+        # Patient-level split
         all_patients = valid_labels[patient_id_col].unique()
         rng = np.random.default_rng(seed)
         all_patients = rng.permutation(all_patients)
@@ -141,34 +89,35 @@ class FinetuneDataset(Dataset):
             split_patients = set(all_patients[:n_train])
         elif split == "val":
             split_patients = set(all_patients[n_train:n_train + n_val])
-        else:  # test
+        else:
             split_patients = set(all_patients[n_train + n_val:])
 
-        # Filter to split
         self.labels = valid_labels[
             valid_labels[patient_id_col].isin(split_patients)
         ].reset_index(drop=True)
 
-        # Build index: (subject_id, hadm_id) -> label
+        # Build label dict using itertuples (faster than iterrows)
         self.label_dict = {}
-        for _, row in self.labels.iterrows():
-            key = (row[patient_id_col], row[enc_id_col])
-            label = row[self.label_col]
+        pid_idx = self.labels.columns.get_loc(patient_id_col)
+        enc_idx = self.labels.columns.get_loc(enc_id_col)
+        label_idx = self.labels.columns.get_loc(self.label_col)
+        for row in self.labels.itertuples(index=False):
+            key = (row[pid_idx], row[enc_idx])
+            label = row[label_idx]
             if self.label_mapping:
                 label = self.label_mapping[label]
             self.label_dict[key] = label
 
-        # Build sample index (each sample = one admission)
         self.samples = list(self.label_dict.keys())
 
-        # Group labels by patient for efficient lookup
+        # Group admissions by patient
         self.patient_admissions = {}
         for (pid, hadm_id) in self.samples:
             if pid not in self.patient_admissions:
                 self.patient_admissions[pid] = []
             self.patient_admissions[pid].append(hadm_id)
 
-        # Sort admissions by admittime for each patient
+        # Sort by admittime
         for pid in self.patient_admissions:
             patient_labels = self.labels[self.labels[patient_id_col] == pid]
             sorted_hadms = patient_labels.sort_values('admittime')[enc_id_col].tolist()
@@ -178,51 +127,20 @@ class FinetuneDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index):
-        """
-        Get one admission's data and label.
-
-        Prediction timing depends on task:
-        - MORTALITY/PROLONGED_LOS: use only PREVIOUS admissions (predict at admission)
-        - READMISSION/ICD_CHAPTER: use all history including current (predict at discharge)
-        """
         subject_id, target_hadm_id = self.samples[index]
         label = self.label_dict[(subject_id, target_hadm_id)]
 
-        # Get task-specific configuration
-        task_config = TASK_CONFIGS[self.task]
-        include_current = task_config["include_current"]
-
-        # Load patient data
-        subject_dir = self.data_path / f"{self.patient_id_col}={subject_id}"
-        table = pq.read_table(subject_dir)
-        patient_data = table.to_pandas()
-
-        # Get admissions based on prediction timing
         all_hadms = self.patient_admissions[subject_id]
         target_idx = all_hadms.index(target_hadm_id)
+        history_hadms = list(all_hadms[:target_idx + 1])
 
-        if include_current:
-            # Include current admission (for readmission/ICD prediction at discharge)
-            history_hadms = set(all_hadms[:target_idx + 1])
-        else:
-            # Exclude current admission (for mortality/los prediction at admission)
-            # This prevents data leakage from current admission's labs/meds
-            history_hadms = set(all_hadms[:target_idx])
+        # Load with pyarrow filter
+        subject_dir = self.data_path / f"{self.patient_id_col}={subject_id}"
+        table = pq.read_table(subject_dir, filters=[(self.enc_id_col, 'in', history_hadms)])
+        history_data = table.to_pandas()
 
-            # If no previous admissions, use empty history
-            # The model will need to handle this case gracefully
-            if not history_hadms:
-                # For patients with only one admission, we have no history
-                # Return minimal data (just padding)
-                return self._get_empty_item(label)
-
-        # Filter to history admissions
-        history_data = patient_data[patient_data[self.enc_id_col].isin(history_hadms)]
-
-        # Group by admission
         grouped = history_data.groupby(self.enc_id_col)
 
-        # Extract encounter data
         encounter_data = []
         for enc_id, group in grouped:
             tokens = group[self.token_col].tolist()
@@ -237,14 +155,11 @@ class FinetuneDataset(Dataset):
                 'token_times': token_times,
             })
 
-        # Sort by admission time
         encounter_data.sort(key=lambda x: x['sort_key'] if x['sort_key'] is not None else 0)
 
-        # Take last max_seg encounters (most recent history)
         if len(encounter_data) > self.max_seg:
             encounter_data = encounter_data[-self.max_seg:]
 
-        # Extract tokens and times
         _tokens = [enc['tokens'] for enc in encounter_data]
 
         if self.time_col:
@@ -266,40 +181,16 @@ class FinetuneDataset(Dataset):
 
         if _times is not None:
             item["segment_time"] = _times
-
         if _token_times is not None:
             item["token_time"] = self._pad_token_time(_token_times)
 
-        # Add label
         item["label"] = torch.tensor(label, dtype=torch.long)
-
-        return item
-
-    def _get_empty_item(self, label):
-        """
-        Return an item with empty/padded data for patients with no history.
-        This happens for mortality/los tasks when it's the patient's first admission.
-        """
-        # Create all-padding tensors
-        _tokens = [["[CLS]", "[PAD]"]] * 1  # Single segment with just CLS
-        _tokens, _seg_attn = self._pad_segment(_tokens)
-
-        item = get_batch_encoding(self.tokenizer, _tokens)
-        item["segment_attention_mask"] = _seg_attn
-
-        # Add zero times
-        item["segment_time"] = torch.zeros(self.max_seg, dtype=torch.float32)
-        item["token_time"] = torch.zeros(self.max_seg, self.max_seq_len, dtype=torch.float32)
-
-        # Add label
-        item["label"] = torch.tensor(label, dtype=torch.long)
-
         return item
 
     def _pad_segment(self, tokens):
         if len(tokens) > self.max_seg:
             seg_attn = torch.ones(self.max_seg)
-            tokens = tokens[-self.max_seg:]  # Take most recent
+            tokens = tokens[-self.max_seg:]
         else:
             seg_attn = torch.cat([
                 torch.ones(len(tokens)),
@@ -336,10 +227,7 @@ class FinetuneDataset(Dataset):
                 for t in (token_times or [])
             ]
 
-            if times_clean:
-                times_clean = [0.0] + times_clean  # [CLS] token
-            else:
-                times_clean = [0.0]
+            times_clean = [0.0] + times_clean if times_clean else [0.0]
 
             if len(times_clean) > self.max_seq_len:
                 times_clean = times_clean[:self.max_seq_len]
@@ -352,7 +240,7 @@ class FinetuneDataset(Dataset):
         return torch.tensor(padded_times, dtype=torch.float32)
 
     def get_class_weights(self):
-        """Get class weights for handling imbalanced data."""
+        """Get inverse frequency weights for imbalanced data."""
         labels = torch.tensor([self.label_dict[s] for s in self.samples])
         class_counts = torch.bincount(labels, minlength=self.num_classes).float()
         weights = 1.0 / (class_counts + 1e-6)
@@ -361,13 +249,9 @@ class FinetuneDataset(Dataset):
 
 
 def collate_finetune(batch):
-    """Collate function for fine-tuning dataset."""
-    # Stack all tensors
     result = {}
     for key in batch[0].keys():
-        if key == "label":
-            result[key] = torch.stack([item[key] for item in batch])
-        elif isinstance(batch[0][key], torch.Tensor):
+        if isinstance(batch[0][key], torch.Tensor):
             result[key] = torch.stack([item[key] for item in batch])
         else:
             result[key] = [item[key] for item in batch]
@@ -375,15 +259,10 @@ def collate_finetune(batch):
 
 
 def create_patient_splits(labels_path: str, output_dir: str, seed: int = 42):
-    """
-    Create and save patient-level train/val/test splits.
-
-    This ensures the same patients are used for all tasks.
-    """
+    """Create and save patient-level train/val/test splits."""
     labels = pd.read_csv(labels_path)
     patients = labels['subject_id'].unique()
 
-    # Use local RNG to avoid affecting global random state
     rng = np.random.default_rng(seed)
     patients = rng.permutation(patients)
 

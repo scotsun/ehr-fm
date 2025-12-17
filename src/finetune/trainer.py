@@ -1,18 +1,9 @@
-"""
-Fine-tuning Trainer for HAT downstream tasks.
-
-Supports:
-- AUROC and AUPRC metrics (important for imbalanced data)
-- Class weighting for imbalanced classes
-- Early stopping
-- Learning rate scheduling
-- Mixed precision training
-"""
+"""Fine-tuning Trainer for HAT downstream tasks."""
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from torch.amp import GradScaler, autocast  # PyTorch 2.0+ style
+from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import numpy as np
 import pandas as pd
@@ -24,9 +15,8 @@ from sklearn.metrics import (
     average_precision_score,
     accuracy_score,
     f1_score,
-    classification_report,
 )
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 import wandb
 
 from src.finetune.model import HATForSequenceClassification
@@ -43,27 +33,22 @@ class FinetuneTrainer:
         val_dataset: FinetuneDataset,
         task: DownstreamTask,
         output_dir: str,
-        # Training hyperparameters
         learning_rate: float = 2e-5,
         batch_size: int = 32,
         num_epochs: int = 10,
         warmup_ratio: float = 0.1,
         weight_decay: float = 0.01,
-        # Training options
         use_class_weights: bool = True,
         use_amp: bool = True,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
-        # Early stopping
         patience: int = 3,
-        metric_for_best_model: str = "auprc",  # "auroc" or "auprc"
-        # Logging
+        metric_for_best_model: str = "auprc",
         log_interval: int = 100,
         eval_interval: int = 500,
         use_wandb: bool = False,
         wandb_project: str = "hat-finetune",
         wandb_run_name: Optional[str] = None,
-        # Hardware
         device: str = "auto",
         num_workers: int = 4,
     ):
@@ -79,11 +64,11 @@ class FinetuneTrainer:
 
         self.model = model.to(device)
         self.device = device
+        self.device_type = device.split(':')[0]
         self.task = task
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Hyperparameters
         self.learning_rate = learning_rate
         self.batch_size = batch_size
         self.num_epochs = num_epochs
@@ -92,7 +77,6 @@ class FinetuneTrainer:
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
 
-        # Data loaders
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
@@ -103,27 +87,24 @@ class FinetuneTrainer:
         )
         self.val_loader = DataLoader(
             val_dataset,
-            batch_size=batch_size * 2,  # Larger batch for eval
+            batch_size=batch_size * 2,
             shuffle=False,
             collate_fn=collate_finetune,
             num_workers=num_workers,
             pin_memory=True,
         )
 
-        # Class weights for imbalanced data
         self.class_weights = None
         if use_class_weights:
             weights = train_dataset.get_class_weights()
             self.class_weights = weights.to(device)
 
-        # Optimizer
         self.optimizer = torch.optim.AdamW(
             model.parameters(),
             lr=learning_rate,
             weight_decay=weight_decay,
         )
 
-        # Learning rate scheduler
         total_steps = len(self.train_loader) * num_epochs // gradient_accumulation_steps
         warmup_steps = int(total_steps * warmup_ratio)
 
@@ -144,23 +125,22 @@ class FinetuneTrainer:
             milestones=[warmup_steps],
         )
 
-        # Mixed precision
-        self.use_amp = use_amp
-        self.scaler = GradScaler() if use_amp else None
+        # GradScaler only works with CUDA
+        self.use_amp = use_amp and self.device_type == "cuda"
+        self.scaler = GradScaler() if self.use_amp else None
+        if use_amp and not self.use_amp:
+            print(f"Warning: AMP disabled on {self.device_type} (GradScaler requires CUDA)")
 
-        # Early stopping
         self.patience = patience
         self.metric_for_best_model = metric_for_best_model
         self.best_metric = 0.0
         self.patience_counter = 0
 
-        # Logging
         self.log_interval = log_interval
         self.eval_interval = eval_interval
         self.use_wandb = use_wandb
         self.global_step = 0
 
-        # Initialize wandb
         if use_wandb:
             wandb.init(
                 project=wandb_project,
@@ -177,7 +157,6 @@ class FinetuneTrainer:
                 },
             )
 
-        # Track metrics
         self.train_losses = []
         self.val_metrics_history = []
 
@@ -195,13 +174,9 @@ class FinetuneTrainer:
         print(f"{'='*60}\n")
 
         for epoch in range(self.num_epochs):
-            # Train one epoch
             train_loss = self._train_epoch(epoch)
-
-            # Evaluate
             val_metrics = self.evaluate()
 
-            # Log epoch results
             print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
             print(f"  Train Loss: {train_loss:.4f}")
             print(f"  Val AUROC:  {val_metrics['auroc']:.4f}")
@@ -215,7 +190,6 @@ class FinetuneTrainer:
                     **{f"val/{k}": v for k, v in val_metrics.items()},
                 })
 
-            # Early stopping check
             current_metric = val_metrics[self.metric_for_best_model]
             if current_metric > self.best_metric:
                 self.best_metric = current_metric
@@ -228,17 +202,12 @@ class FinetuneTrainer:
                     print(f"\nEarly stopping triggered after {epoch + 1} epochs")
                     break
 
-            # Save checkpoint
             self._save_checkpoint(f"epoch_{epoch + 1}")
 
-        # Save final checkpoint
         self._save_checkpoint("final")
-
-        # Load best model for final evaluation
         self._load_checkpoint("best")
 
         print(f"\nTraining complete! Best {self.metric_for_best_model}: {self.best_metric:.4f}")
-
         return self.best_metric
 
     def _train_epoch(self, epoch: int) -> float:
@@ -250,7 +219,6 @@ class FinetuneTrainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}")
 
         for batch_idx, batch in enumerate(pbar):
-            # Move to device
             input_ids = batch["input_ids"].to(self.device)
             attention_mask = batch["attention_mask"].to(self.device)
             segment_attention_mask = batch["segment_attention_mask"].to(self.device)
@@ -264,47 +232,38 @@ class FinetuneTrainer:
             if token_time is not None:
                 token_time = token_time.to(self.device)
 
-            # Forward pass
-            with autocast(device_type='cuda', enabled=self.use_amp):
+            with autocast(device_type=self.device_type, enabled=self.use_amp):
+                # Avoid computing loss twice when using class weights
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     segment_attention_mask=segment_attention_mask,
                     segment_time=segment_time,
                     token_time=token_time,
-                    labels=labels,
+                    labels=None if self.class_weights is not None else labels,
                 )
-                loss = outputs["loss"]
 
-                # Apply class weights if available
                 if self.class_weights is not None:
-                    # Recompute loss with class weights
                     logits = outputs["logits"]
-                    loss = nn.functional.cross_entropy(
-                        logits, labels, weight=self.class_weights
-                    )
+                    loss = nn.functional.cross_entropy(logits, labels, weight=self.class_weights)
+                else:
+                    loss = outputs["loss"]
 
                 loss = loss / self.gradient_accumulation_steps
 
-            # Backward pass
             if self.use_amp:
                 self.scaler.scale(loss).backward()
             else:
                 loss.backward()
 
-            # Gradient accumulation
             if (batch_idx + 1) % self.gradient_accumulation_steps == 0:
                 if self.use_amp:
                     self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.max_grad_norm
-                    )
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                 else:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.parameters(), self.max_grad_norm
-                    )
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                     self.optimizer.step()
 
                 self.scheduler.step()
@@ -314,13 +273,11 @@ class FinetuneTrainer:
             total_loss += loss.item() * self.gradient_accumulation_steps
             num_batches += 1
 
-            # Update progress bar
             pbar.set_postfix({
                 "loss": f"{loss.item() * self.gradient_accumulation_steps:.4f}",
                 "lr": f"{self.scheduler.get_last_lr()[0]:.2e}",
             })
 
-            # Log to wandb
             if self.use_wandb and self.global_step % self.log_interval == 0:
                 wandb.log({
                     "train/loss": loss.item() * self.gradient_accumulation_steps,
@@ -328,20 +285,15 @@ class FinetuneTrainer:
                     "global_step": self.global_step,
                 })
 
-        # Handle remaining accumulated gradients if batch count is not divisible
-        # by gradient_accumulation_steps (important fix for incomplete final batch)
+        # Handle remaining accumulated gradients
         if num_batches % self.gradient_accumulation_steps != 0:
             if self.use_amp:
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.max_grad_norm
-                )
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
-                torch.nn.utils.clip_grad_norm_(
-                    self.model.parameters(), self.max_grad_norm
-                )
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                 self.optimizer.step()
             self.scheduler.step()
             self.optimizer.zero_grad()
@@ -375,7 +327,7 @@ class FinetuneTrainer:
             if token_time is not None:
                 token_time = token_time.to(self.device)
 
-            with autocast(device_type='cuda', enabled=self.use_amp):
+            with autocast(device_type=self.device_type, enabled=self.use_amp):
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -400,51 +352,35 @@ class FinetuneTrainer:
         all_preds = np.array(all_preds)
         all_labels = np.array(all_labels)
 
-        # Compute metrics
-        metrics = {
-            "accuracy": accuracy_score(all_labels, all_preds),
-        }
+        metrics = {"accuracy": accuracy_score(all_labels, all_preds)}
 
         if self.model.num_classes == 2:
-            # Binary classification metrics
             all_probs = np.array(all_probs)
             metrics["auroc"] = roc_auc_score(all_labels, all_probs)
             metrics["auprc"] = average_precision_score(all_labels, all_probs)
             metrics["f1"] = f1_score(all_labels, all_preds)
-
-            # Compute positive rate for calibration check
             metrics["pred_positive_rate"] = all_preds.mean()
             metrics["true_positive_rate"] = all_labels.mean()
         else:
-            # Multi-class metrics
             all_probs = np.vstack(all_probs)
             try:
-                metrics["auroc"] = roc_auc_score(
-                    all_labels, all_probs, multi_class="ovr", average="macro"
-                )
+                metrics["auroc"] = roc_auc_score(all_labels, all_probs, multi_class="ovr", average="macro")
             except ValueError:
                 metrics["auroc"] = 0.0
 
             try:
-                # For AUPRC in multi-class, compute weighted average by class frequency
-                # This is more stable than macro average when some classes have few samples
+                # Weighted average AUPRC by class frequency
                 auprc_scores = []
                 class_weights = []
                 for i in range(self.model.num_classes):
                     binary_labels = (all_labels == i).astype(int)
                     class_count = binary_labels.sum()
                     if class_count > 0:
-                        auprc_scores.append(
-                            average_precision_score(binary_labels, all_probs[:, i])
-                        )
+                        auprc_scores.append(average_precision_score(binary_labels, all_probs[:, i]))
                         class_weights.append(class_count)
                 if auprc_scores:
-                    # Weighted average AUPRC
                     total_weight = sum(class_weights)
-                    metrics["auprc"] = sum(
-                        s * w for s, w in zip(auprc_scores, class_weights)
-                    ) / total_weight
-                    # Also report macro for comparison
+                    metrics["auprc"] = sum(s * w for s, w in zip(auprc_scores, class_weights)) / total_weight
                     metrics["auprc_macro"] = np.mean(auprc_scores)
                 else:
                     metrics["auprc"] = 0.0
@@ -457,11 +393,18 @@ class FinetuneTrainer:
             metrics["f1_weighted"] = f1_score(all_labels, all_preds, average="weighted")
 
         self.val_metrics_history.append(metrics)
-
         return metrics
 
     def _save_checkpoint(self, name: str):
         """Save a checkpoint."""
+        config_dict = {
+            "vocab_size": self.model.config.vocab_size,
+            "d_model": self.model.config.d_model,
+            "d_ff": self.model.config.d_ff,
+            "n_blocks": self.model.config.n_blocks,
+            "n_heads": self.model.config.n_heads,
+        }
+
         checkpoint = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
@@ -470,6 +413,7 @@ class FinetuneTrainer:
             "best_metric": self.best_metric,
             "task": self.task.value,
             "num_classes": self.model.num_classes,
+            "config": config_dict,
         }
 
         path = self.output_dir / f"checkpoint_{name}.pt"
@@ -489,47 +433,26 @@ def run_finetune(
     labels_path: str,
     output_dir: str,
     tokenizer_path: str,
-    # Model args
     pooling: str = "last_cls",
     dropout: float = 0.1,
     freeze_encoder: bool = False,
-    # Training args
     learning_rate: float = 2e-5,
     batch_size: int = 32,
     num_epochs: int = 10,
     warmup_ratio: float = 0.1,
-    # Options
     use_wandb: bool = False,
     seed: int = 42,
 ):
-    """
-    Main function to run fine-tuning.
-
-    Args:
-        task: Task name (mortality, readmission_30d, prolonged_los, icd_chapter)
-        pretrained_path: Path to pre-trained checkpoint
-        data_path: Path to parquet data directory
-        labels_path: Path to labels CSV file
-        output_dir: Output directory for checkpoints and logs
-        tokenizer_path: Path to tokenizer file
-        ... (other args)
-    """
+    """Main function to run fine-tuning."""
     from tokenizers import Tokenizer
 
-    # Set seed
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    # Load tokenizer
     tokenizer = Tokenizer.from_file(tokenizer_path)
-
-    # Load labels
     labels_df = pd.read_csv(labels_path)
-
-    # Create task enum
     task_enum = DownstreamTask(task)
 
-    # Create datasets
     print(f"Creating datasets for task: {task}")
     train_dataset = FinetuneDataset(
         data_path=data_path,
@@ -552,7 +475,6 @@ def run_finetune(
     print(f"Val samples: {len(val_dataset)}")
     print(f"Num classes: {train_dataset.num_classes}")
 
-    # Create model
     from src.finetune.model import create_finetune_model
 
     model = create_finetune_model(
@@ -563,7 +485,6 @@ def run_finetune(
         freeze_encoder=freeze_encoder,
     )
 
-    # Create trainer
     trainer = FinetuneTrainer(
         model=model,
         train_dataset=train_dataset,
@@ -577,10 +498,8 @@ def run_finetune(
         use_wandb=use_wandb,
     )
 
-    # Train
     best_metric = trainer.train()
 
-    # Final evaluation on test set
     print("\nEvaluating on test set...")
     test_dataset = FinetuneDataset(
         data_path=data_path,
@@ -604,7 +523,6 @@ def run_finetune(
     for k, v in test_metrics.items():
         print(f"  {k}: {v:.4f}")
 
-    # Save test results
     results = {
         "task": task,
         "best_val_metric": best_metric,
