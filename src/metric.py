@@ -23,15 +23,14 @@ def pred_and_target_sets(
 ):
     last_set_id = set_attention_mask.sum(dim=1) - 1
     t_tokens = input_ids[range(len(last_set_id)), last_set_id, 1 : k + 1]
-    # p_tokens = (
-    #     logits[range(len(last_set_id)), last_set_id, 1]
-    #     .topk(
-    #         k=k,
-    #         dim=-1,
-    #     )
-    #     .indices
-    # )
-    p_tokens = logits[range(len(last_set_id)), last_set_id, 1 : k + 1].argmax(dim=-1)
+    p_tokens = (
+        logits[range(len(last_set_id)), last_set_id, 1]
+        .topk(
+            k=k,
+            dim=-1,
+        )
+        .indices
+    )
     return p_tokens, t_tokens
 
 
