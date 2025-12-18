@@ -1,7 +1,8 @@
 import torch
 
 from transformers import PreTrainedModel, PretrainedConfig
-from typing import Type
+
+from src.models.base import FMBase, FMBaseWithHeads
 
 
 def is_model_half(model: torch.nn.Module):
@@ -13,9 +14,15 @@ def is_model_half(model: torch.nn.Module):
 
 
 def build_model(
-    cfg: PretrainedConfig, model_class: Type[PreTrainedModel], device: str
+    cfg: PretrainedConfig, model_class: str, device: str
 ) -> PreTrainedModel:
     """Build the model"""
-    model = model_class(cfg)
+    match model_class:
+        case "FMBase":
+            model = FMBase(cfg)
+        case "FMBaseWithHeads":
+            model = FMBaseWithHeads(cfg)
+        case _:
+            raise ValueError(f"Unknown model class: {model_class}")
     model.to(device)
     return model

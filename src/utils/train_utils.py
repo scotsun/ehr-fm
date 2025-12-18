@@ -102,3 +102,7 @@ def make_fmbase_signature(cfg: FMConfig) -> ModelSignature:
     )
     signature = ModelSignature(inputs=input_scheme, outputs=output_scheme)
     return signature
+
+
+def build_trainer(cfg: FMConfig):
+    pass

@@ -18,6 +18,7 @@ from tqdm import tqdm
 
 from src.utils.data_utils import random_masking, masking_last_set
 from src.models.base import FMBase, FMBaseWithHeads
+from src.models.bert import FMBert
 from src.metric import topk_accuracy, recall_at_k, ndcg_at_k
 
 
@@ -172,6 +173,143 @@ class Trainer(ABC):
     @abstractmethod
     def _valid(self, **kwarg):
         pass
+
+
+class BertTrainer(Trainer):
+    def __init__(
+        self,
+        model: FMBert | DDP,
+        tokenizer: Tokenizer,
+        optimizer: Optimizer,
+        criterions: dict[str, nn.Module],
+        early_stopping: EarlyStopping | None,
+        verbose_period: int,
+        device: torch.device,
+        model_signature: ModelSignature | None,
+        trainer_args: dict,
+    ) -> None:
+        super().__init__(
+            model, optimizer, early_stopping, verbose_period, device, model_signature
+        )
+        self.tokenizer = tokenizer
+        self.criterions = criterions
+        self.trainer_args = trainer_args
+
+    def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
+        model: FMBert | DDP = self.model
+        model.train()
+        scaler = self.scaler
+        optimizer = self.optimizer
+        criterions = self.criterions
+        trainer_args = self.trainer_args
+        device = self.device
+
+        with tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose) as bar:
+            bar.set_description(f"Epoch {epoch_id}")
+            for batch_id, batch in enumerate(bar):
+                optimizer.zero_grad()
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                t = batch["t"].to(device)
+
+                masked_input_ids, labels = random_masking(
+                    input_ids.clone(), self.tokenizer, trainer_args["mlm_probability"]
+                )
+                if (labels == -100).all():
+                    continue
+                with autocast(device_type="cuda", dtype=torch.float16):
+                    logits, _ = model(
+                        input_ids=masked_input_ids,
+                        attention_mask=attention_mask,
+                        t=t,
+                    )
+
+                    loss = criterions["cross_entropy"](
+                        logits.view(-1, logits.size(-1)),
+                        labels.view(-1),
+                    )
+
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+
+                bar.set_postfix(mlm_loss=float(loss))
+
+                cur_step = epoch_id * len(dataloader) + batch_id
+                if self._is_main_process() and cur_step % 100 == 0:
+                    mlflow.log_metrics({"train_mlm_loss": float(loss)}, step=cur_step)
+        return
+
+    def evaluate(self, dataloader: DataLoader, verbose: bool) -> torch.Tensor:
+        model: FMBert | DDP = self.model
+        model.eval()
+        device = self.device
+        criterions = self.criterions
+        trainer_args = self.trainer_args
+
+        counter = torch.zeros(4, device=device)
+        with torch.no_grad():
+            for batch in tqdm(
+                dataloader, unit="batch", mininterval=0, disable=not verbose
+            ):
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                t = batch["t"].to(device)
+
+                masked_input_ids, labels = random_masking(
+                    input_ids.clone(), self.tokenizer, trainer_args["mlm_probability"]
+                )
+                with autocast(device_type="cuda", dtype=torch.float16):
+                    logits, _ = model(
+                        input_ids=masked_input_ids,
+                        attention_mask=attention_mask,
+                        t=t,
+                    )
+                    loss = criterions["cross_entropy"](
+                        logits.view(-1, logits.size(-1)), labels.view(-1)
+                    )
+
+                top1_acc = topk_accuracy(logits, labels, 1)
+                top10_acc = topk_accuracy(logits, labels, 10)
+
+                counter[0] += 1
+                counter[1] += loss.item()
+                counter[2] += top1_acc.item()
+                counter[3] += top10_acc.item()
+
+        dist.all_reduce(counter, op=dist.ReduceOp.SUM)
+        return (
+            (counter[1] / counter[0]).item(),
+            (counter[2] / counter[0]).item(),
+            (counter[3] / counter[0]).item(),
+        )
+
+    def _valid(self, dataloader, verbose, epoch_id):
+        """
+        log all the metrics in mlflow;
+        return the metric for save-best/early-stop.
+            {
+                "callback_metric": ...,
+                "logged_metrics": {...}
+            }
+        """
+        val_mlm, val_top1, val_top10 = self.evaluate(dataloader, verbose)
+        if verbose:
+            print(
+                f"epoch {epoch_id}/val_mlm_loss: {round(val_mlm, 3)}/"
+                f"val_top1_acc: {round(val_top1, 3)}/"
+                f"val_top10_acc: {round(val_top10, 3)}"
+            )
+
+        valid_metrics = {
+            "callback_metric": val_mlm,
+            "logged_metrics": {
+                "val_mlm_loss": val_mlm,
+                "val_top1_acc": val_top1,
+                "val_top10_acc": val_top10,
+            },
+        }
+        return valid_metrics
 
 
 class BaseTrainer(Trainer):

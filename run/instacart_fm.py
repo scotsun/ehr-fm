@@ -58,7 +58,7 @@ def main():
         trainer=cfg_dict["trainer"],
         **cfg_dict["model"],
     )
-    model = build_model(cfg, FMBase, device)
+    model = build_model(cfg, "FMBase", device)
 
     signature = make_fmbase_signature(cfg)
 
@@ -70,7 +70,6 @@ def main():
             "cross_entropy": CrossEntropyLoss(ignore_index=-100),
             # "kl_div": KLDivLoss(reduction="batchmean"),
         },
-        # criterions={"cross_entropy": CrossEntropyLoss(ignore_index=-100)},
         early_stopping=EarlyStopping(
             patience=cfg.trainer["early_stopping_patience"],
             mode=cfg.trainer["early_stopping_mode"],
