@@ -5,7 +5,14 @@ from src.layers.ffn import FFNSwiGLUBlock
 
 
 class BiGRU(nn.Module):
-    def __init__(self, d_model, d_hidden, d_out, num_layers=1, dropout=0.0):
+    def __init__(
+        self,
+        d_model: int,
+        d_hidden: int,
+        d_out: int,
+        num_layers: int = 1,
+        dropout: float = 0.0,
+    ):
         super().__init__()
         self.gru = nn.GRU(
             input_size=d_model,
@@ -61,10 +68,24 @@ class BiGRU(nn.Module):
 
 
 class Downstream(nn.Module):
-    def __init__(self, d_model: int, d_hidden: int, d_out: int, set_pool: str) -> None:
+    def __init__(
+        self,
+        d_model: int,
+        d_hidden: int,
+        d_out: int,
+        model_type: str,
+        set_pool: str,
+    ) -> None:
         super().__init__()
         self.set_pool = set_pool
-        self.net = FFNSwiGLUBlock(d_model, d_hidden, d_out)
+        self.model_type = model_type
+        match model_type:
+            case "mlp":
+                self.net = FFNSwiGLUBlock(d_model, d_hidden, d_out)
+            case "gru":
+                self.net = BiGRU(d_model, d_hidden, d_out)
+            case _:
+                raise ValueError(f"Unknown model_type: {model_type}")
 
     def _masked_avg_pool(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         x = x * mask.unsqueeze(-1)
@@ -75,9 +96,15 @@ class Downstream(nn.Module):
     ) -> torch.Tensor:
         match self.set_pool:
             case "mean":
-                x = self._masked_avg_pool(x, set_mask)
+                x = self._masked_avg_pool(x, mask)
             case "cls":
                 x = x.select(dim=-2, index=0)
             case _:
                 raise ValueError(f"Unknown set_pool: {self.set_pool}")
-        return self.net(x)
+
+        match self.model_type:
+            case "mlp":
+                x = self._masked_avg_pool(x, set_mask)
+                return self.net(x)
+            case "gru":
+                return self.net(x, set_mask)

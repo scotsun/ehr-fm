@@ -5,8 +5,6 @@ import torch
 import torch.distributed as dist
 import argparse
 
-from torch.optim import AdamW
-from torch.nn import CrossEntropyLoss, KLDivLoss
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, random_split, DistributedSampler
 
@@ -16,14 +14,12 @@ from setproctitle import setproctitle
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.utils.data_utils import SeqSet
-from src.trainer import BaseTrainer, BaseWithHeadsTrainer, EarlyStopping
 from src.models import FMConfig
-from src.models.base import FMBase, FMBaseWithHeads
 from src.utils.model_utils import build_model
 from src.utils.train_utils import (
     load_cfg,
     setup_training,
-    make_fmbase_signature,
+    build_trainer,
     setup_mlflow_tracked_fit,
 )
 
@@ -60,25 +56,7 @@ def main():
     )
     model = build_model(cfg, "FMBase", device)
 
-    signature = make_fmbase_signature(cfg)
-
-    trainer = BaseTrainer(
-        model=model,
-        tokenizer=tk,
-        optimizer=AdamW(model.parameters(), lr=cfg.trainer["lr"]),
-        criterions={
-            "cross_entropy": CrossEntropyLoss(ignore_index=-100),
-            # "kl_div": KLDivLoss(reduction="batchmean"),
-        },
-        early_stopping=EarlyStopping(
-            patience=cfg.trainer["early_stopping_patience"],
-            mode=cfg.trainer["early_stopping_mode"],
-        ),
-        verbose_period=1,
-        device=device,
-        model_signature=signature,
-        trainer_args=cfg.trainer,
-    )
+    trainer = build_trainer(cfg, model, tk, device)
 
     if is_distributed:
         trainer.model = DDP(model, device_ids=[rank])

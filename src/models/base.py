@@ -61,7 +61,7 @@ class FMBase(PreTrainedModel):
 
 class FMBaseWithHeads(PreTrainedModel):
     config_class = FMConfig
-    model_type = "fm-base-with-heads"
+    model_type = "fm-base-with_heads"
 
     def __init__(self, config: FMConfig):
         super().__init__(config)

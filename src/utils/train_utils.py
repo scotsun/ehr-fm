@@ -5,12 +5,15 @@ import torch
 import torch.distributed as dist
 import mlflow
 
+from torch.nn import CrossEntropyLoss, KLDivLoss
 from mlflow.types import TensorSpec, Schema
 from mlflow.models import ModelSignature
 from datetime import timedelta
+from transformers import PreTrainedModel
+from tokenizers import Tokenizer
 
 from src.models import FMConfig
-from src.trainer import Trainer
+from src.trainer import EarlyStopping, Trainer, BaseTrainer, BaseWithHeadsTrainer
 
 
 def load_cfg(cfg_path) -> dict:
@@ -71,7 +74,7 @@ def setup_mlflow_tracked_fit(
         )
 
 
-def make_fmbase_signature(cfg: FMConfig) -> ModelSignature:
+def make_fm_signature(cfg: FMConfig) -> ModelSignature:
     max_seq = cfg.dataset["max_seq"]
     max_set_size = cfg.dataset["max_set_size"]
     input_scheme = Schema(
@@ -104,5 +107,46 @@ def make_fmbase_signature(cfg: FMConfig) -> ModelSignature:
     return signature
 
 
-def build_trainer(cfg: FMConfig):
-    pass
+def build_trainer(
+    cfg: FMConfig, fm: PreTrainedModel, tk: Tokenizer, device: torch.device
+):
+    signature = make_fm_signature(cfg)
+    model_type = fm.model_type
+    match model_type:
+        case "fm-base":
+            trainer = BaseTrainer(
+                model=fm,
+                tokenizer=tk,
+                optimizer=torch.optim.AdamW(fm.parameters(), lr=cfg.trainer["lr"]),
+                criterions={
+                    "cross_entropy": CrossEntropyLoss(ignore_index=-100),
+                },
+                early_stopping=EarlyStopping(
+                    patience=cfg.trainer["early_stopping_patience"],
+                    mode=cfg.trainer["early_stopping_mode"],
+                ),
+                verbose_period=1,
+                device=device,
+                model_signature=signature,
+                trainer_args=cfg.trainer,
+            )
+        case "fm-base-with_heads":
+            trainer = BaseWithHeadsTrainer(
+                model=fm,
+                tokenizer=tk,
+                optimizer=torch.optim.AdamW(fm.parameters(), lr=cfg.trainer["lr"]),
+                criterions={
+                    "cross_entropy": CrossEntropyLoss(ignore_index=-100),
+                    "kl_div": KLDivLoss(reduction="batchmean"),
+                },
+                early_stopping=EarlyStopping(
+                    patience=cfg.trainer["early_stopping_patience"],
+                    mode=cfg.trainer["early_stopping_mode"],
+                ),
+                verbose_period=1,
+                device=device,
+                model_signature=signature,
+                trainer_args=cfg.trainer,
+            )
+
+    return trainer
