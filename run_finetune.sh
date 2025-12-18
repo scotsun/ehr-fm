@@ -44,17 +44,17 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 echo ""
 
 # ==================== Configuration ====================
-# Use the best pretrain from 20251210_081108
-PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251210_081108/best_model.pt"
+# Use the best pretrain from 20251210_081245
+PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251210_081245/best_model.pt"
 DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
 LABELS_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/downstream_labels.csv"
-TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251210_081108/tokenizer.json"
+TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251210_081245/tokenizer.json"
 OUTPUT_DIR="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/finetune"
 
 # Training hyperparameters
 LR=1e-5
 BATCH_SIZE=32
-EPOCHS=10
+EPOCHS=30
 WARMUP_RATIO=0.1
 MAX_SEG=8      
 MAX_SEQ_LEN=512  
@@ -96,7 +96,6 @@ if [ "$TASK" == "all" ]; then
         --warmup-ratio $WARMUP_RATIO \
         --max-seg $MAX_SEG \
         --max-seq-len $MAX_SEQ_LEN \
-        --freeze-encoder \
         $WANDB_FLAG
 else
     python run_finetune.py \
@@ -112,7 +111,6 @@ else
         --warmup-ratio $WARMUP_RATIO \
         --max-seg $MAX_SEG \
         --max-seq-len $MAX_SEQ_LEN \
-        --freeze-encoder \
         $WANDB_FLAG
 fi
 
