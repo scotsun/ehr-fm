@@ -55,7 +55,6 @@ def main():
         **cfg_dict["model"],
     )
     model = build_model(cfg, "FMBase", device)
-
     trainer = build_trainer(cfg, model, tk, device)
 
     if is_distributed:

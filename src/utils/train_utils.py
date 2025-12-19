@@ -112,41 +112,34 @@ def build_trainer(
 ):
     signature = make_fm_signature(cfg)
     model_type = fm.model_type
+
+    trainer_args = {
+        "model": fm,
+        "tokenizer": tk,
+        "optimizer": torch.optim.AdamW(fm.parameters(), lr=cfg.trainer["lr"]),
+        "early_stopping": EarlyStopping(
+            patience=cfg.trainer["early_stopping_patience"],
+            mode=cfg.trainer["early_stopping_mode"],
+        ),
+        "verbose_period": 1,
+        "device": device,
+        "model_signature": signature,
+        "trainer_args": cfg.trainer,
+    }
+
     match model_type:
         case "fm-base":
-            trainer = BaseTrainer(
-                model=fm,
-                tokenizer=tk,
-                optimizer=torch.optim.AdamW(fm.parameters(), lr=cfg.trainer["lr"]),
-                criterions={
-                    "cross_entropy": CrossEntropyLoss(ignore_index=-100),
-                },
-                early_stopping=EarlyStopping(
-                    patience=cfg.trainer["early_stopping_patience"],
-                    mode=cfg.trainer["early_stopping_mode"],
-                ),
-                verbose_period=1,
-                device=device,
-                model_signature=signature,
-                trainer_args=cfg.trainer,
-            )
+            trainer_class = BaseTrainer
+            criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-base-with_heads":
-            trainer = BaseWithHeadsTrainer(
-                model=fm,
-                tokenizer=tk,
-                optimizer=torch.optim.AdamW(fm.parameters(), lr=cfg.trainer["lr"]),
-                criterions={
-                    "cross_entropy": CrossEntropyLoss(ignore_index=-100),
-                    "kl_div": KLDivLoss(reduction="batchmean"),
-                },
-                early_stopping=EarlyStopping(
-                    patience=cfg.trainer["early_stopping_patience"],
-                    mode=cfg.trainer["early_stopping_mode"],
-                ),
-                verbose_period=1,
-                device=device,
-                model_signature=signature,
-                trainer_args=cfg.trainer,
-            )
+            trainer_class = BaseWithHeadsTrainer
+            criterions = {
+                "cross_entropy": CrossEntropyLoss(ignore_index=-100),
+                "kl_div": KLDivLoss(reduction="batchmean"),
+            }
+        case _:
+            raise ValueError(f"Unknown model type: {model_type}")
+
+    trainer = trainer_class(criterions=criterions, **trainer_args)
 
     return trainer
