@@ -21,14 +21,16 @@ class DownstreamTask(Enum):
 
 
 # Task configurations for prediction time points
-# - "admission_48h": Use only first 48 hours of current admission (for predicting future outcomes)
+# - "admission_24h": Use only first 24 hours of current admission (for predicting future outcomes)
+# - "admission_48h": Use only first 48 hours of current admission
 # - "discharge": Use entire admission (for summarizing or predicting post-discharge events)
+# - "exclude_target_dx": Exclude diagnosis codes from target admission (prevent data leakage)
 TASK_CONFIGS = {
-    DownstreamTask.MORTALITY: {"prediction_time": "admission_48h", "max_hours": 48},
-    DownstreamTask.PROLONGED_LOS: {"prediction_time": "admission_48h", "max_hours": 48},
-    DownstreamTask.READMISSION_30D: {"prediction_time": "discharge", "max_hours": None},
-    DownstreamTask.ICD_CHAPTER: {"prediction_time": "discharge", "max_hours": None},
-    DownstreamTask.ABNORMAL_LAB: {"prediction_time": "discharge", "max_hours": None},
+    DownstreamTask.MORTALITY: {"prediction_time": "admission_24h", "max_hours": 24, "exclude_target_dx": True},
+    DownstreamTask.PROLONGED_LOS: {"prediction_time": "admission_48h", "max_hours": 48, "exclude_target_dx": True},
+    DownstreamTask.READMISSION_30D: {"prediction_time": "discharge", "max_hours": None, "exclude_target_dx": False},
+    DownstreamTask.ICD_CHAPTER: {"prediction_time": "discharge", "max_hours": None, "exclude_target_dx": False},
+    DownstreamTask.ABNORMAL_LAB: {"prediction_time": "discharge", "max_hours": None, "exclude_target_dx": False},
 }
 
 
@@ -144,21 +146,21 @@ class FinetuneDataset(Dataset):
 
         grouped = history_data.groupby(self.enc_id_col)
 
-        # Get max_hours for time-based truncation (only applies to target admission)
+        # Get task config for filtering
         max_hours = self.task_config.get("max_hours")
+        exclude_target_dx = self.task_config.get("exclude_target_dx", False)
 
         encounter_data = []
         for enc_id, group in grouped:
-            # For target admission with max_hours set, filter events by time
-            if enc_id == target_hadm_id and max_hours is not None:
-                if self.token_time_col and self.token_time_col in group.columns:
+            # For target admission, apply task-specific filtering
+            if enc_id == target_hadm_id:
+                # Exclude diagnosis codes if configured (prevent data leakage)
+                if exclude_target_dx:
+                    group = group[~group[self.token_col].str.startswith('DX:', na=False)]
+
+                # Apply time-based filtering
+                if max_hours is not None and self.token_time_col in group.columns:
                     group = group[group[self.token_time_col] <= max_hours]
-                if len(group) == 0:
-                    # Keep at least diagnosis codes (time_offset_hours < 0)
-                    group = history_data[
-                        (history_data[self.enc_id_col] == enc_id) &
-                        (history_data[self.token_time_col] <= 0)
-                    ]
 
             tokens = group[self.token_col].tolist()
             if len(tokens) == 0:
