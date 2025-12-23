@@ -89,7 +89,7 @@ class Downstream(nn.Module):
 
     def _masked_avg_pool(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         x = x * mask.unsqueeze(-1)
-        return x.sum(dim=-2) / mask.sum(dim=1, keepdim=True).unsqueeze(-1).clamp(min=1)
+        return x.sum(dim=-2) / mask.sum(dim=-1, keepdim=True).clamp(min=1)
 
     def forward(
         self, x: torch.Tensor, mask: torch.Tensor, set_mask: torch.Tensor

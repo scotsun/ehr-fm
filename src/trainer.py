@@ -16,7 +16,12 @@ from mlflow.models import ModelSignature
 from tokenizers import Tokenizer
 from tqdm import tqdm
 
-from src.utils.data_utils import random_masking, masking_last_set
+from src.utils.data_utils import (
+    random_masking,
+    random_masking_set,
+    masking_last_set,
+    observed_set_distribution,
+)
 from src.models.base import FMBase, FMBaseWithHeads
 from src.models.bert import FMBert
 from src.metric import topk_accuracy, recall_at_k, ndcg_at_k
@@ -520,51 +525,43 @@ class BaseWithHeadsTrainer(Trainer):
                 set_attention_mask = batch["set_attention_mask"].to(device)
                 t = batch["t"].to(device)
 
-                masked_input_ids, labels = random_masking(
-                    input_ids.clone(), self.tokenizer, trainer_args["mlm_probability"]
+                masked_input_ids, labels, set_mask = random_masking_set(
+                    input_ids=input_ids.clone(),
+                    set_attention_mask=set_attention_mask,
+                    tokenizer=self.tokenizer,
+                    mask_probability=trainer_args["mlm_probability"],
                 )
                 if (labels == -100).all():
                     continue
 
-                obs_set_tokens = input_ids[set_attention_mask][:, 1:]
-                target_dist = torch.zeros(
-                    obs_set_tokens.size(0),
-                    self.tokenizer.get_vocab_size(),
-                    device=device,
+                target_dist = observed_set_distribution(
+                    masked_input_ids=masked_input_ids,
+                    labels=labels,
+                    set_mask=set_mask,
+                    tokenizer=self.tokenizer,
                 )
-                target_dist.scatter_add_(
-                    1,
-                    obs_set_tokens,
-                    torch.ones_like(obs_set_tokens, dtype=target_dist.dtype),
-                )
-                target_dist /= obs_set_tokens.size(1) - 1
 
                 with autocast(device_type="cuda", dtype=torch.float16):
-                    logits_mlm, logits_dm, _ = model(
+                    _, logits_dm, _ = model(
                         input_ids=masked_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
                     )
 
-                    mlm_loss = criterions["cross_entropy"](
-                        logits_mlm.view(-1, logits_mlm.size(-1)),
-                        labels.view(-1),
-                    )
                     dm_loss = criterions["kl_div"](
                         F.log_softmax(logits_dm, dim=-1), target_dist
                     )
 
-                scaler.scale(mlm_loss + dm_loss).backward()
+                scaler.scale(dm_loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-                bar.set_postfix(mlm_loss=float(mlm_loss), dm_loss=float(dm_loss))
+                bar.set_postfix(dm_loss=float(dm_loss))
 
                 cur_step = epoch_id * len(dataloader) + batch_id
                 if self._is_main_process() and cur_step % 100 == 0:
                     mlflow.log_metrics(
                         {
-                            "train_mlm_loss": float(mlm_loss),
                             "train_dm_loss": float(dm_loss),
                         },
                         step=cur_step,
@@ -595,22 +592,19 @@ class BaseWithHeadsTrainer(Trainer):
                 masked_last_set_input_ids = masking_last_set(
                     input_ids.clone(), set_attention_mask, self.tokenizer
                 )
-                masked_input_ids, labels = random_masking(
-                    input_ids.clone(), self.tokenizer, trainer_args["mlm_probability"]
+                masked_input_ids, labels, set_mask = random_masking_set(
+                    input_ids=input_ids.clone(),
+                    set_attention_mask=set_attention_mask,
+                    tokenizer=self.tokenizer,
+                    mask_probability=trainer_args["mlm_probability"],
                 )
 
-                obs_set_tokens = input_ids[set_attention_mask][:, 1:]
-                target_dist = torch.zeros(
-                    obs_set_tokens.size(0),
-                    self.tokenizer.get_vocab_size(),
-                    device=device,
+                target_dist = observed_set_distribution(
+                    masked_input_ids=masked_input_ids,
+                    labels=labels,
+                    set_mask=set_mask,
+                    tokenizer=self.tokenizer,
                 )
-                target_dist.scatter_add_(
-                    1,
-                    obs_set_tokens,
-                    torch.ones_like(obs_set_tokens, dtype=target_dist.dtype),
-                )
-                target_dist /= obs_set_tokens.size(1) - 1
 
                 with autocast(device_type="cuda", dtype=torch.float16):
                     logits_mlm, logits_dm, _ = model(
@@ -618,10 +612,6 @@ class BaseWithHeadsTrainer(Trainer):
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
-                    )
-                    mlm_loss = criterions["cross_entropy"](
-                        logits_mlm.view(-1, logits_mlm.size(-1)),
-                        labels.view(-1),
                     )
                     dm_loss = criterions["kl_div"](
                         F.log_softmax(logits_dm), target_dist
@@ -643,7 +633,7 @@ class BaseWithHeadsTrainer(Trainer):
                     masked_last_set_logits, input_ids, set_attention_mask, 10
                 )
                 counter[0] += 1
-                counter[1] += mlm_loss.item()
+                # counter[1] += mlm_loss.item()
                 counter[2] += dm_loss.item()
                 counter[3] += top1_acc.item()
                 counter[4] += top10_acc.item()
@@ -652,7 +642,7 @@ class BaseWithHeadsTrainer(Trainer):
 
         dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
-            (counter[1] / counter[0]).item(),
+            # (counter[1] / counter[0]).item(),
             (counter[2] / counter[0]).item(),
             (counter[3] / counter[0]).item(),
             (counter[4] / counter[0]).item(),

@@ -71,15 +71,18 @@ class FMBaseWithHeads(PreTrainedModel):
         )
         # TODO: self.mlp_tte
 
-    def forward(self, input_ids, attention_mask, set_attention_mask, t):
+    def forward(self, input_ids, attention_mask, set_attention_mask, t, set_mask=None):
         # logits_mlm: (batch, max_seq, max_set_size, vocab_size)
         # h: (batch, max_seq, max_set_size, d_model)
+        if set_mask is None:
+            set_mask = set_attention_mask
         logits_mlm, h = self.transformer(
             input_ids, attention_mask, set_attention_mask, t
         )
-        # h_cls: (M < batch * max_seq, d_model) where M is the total n of observed sets
-        h_cls = h[set_attention_mask][:, 0, :]
-        # logits_dm: (M < batch * max_seq, vocab_size)
+        # M := # masked/selected sets
+        # h_cls: (M, d_model) where M is the total n of observed sets
+        h_cls = h[set_mask][:, 0, :]
+        # logits_dm: (M, vocab_size)
         logits_dm = self.mlp_dm(h_cls)
         # TODO: logits_tte = self.mlp_tte(t)
 

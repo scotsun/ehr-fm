@@ -85,6 +85,7 @@ class SeqSet(Dataset):
             _seq_id_data = _seq_id_data.iloc[:_stop_idx]
 
         _seq_id_data["t"] = self.time_operation(_seq_id_data)
+        _seq_id_data = _seq_id_data.sort_values(by="t")
 
         _grouped = _seq_id_data.groupby("t")
 
@@ -227,6 +228,37 @@ def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probabilit
 
     # 10% -> unchanged (do nothing)
     return input_ids, labels
+
+
+def observed_set_distribution(
+    masked_input_ids: torch.Tensor,
+    labels: torch.Tensor,
+    set_mask: torch.Tensor,
+    tokenizer: Tokenizer,
+) -> torch.Tensor:
+    """
+    Compute the observed set distribution for each set in the sequence.
+
+    Args:
+        masked_input_ids (torch.Tensor): Input token IDs of shape (batch_size, seq_len, max_set_size).
+        set_mask (torch.Tensor): Set mask of shape (batch_size, seq_len, max_set_size).
+        tokenizer (Tokenizer): Tokenizer used for encoding the input.
+
+    Returns:
+        torch.Tensor: Observed set distribution of shape (batch_size, seq_len, max_set_size, vocab_size).
+    """
+    device = masked_input_ids.device
+    obs_set_tokens = labels[set_mask][:, 1:]
+    target_dist = torch.zeros(
+        obs_set_tokens.size(0), tokenizer.get_vocab_size(), device=device
+    )
+    target_dist.scatter_add_(
+        1,
+        obs_set_tokens,
+        torch.ones_like(obs_set_tokens, dtype=torch.float32),
+    )
+    target_dist /= obs_set_tokens.size(1)
+    return target_dist
 
 
 class Seq(Dataset):
