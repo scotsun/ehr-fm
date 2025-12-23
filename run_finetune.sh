@@ -13,7 +13,7 @@
 
 # ============================================================================
 # HAT Fine-tuning for Downstream Tasks on H200 GPU
-# Tasks: mortality, readmission_30d, prolonged_los, icd_chapter
+# Tasks: mortality, readmission_30d, prolonged_los, icd_chapter, icd_category_multilabel
 # ============================================================================
 
 echo "=========================================="

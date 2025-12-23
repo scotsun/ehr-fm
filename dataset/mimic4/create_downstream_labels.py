@@ -1,21 +1,15 @@
 """
 Create downstream task labels from MIMIC-IV raw data.
 
-Tasks:
-1. Inpatient Mortality (binary) - from hospital_expire_flag
-2. 30-day Readmission (binary) - next admission within 30 days
-3. Prolonged LoS >7d (binary) - length of stay > 7 days
-4. ICD Chapter Prediction (multi-class) - primary diagnosis chapter
-5. Abnormal Lab Q1/Q10 (binary) - extreme lab values
-
-Output: Labels CSV file with columns:
-- subject_id, hadm_id, mortality, readmission_30d, prolonged_los, icd_chapter, has_abnormal_lab
+Tasks: mortality, readmission_30d, prolonged_los, icd_chapter, icd_category_multilabel
+Output: downstream_labels.csv + icd_category_vocab.json
 """
 
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from collections import Counter
+import json
 
 # Paths
 RAW_DIR = Path(__file__).parent / "data" / "raw_mimic4"
@@ -24,83 +18,59 @@ PARQUET_DIR = OUTPUT_DIR / "mimic4_tokens.parquet"
 
 
 def get_icd_chapter(icd_code: str, version: int) -> int:
-    """
-    Map ICD code to chapter number (1-22 for ICD-10, 1-21 for ICD-9).
-    Returns -1 if unknown.
-    """
+    """Map ICD code to chapter number (1-22 for ICD-10, 1-21 for ICD-9). Returns -1 if unknown."""
     if pd.isna(icd_code):
         return -1
 
     code = str(icd_code).strip().upper()
 
     if version == 10:
-        # ICD-10-CM chapters based on first letter
-        # https://www.icd10data.com/ICD10CM/Codes
         first_char = code[0] if code else ''
 
-        # Handle D codes specially (spans two chapters)
+        # D codes span two chapters
         if first_char == 'D':
             try:
-                # Extract numeric part after D
                 numeric_part = ''.join(c for c in code[1:] if c.isdigit())
                 if numeric_part:
-                    num = int(numeric_part[:2])  # Get first two digits
+                    num = int(numeric_part[:2])
                     if num < 50:
-                        return 2   # D00-D49: Neoplasms (Chapter 2)
+                        return 2   # D00-D49: Neoplasms
                     else:
-                        return 3   # D50-D89: Blood diseases (Chapter 3)
+                        return 3   # D50-D89: Blood diseases
             except (ValueError, IndexError):
                 pass
-            return 2  # Default D to Neoplasms if parsing fails
+            return 2
 
-        # Handle H codes specially (spans two chapters)
+        # H codes span two chapters
         if first_char == 'H':
             try:
                 numeric_part = ''.join(c for c in code[1:] if c.isdigit())
                 if numeric_part:
                     num = int(numeric_part[:2])
                     if num < 60:
-                        return 7   # H00-H59: Eye diseases (Chapter 7)
+                        return 7   # H00-H59: Eye
                     else:
-                        return 8   # H60-H95: Ear diseases (Chapter 8)
+                        return 8   # H60-H95: Ear
             except (ValueError, IndexError):
                 pass
-            return 7  # Default H to Eye if parsing fails
+            return 7
 
         chapter_map = {
-            'A': 1, 'B': 1,   # Infectious diseases
-            'C': 2,           # Neoplasms
-            'E': 4,           # Endocrine/metabolic
-            'F': 5,           # Mental disorders
-            'G': 6,           # Nervous system
-            'I': 9,           # Circulatory system
-            'J': 10,          # Respiratory system
-            'K': 11,          # Digestive system
-            'L': 12,          # Skin
-            'M': 13,          # Musculoskeletal
-            'N': 14,          # Genitourinary
-            'O': 15,          # Pregnancy
-            'P': 16,          # Perinatal
-            'Q': 17,          # Congenital
-            'R': 18,          # Symptoms/signs
-            'S': 19, 'T': 19, # Injury/poisoning
-            'V': 20, 'W': 20, 'X': 20, 'Y': 20,  # External causes
-            'Z': 21,          # Health status/services
-            'U': 22,          # Special purposes (COVID-19, etc.)
+            'A': 1, 'B': 1, 'C': 2, 'E': 4, 'F': 5, 'G': 6,
+            'I': 9, 'J': 10, 'K': 11, 'L': 12, 'M': 13, 'N': 14,
+            'O': 15, 'P': 16, 'Q': 17, 'R': 18, 'S': 19, 'T': 19,
+            'V': 20, 'W': 20, 'X': 20, 'Y': 20, 'Z': 21, 'U': 22,
         }
         return chapter_map.get(first_char, -1)
 
     elif version == 9:
-        # ICD-9-CM chapters based on numeric range
         try:
-            # Remove leading zeros and non-numeric prefix
             numeric = ''.join(c for c in code if c.isdigit() or c == '.')
             if not numeric:
-                # E-codes (external causes) and V-codes (supplementary)
                 if code.startswith('E'):
-                    return 19  # External causes
+                    return 19
                 elif code.startswith('V'):
-                    return 21  # Supplementary
+                    return 21
                 return -1
 
             num = float(numeric.split('.')[0])
@@ -147,12 +117,65 @@ def get_icd_chapter(icd_code: str, version: int) -> int:
     return -1
 
 
+def get_icd_category(icd_code: str, version: int) -> str:
+    """Get 3-char ICD category. ICD-10: first 3 chars; ICD-9: '9_' + first 3 digits."""
+    if pd.isna(icd_code):
+        return None
+    code = str(icd_code).strip().upper()
+    if len(code) < 3:
+        return None
+    if version == 10:
+        return code[:3]
+    elif version == 9:
+        return f"9_{code[:3]}"
+    return None
+
+
+def create_icd_category_labels(diagnoses: pd.DataFrame, valid_hadm_ids: set) -> dict:
+    """Create multi-label ICD category data for each admission."""
+    print("\n[Extra] Creating ICD Category multi-label data...")
+
+    valid_dx = diagnoses[diagnoses['hadm_id'].isin(valid_hadm_ids)].copy()
+    valid_dx['icd_category'] = valid_dx.apply(
+        lambda x: get_icd_category(x['icd_code'], x['icd_version']), axis=1
+    )
+    valid_dx = valid_dx[valid_dx['icd_category'].notna()]
+
+    category_counts = valid_dx['icd_category'].value_counts()
+    min_count = 100
+    valid_categories = category_counts[category_counts >= min_count].index.tolist()
+    print(f"  Total unique categories: {len(category_counts)}")
+    print(f"  Categories with >= {min_count} occurrences: {len(valid_categories)}")
+
+    category_to_idx = {cat: idx for idx, cat in enumerate(sorted(valid_categories))}
+    idx_to_category = {idx: cat for cat, idx in category_to_idx.items()}
+    valid_dx = valid_dx[valid_dx['icd_category'].isin(valid_categories)]
+
+    hadm_to_categories = {}
+    for hadm_id, group in valid_dx.groupby('hadm_id'):
+        categories = group['icd_category'].unique().tolist()
+        category_indices = [category_to_idx[cat] for cat in categories if cat in category_to_idx]
+        if category_indices:
+            hadm_to_categories[int(hadm_id)] = category_indices
+
+    num_labels_per_admission = [len(cats) for cats in hadm_to_categories.values()]
+    print(f"  Admissions with valid categories: {len(hadm_to_categories):,}")
+    print(f"  Avg categories per admission: {np.mean(num_labels_per_admission):.1f}")
+    print(f"  Max categories per admission: {max(num_labels_per_admission)}")
+
+    return {
+        'hadm_to_categories': hadm_to_categories,
+        'category_to_idx': category_to_idx,
+        'idx_to_category': idx_to_category,
+        'num_categories': len(valid_categories),
+    }
+
+
 def create_labels():
     print("=" * 60)
     print("Creating downstream task labels from MIMIC-IV")
     print("=" * 60)
 
-    # Load raw data
     print("\n[1/6] Loading raw data...")
     admissions = pd.read_csv(
         RAW_DIR / "admissions.csv",
@@ -168,13 +191,11 @@ def create_labels():
     )
     print(f"  Diagnoses: {len(diagnoses):,} rows")
 
-    # Get patients in parquet (already processed)
     parquet_patients = set()
     for d in PARQUET_DIR.glob("subject_id=*"):
         parquet_patients.add(int(d.name.split('=')[1]))
     print(f"  Parquet patients: {len(parquet_patients):,}")
 
-    # Filter to parquet patients only
     admissions = admissions[admissions['subject_id'].isin(parquet_patients)]
     print(f"  Filtered admissions: {len(admissions):,}")
 
@@ -184,22 +205,17 @@ def create_labels():
     mortality_rate = admissions['mortality'].mean()
     print(f"  Mortality rate: {mortality_rate:.2%} ({admissions['mortality'].sum():,} / {len(admissions):,})")
 
-    # Task 2: 30-day Readmission
     print("\n[3/6] Creating 30-day readmission labels...")
     admissions = admissions.sort_values(['subject_id', 'admittime'])
-
-    # Calculate days to next admission
     admissions['next_admittime'] = admissions.groupby('subject_id')['admittime'].shift(-1)
     admissions['days_to_next'] = (admissions['next_admittime'] - admissions['dischtime']).dt.total_seconds() / 86400
 
-    # Readmission within 30 days (exclude deaths and last admissions)
     admissions['readmission_30d'] = (
         (admissions['days_to_next'] <= 30) &
-        (admissions['days_to_next'] >= 0) &  # Must be after discharge
-        (admissions['mortality'] == 0)  # Exclude deaths
+        (admissions['days_to_next'] >= 0) &
+        (admissions['mortality'] == 0)
     ).astype(int)
 
-    # Set -1 for ineligible (death or last admission)
     admissions.loc[admissions['mortality'] == 1, 'readmission_30d'] = -1
     admissions.loc[admissions['next_admittime'].isna(), 'readmission_30d'] = -1
 
@@ -208,7 +224,6 @@ def create_labels():
     print(f"  Readmission rate: {readmission_rate:.2%} ({eligible['readmission_30d'].sum():,} / {len(eligible):,})")
     print(f"  Ineligible (death/last admission): {(admissions['readmission_30d'] == -1).sum():,}")
 
-    # Task 3: Prolonged LoS (>7 days)
     print("\n[4/6] Creating prolonged LoS labels...")
     admissions['los_days'] = (admissions['dischtime'] - admissions['admittime']).dt.total_seconds() / 86400
     admissions['prolonged_los'] = (admissions['los_days'] > 7).astype(int)
@@ -217,7 +232,6 @@ def create_labels():
     print(f"  Prolonged LoS rate: {prolonged_rate:.2%} ({admissions['prolonged_los'].sum():,} / {len(admissions):,})")
     print(f"  Mean LoS: {admissions['los_days'].mean():.1f} days, Median: {admissions['los_days'].median():.1f} days")
 
-    # Task 4: ICD Chapter Prediction
     print("\n[5/6] Creating ICD chapter labels...")
     primary_dx = diagnoses[diagnoses['seq_num'] == 1].copy()
     primary_dx['icd_chapter'] = primary_dx.apply(
@@ -238,14 +252,10 @@ def create_labels():
     print(f"  Number of chapters: {len(chapter_counts)}")
     print(f"  Top 5 chapters: {chapter_counts.most_common(5)}")
 
-    # Task 5: Abnormal Lab (Q1/Q10)
-    # This task uses existing tokenization - we'll identify patients with extreme lab values
-    print("\n[6/6] Creating abnormal lab labels...")
-    print("  (This task uses existing Q1/Q10 tokens from parquet data)")
-    print("  Label extraction will be done during dataset loading")
-    admissions['has_abnormal_lab'] = -1  # Placeholder, computed at dataset level
+    print("\n[6/6] Creating ICD category multi-label data...")
+    valid_hadm_ids = set(admissions['hadm_id'].tolist())
+    icd_category_data = create_icd_category_labels(diagnoses, valid_hadm_ids)
 
-    # Save labels
     print("\n" + "=" * 60)
     print("Saving labels...")
 
@@ -254,12 +264,27 @@ def create_labels():
         'mortality', 'readmission_30d', 'prolonged_los', 'icd_chapter'
     ]].copy()
 
+    hadm_to_categories = icd_category_data['hadm_to_categories']
+    labels['icd_categories'] = labels['hadm_id'].apply(
+        lambda x: ','.join(map(str, hadm_to_categories.get(x, []))) if x in hadm_to_categories else ''
+    )
+
     output_path = OUTPUT_DIR / "downstream_labels.csv"
     labels.to_csv(output_path, index=False)
     print(f"  Saved to: {output_path}")
     print(f"  Total rows: {len(labels):,}")
 
-    # Summary statistics
+    icd_category_path = OUTPUT_DIR / "icd_category_vocab.json"
+    with open(icd_category_path, 'w') as f:
+        save_data = {
+            'category_to_idx': icd_category_data['category_to_idx'],
+            'idx_to_category': {str(k): v for k, v in icd_category_data['idx_to_category'].items()},
+            'num_categories': icd_category_data['num_categories'],
+        }
+        json.dump(save_data, f)
+    print(f"  Saved ICD category vocab to: {icd_category_path}")
+    print(f"  Number of categories: {icd_category_data['num_categories']}")
+
     print("\n" + "=" * 60)
     print("Label Summary:")
     print("=" * 60)
@@ -281,11 +306,10 @@ def create_labels():
     valid_icd = labels[labels['icd_chapter'] >= 0]
     print(f"    Valid: {len(valid_icd):,}")
     print(f"    Invalid/Missing: {(labels['icd_chapter'] == -1).sum():,}")
-    print(f"    Unique chapters: {labels['icd_chapter'].nunique() - 1}")  # -1 for invalid
+    print(f"    Unique chapters: {labels['icd_chapter'].nunique() - 1}")
 
-    # Patient-level split recommendation
     print("\n" + "=" * 60)
-    print("Patient-Level Split Recommendation:")
+    print("Patient-Level Split:")
     print("=" * 60)
     unique_patients = labels['subject_id'].nunique()
     train_size = int(unique_patients * 0.7)

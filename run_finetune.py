@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument(
         "--task",
         type=str,
-        choices=["mortality", "readmission_30d", "prolonged_los", "icd_chapter"],
+        choices=["mortality", "readmission_30d", "prolonged_los", "icd_chapter", "icd_category_multilabel"],
         help="Task to fine-tune on",
     )
     parser.add_argument(
@@ -275,7 +275,7 @@ def main():
 
     if args.all:
         # Run all tasks
-        tasks = ["mortality", "readmission_30d", "prolonged_los", "icd_chapter"]
+        tasks = ["mortality", "readmission_30d", "prolonged_los", "icd_chapter", "icd_category_multilabel"]
         all_results = {}
 
         for task in tasks:

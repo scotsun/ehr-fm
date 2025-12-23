@@ -20,7 +20,7 @@ from typing import Optional, Dict
 import wandb
 
 from src.finetune.model import HATForSequenceClassification
-from src.finetune.data_utils import FinetuneDataset, collate_finetune, DownstreamTask
+from src.finetune.data_utils import FinetuneDataset, collate_finetune, DownstreamTask, TASK_CONFIGS
 
 
 class FinetuneTrainer:
@@ -93,6 +93,8 @@ class FinetuneTrainer:
             num_workers=num_workers,
             pin_memory=True,
         )
+
+        self.is_multilabel = TASK_CONFIGS[task].get("is_multilabel", False)
 
         self.class_weights = None
         if use_class_weights:
@@ -233,21 +235,29 @@ class FinetuneTrainer:
                 token_time = token_time.to(self.device)
 
             with autocast(device_type=self.device_type, enabled=self.use_amp):
-                # Avoid computing loss twice when using class weights
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     segment_attention_mask=segment_attention_mask,
                     segment_time=segment_time,
                     token_time=token_time,
-                    labels=None if self.class_weights is not None else labels,
+                    labels=None,
                 )
 
-                if self.class_weights is not None:
-                    logits = outputs["logits"]
-                    loss = nn.functional.cross_entropy(logits, labels, weight=self.class_weights)
+                logits = outputs["logits"]
+
+                if self.is_multilabel:
+                    if self.class_weights is not None:
+                        loss = nn.functional.binary_cross_entropy_with_logits(
+                            logits, labels, pos_weight=self.class_weights
+                        )
+                    else:
+                        loss = nn.functional.binary_cross_entropy_with_logits(logits, labels)
                 else:
-                    loss = outputs["loss"]
+                    if self.class_weights is not None:
+                        loss = nn.functional.cross_entropy(logits, labels, weight=self.class_weights)
+                    else:
+                        loss = nn.functional.cross_entropy(logits, labels)
 
                 loss = loss / self.gradient_accumulation_steps
 
@@ -337,58 +347,89 @@ class FinetuneTrainer:
                 )
 
             logits = outputs["logits"].cpu()
-            probs = torch.softmax(logits, dim=-1)
 
-            if self.model.num_classes == 2:
-                preds = (probs[:, 1] > 0.5).long()
-                all_probs.extend(probs[:, 1].numpy())
-            else:
-                preds = logits.argmax(dim=-1)
+            if self.is_multilabel:
+                probs = torch.sigmoid(logits)
+                preds = (probs > 0.5).float()
                 all_probs.append(probs.numpy())
+                all_preds.append(preds.numpy())
+                all_labels.append(labels.numpy())
+            else:
+                probs = torch.softmax(logits, dim=-1)
+                if self.model.num_classes == 2:
+                    preds = (probs[:, 1] > 0.5).long()
+                    all_probs.extend(probs[:, 1].numpy())
+                else:
+                    preds = logits.argmax(dim=-1)
+                    all_probs.append(probs.numpy())
+                all_preds.extend(preds.numpy())
+                all_labels.extend(labels.numpy())
 
-            all_preds.extend(preds.numpy())
-            all_labels.extend(labels.numpy())
-
-        all_preds = np.array(all_preds)
-        all_labels = np.array(all_labels)
-
-        metrics = {"accuracy": accuracy_score(all_labels, all_preds)}
-
-        if self.model.num_classes == 2:
-            all_probs = np.array(all_probs)
-            metrics["auroc"] = roc_auc_score(all_labels, all_probs)
-            metrics["auprc"] = average_precision_score(all_labels, all_probs)
-            metrics["f1"] = f1_score(all_labels, all_preds)
-            metrics["pred_positive_rate"] = all_preds.mean()
-            metrics["true_positive_rate"] = all_labels.mean()
-        else:
+        if self.is_multilabel:
             all_probs = np.vstack(all_probs)
+            all_preds = np.vstack(all_preds)
+            all_labels = np.vstack(all_labels)
 
-            # Compute per-class AUROC and AUPRC (one-vs-rest)
             auroc_scores = []
             auprc_scores = []
-            class_weights = []
             for i in range(self.model.num_classes):
-                binary_labels = (all_labels == i).astype(int)
-                class_count = binary_labels.sum()
-                # Need both positive and negative samples
-                if class_count > 0 and class_count < len(all_labels):
-                    auroc_scores.append(roc_auc_score(binary_labels, all_probs[:, i]))
-                    auprc_scores.append(average_precision_score(binary_labels, all_probs[:, i]))
-                    class_weights.append(class_count)
+                class_labels = all_labels[:, i]
+                class_probs = all_probs[:, i]
+                if class_labels.sum() > 0 and class_labels.sum() < len(class_labels):
+                    auroc_scores.append(roc_auc_score(class_labels, class_probs))
+                    auprc_scores.append(average_precision_score(class_labels, class_probs))
 
             if auroc_scores:
-                total_weight = sum(class_weights)
-                metrics["auroc"] = np.mean(auroc_scores)  # macro average
-                metrics["auprc"] = sum(s * w for s, w in zip(auprc_scores, class_weights)) / total_weight
-                metrics["auprc_macro"] = np.mean(auprc_scores)
+                metrics = {
+                    "auroc": np.mean(auroc_scores),
+                    "auprc": np.mean(auprc_scores),
+                    "auroc_micro": roc_auc_score(all_labels.ravel(), all_probs.ravel()),
+                }
             else:
-                metrics["auroc"] = 0.0
-                metrics["auprc"] = 0.0
-                metrics["auprc_macro"] = 0.0
+                metrics = {"auroc": 0.0, "auprc": 0.0, "auroc_micro": 0.0}
 
+            metrics["accuracy"] = (all_preds == all_labels).mean()
+            metrics["f1_micro"] = f1_score(all_labels, all_preds, average="micro")
             metrics["f1_macro"] = f1_score(all_labels, all_preds, average="macro")
-            metrics["f1_weighted"] = f1_score(all_labels, all_preds, average="weighted")
+            metrics["avg_labels_per_sample"] = all_labels.sum(axis=1).mean()
+        else:
+            all_preds = np.array(all_preds)
+            all_labels = np.array(all_labels)
+
+            metrics = {"accuracy": accuracy_score(all_labels, all_preds)}
+
+            if self.model.num_classes == 2:
+                all_probs = np.array(all_probs)
+                metrics["auroc"] = roc_auc_score(all_labels, all_probs)
+                metrics["auprc"] = average_precision_score(all_labels, all_probs)
+                metrics["f1"] = f1_score(all_labels, all_preds)
+                metrics["pred_positive_rate"] = all_preds.mean()
+                metrics["true_positive_rate"] = all_labels.mean()
+            else:
+                all_probs = np.vstack(all_probs)
+                auroc_scores = []
+                auprc_scores = []
+                class_weights = []
+                for i in range(self.model.num_classes):
+                    binary_labels = (all_labels == i).astype(int)
+                    class_count = binary_labels.sum()
+                    if class_count > 0 and class_count < len(all_labels):
+                        auroc_scores.append(roc_auc_score(binary_labels, all_probs[:, i]))
+                        auprc_scores.append(average_precision_score(binary_labels, all_probs[:, i]))
+                        class_weights.append(class_count)
+
+                if auroc_scores:
+                    total_weight = sum(class_weights)
+                    metrics["auroc"] = np.mean(auroc_scores)  # macro average
+                    metrics["auprc"] = sum(s * w for s, w in zip(auprc_scores, class_weights)) / total_weight
+                    metrics["auprc_macro"] = np.mean(auprc_scores)
+                else:
+                    metrics["auroc"] = 0.0
+                    metrics["auprc"] = 0.0
+                    metrics["auprc_macro"] = 0.0
+
+                metrics["f1_macro"] = f1_score(all_labels, all_preds, average="macro")
+                metrics["f1_weighted"] = f1_score(all_labels, all_preds, average="weighted")
 
         self.val_metrics_history.append(metrics)
         return metrics

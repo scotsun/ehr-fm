@@ -18,19 +18,17 @@ class DownstreamTask(Enum):
     PROLONGED_LOS = "prolonged_los"
     ICD_CHAPTER = "icd_chapter"
     ABNORMAL_LAB = "abnormal_lab"
+    ICD_CATEGORY_MULTILABEL = "icd_category_multilabel"
 
 
-# Task configurations for prediction time points
-# - "admission_24h": Use only first 24 hours of current admission (for predicting future outcomes)
-# - "admission_48h": Use only first 48 hours of current admission
-# - "discharge": Use entire admission (for summarizing or predicting post-discharge events)
-# - "exclude_target_dx": Exclude diagnosis codes from target admission (prevent data leakage)
+# max_hours: time window for target admission; exclude_target_dx: prevent data leakage
 TASK_CONFIGS = {
     DownstreamTask.MORTALITY: {"prediction_time": "admission_24h", "max_hours": 24, "exclude_target_dx": True},
     DownstreamTask.PROLONGED_LOS: {"prediction_time": "admission_48h", "max_hours": 48, "exclude_target_dx": True},
     DownstreamTask.READMISSION_30D: {"prediction_time": "discharge", "max_hours": None, "exclude_target_dx": False},
     DownstreamTask.ICD_CHAPTER: {"prediction_time": "discharge", "max_hours": None, "exclude_target_dx": True},
     DownstreamTask.ABNORMAL_LAB: {"prediction_time": "discharge", "max_hours": None, "exclude_target_dx": False},
+    DownstreamTask.ICD_CATEGORY_MULTILABEL: {"prediction_time": "discharge", "max_hours": None, "exclude_target_dx": True, "is_multilabel": True},
 }
 
 
@@ -71,16 +69,28 @@ class FinetuneDataset(Dataset):
         self.sort_col = sort_col
         self.token_time_col = token_time_col
 
-        self.label_col = task.value
-        valid_labels = labels_df[labels_df[self.label_col] >= 0].copy()
+        self.is_multilabel = self.task_config.get("is_multilabel", False)
 
-        if task == DownstreamTask.ICD_CHAPTER:
-            self.num_classes = valid_labels[self.label_col].nunique()
-            unique_labels = sorted(valid_labels[self.label_col].unique())
-            self.label_mapping = {old: new for new, old in enumerate(unique_labels)}
-        else:
-            self.num_classes = 2
+        if self.is_multilabel:
+            valid_labels = labels_df[labels_df['icd_categories'].notna() & (labels_df['icd_categories'] != '')].copy()
+            self.hadm_to_categories = {}
+            for _, row in valid_labels.iterrows():
+                cats = [int(x) for x in row['icd_categories'].split(',')]
+                self.hadm_to_categories[row[enc_id_col]] = cats
+            all_indices = [idx for cats in self.hadm_to_categories.values() for idx in cats]
+            self.num_classes = max(all_indices) + 1 if all_indices else 0
             self.label_mapping = None
+        else:
+            self.label_col = task.value
+            valid_labels = labels_df[labels_df[self.label_col] >= 0].copy()
+
+            if task == DownstreamTask.ICD_CHAPTER:
+                self.num_classes = valid_labels[self.label_col].nunique()
+                unique_labels = sorted(valid_labels[self.label_col].unique())
+                self.label_mapping = {old: new for new, old in enumerate(unique_labels)}
+            else:
+                self.num_classes = 2
+                self.label_mapping = None
 
         # Patient-level split
         all_patients = valid_labels[patient_id_col].unique()
@@ -101,28 +111,33 @@ class FinetuneDataset(Dataset):
             valid_labels[patient_id_col].isin(split_patients)
         ].reset_index(drop=True)
 
-        # Build label dict using itertuples (faster than iterrows)
         self.label_dict = {}
         pid_idx = self.labels.columns.get_loc(patient_id_col)
         enc_idx = self.labels.columns.get_loc(enc_id_col)
-        label_idx = self.labels.columns.get_loc(self.label_col)
-        for row in self.labels.itertuples(index=False):
-            key = (row[pid_idx], row[enc_idx])
-            label = row[label_idx]
-            if self.label_mapping:
-                label = self.label_mapping[label]
-            self.label_dict[key] = label
+
+        if self.is_multilabel:
+            for row in self.labels.itertuples(index=False):
+                key = (row[pid_idx], row[enc_idx])
+                hadm_id = row[enc_idx]
+                if hadm_id in self.hadm_to_categories:
+                    self.label_dict[key] = self.hadm_to_categories[hadm_id]
+        else:
+            label_idx = self.labels.columns.get_loc(self.label_col)
+            for row in self.labels.itertuples(index=False):
+                key = (row[pid_idx], row[enc_idx])
+                label = row[label_idx]
+                if self.label_mapping:
+                    label = self.label_mapping[label]
+                self.label_dict[key] = label
 
         self.samples = list(self.label_dict.keys())
 
-        # Group admissions by patient
         self.patient_admissions = {}
         for (pid, hadm_id) in self.samples:
             if pid not in self.patient_admissions:
                 self.patient_admissions[pid] = []
             self.patient_admissions[pid].append(hadm_id)
 
-        # Sort by admittime
         for pid in self.patient_admissions:
             patient_labels = self.labels[self.labels[patient_id_col] == pid]
             sorted_hadms = patient_labels.sort_values('admittime')[enc_id_col].tolist()
@@ -139,32 +154,25 @@ class FinetuneDataset(Dataset):
         target_idx = all_hadms.index(target_hadm_id)
         history_hadms = list(all_hadms[:target_idx + 1])
 
-        # Load with pyarrow filter
         subject_dir = self.data_path / f"{self.patient_id_col}={subject_id}"
         table = pq.read_table(subject_dir, filters=[(self.enc_id_col, 'in', history_hadms)])
         history_data = table.to_pandas()
 
         grouped = history_data.groupby(self.enc_id_col)
-
-        # Get task config for filtering
         max_hours = self.task_config.get("max_hours")
         exclude_target_dx = self.task_config.get("exclude_target_dx", False)
 
         encounter_data = []
         for enc_id, group in grouped:
-            # For target admission, apply task-specific filtering
             if enc_id == target_hadm_id:
-                # Exclude diagnosis codes if configured (prevent data leakage)
                 if exclude_target_dx:
                     group = group[~group[self.token_col].str.startswith('DX:', na=False)]
-
-                # Apply time-based filtering
                 if max_hours is not None and self.token_time_col in group.columns:
                     group = group[group[self.token_time_col] <= max_hours]
 
             tokens = group[self.token_col].tolist()
             if len(tokens) == 0:
-                continue  # Skip empty encounters
+                continue
 
             time_val = group[self.time_col].iloc[0] if self.time_col and self.time_col in group.columns else None
             sort_val = group[self.sort_col].iloc[0] if self.sort_col and self.sort_col in group.columns else None
@@ -206,7 +214,13 @@ class FinetuneDataset(Dataset):
         if _token_times is not None:
             item["token_time"] = self._pad_token_time(_token_times)
 
-        item["label"] = torch.tensor(label, dtype=torch.long)
+        if self.is_multilabel:
+            multi_hot = torch.zeros(self.num_classes, dtype=torch.float)
+            for idx in label:
+                multi_hot[idx] = 1.0
+            item["label"] = multi_hot
+        else:
+            item["label"] = torch.tensor(label, dtype=torch.long)
         return item
 
     def _pad_segment(self, tokens):
@@ -263,11 +277,19 @@ class FinetuneDataset(Dataset):
 
     def get_class_weights(self):
         """Get inverse frequency weights for imbalanced data."""
-        labels = torch.tensor([self.label_dict[s] for s in self.samples])
-        class_counts = torch.bincount(labels, minlength=self.num_classes).float()
-        weights = 1.0 / (class_counts + 1e-6)
-        weights = weights / weights.sum() * self.num_classes
-        return weights
+        if self.is_multilabel:
+            class_counts = torch.zeros(self.num_classes)
+            for s in self.samples:
+                for idx in self.label_dict[s]:
+                    class_counts[idx] += 1
+            neg_counts = len(self.samples) - class_counts
+            return (neg_counts / (class_counts + 1e-6)).float()
+        else:
+            labels = torch.tensor([self.label_dict[s] for s in self.samples])
+            class_counts = torch.bincount(labels, minlength=self.num_classes).float()
+            weights = 1.0 / (class_counts + 1e-6)
+            weights = weights / weights.sum() * self.num_classes
+            return weights
 
 
 def collate_finetune(batch):
