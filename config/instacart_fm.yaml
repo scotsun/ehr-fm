@@ -14,7 +14,8 @@ trainer:
     split: [0.90, 0.10]
     early_stopping_patience: 5
     early_stopping_mode: 'min'
-    mlm_probability: 0.40
+    mlm_probability: 0.20
+    msm_probability: 0.40
 model:
     tokenizer: "dataset/instacart/data/tk.json"
     t2v_scale: 1.0

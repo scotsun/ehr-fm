@@ -525,44 +525,61 @@ class BaseWithHeadsTrainer(Trainer):
                 set_attention_mask = batch["set_attention_mask"].to(device)
                 t = batch["t"].to(device)
 
-                masked_input_ids, labels, set_mask = random_masking_set(
+                mlm_input_ids, mlm_labels = random_masking(
+                    input_ids=input_ids.clone(),
+                    tokenizer=self.tokenizer,
+                    mlm_probability=trainer_args["mlm_probability"],
+                )
+
+                msm_input_ids, msm_labels, set_mask = random_masking_set(
                     input_ids=input_ids.clone(),
                     set_attention_mask=set_attention_mask,
                     tokenizer=self.tokenizer,
-                    mask_probability=trainer_args["mlm_probability"],
+                    mask_probability=trainer_args["msm_probability"],
                 )
-                if (labels == -100).all():
+                if (msm_labels == -100).all() or (mlm_labels == -100).all():
                     continue
 
                 target_dist = observed_set_distribution(
-                    masked_input_ids=masked_input_ids,
-                    labels=labels,
+                    masked_input_ids=msm_input_ids,
+                    labels=msm_labels,
                     set_mask=set_mask,
                     tokenizer=self.tokenizer,
                 )
 
                 with autocast(device_type="cuda", dtype=torch.float16):
-                    _, logits_dm, _ = model(
-                        input_ids=masked_input_ids,
+                    mlm_logits, _, _ = model(
+                        input_ids=mlm_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
+                        set_mask=set_mask,
+                    )
+                    _, msm_logits, _ = model(
+                        input_ids=msm_input_ids,
+                        attention_mask=attention_mask,
+                        set_attention_mask=set_attention_mask,
+                        t=t,
+                        set_mask=set_mask,
+                    )
+                    mlm_loss = criterions["cross_entropy"](
+                        mlm_logits.view(-1, mlm_logits.size(-1)),
+                        mlm_labels.view(-1),
+                    )
+                    msm_loss = criterions["kl_div"](
+                        F.log_softmax(msm_logits, dim=-1), target_dist
                     )
 
-                    dm_loss = criterions["kl_div"](
-                        F.log_softmax(logits_dm, dim=-1), target_dist
-                    )
-
-                scaler.scale(dm_loss).backward()
+                scaler.scale(0 * mlm_loss + msm_loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-                bar.set_postfix(dm_loss=float(dm_loss))
+                bar.set_postfix(msm_loss=float(msm_loss))
 
                 cur_step = epoch_id * len(dataloader) + batch_id
                 if self._is_main_process() and cur_step % 100 == 0:
                     mlflow.log_metrics(
                         {
-                            "train_dm_loss": float(dm_loss),
+                            "train_msm_loss": float(msm_loss),
                         },
                         step=cur_step,
                     )
@@ -592,29 +609,46 @@ class BaseWithHeadsTrainer(Trainer):
                 masked_last_set_input_ids = masking_last_set(
                     input_ids.clone(), set_attention_mask, self.tokenizer
                 )
-                masked_input_ids, labels, set_mask = random_masking_set(
+                mlm_input_ids, mlm_labels = random_masking(
+                    input_ids=input_ids.clone(),
+                    tokenizer=self.tokenizer,
+                    mlm_probability=trainer_args["mlm_probability"],
+                )
+                msm_input_ids, msm_labels, set_mask = random_masking_set(
                     input_ids=input_ids.clone(),
                     set_attention_mask=set_attention_mask,
                     tokenizer=self.tokenizer,
-                    mask_probability=trainer_args["mlm_probability"],
+                    mask_probability=trainer_args["msm_probability"],
                 )
 
                 target_dist = observed_set_distribution(
-                    masked_input_ids=masked_input_ids,
-                    labels=labels,
+                    masked_input_ids=msm_input_ids,
+                    labels=msm_labels,
                     set_mask=set_mask,
                     tokenizer=self.tokenizer,
                 )
 
                 with autocast(device_type="cuda", dtype=torch.float16):
-                    logits_mlm, logits_dm, _ = model(
-                        input_ids=masked_input_ids,
+                    mlm_logits, _, _ = model(
+                        input_ids=mlm_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
+                        set_mask=set_mask,
                     )
-                    dm_loss = criterions["kl_div"](
-                        F.log_softmax(logits_dm), target_dist
+                    _, msm_logits, _ = model(
+                        input_ids=msm_input_ids,
+                        attention_mask=attention_mask,
+                        set_attention_mask=set_attention_mask,
+                        t=t,
+                        set_mask=set_mask,
+                    )
+                    mlm_loss = criterions["cross_entropy"](
+                        mlm_logits.view(-1, mlm_logits.size(-1)),
+                        mlm_labels.view(-1),
+                    )
+                    msm_loss = criterions["kl_div"](
+                        F.log_softmax(msm_logits, dim=-1), target_dist
                     )
 
                     masked_last_set_logits, _, _ = model(
@@ -623,8 +657,8 @@ class BaseWithHeadsTrainer(Trainer):
                         set_attention_mask=set_attention_mask,
                         t=t,
                     )
-                top1_acc = topk_accuracy(logits_mlm, labels, 1)
-                top10_acc = topk_accuracy(logits_mlm, labels, 10)
+                top1_acc = topk_accuracy(mlm_logits, mlm_labels, 1)
+                top10_acc = topk_accuracy(mlm_logits, mlm_labels, 10)
 
                 recall10 = recall_at_k(
                     masked_last_set_logits, input_ids, set_attention_mask, 10
@@ -633,8 +667,8 @@ class BaseWithHeadsTrainer(Trainer):
                     masked_last_set_logits, input_ids, set_attention_mask, 10
                 )
                 counter[0] += 1
-                # counter[1] += mlm_loss.item()
-                counter[2] += dm_loss.item()
+                counter[1] += mlm_loss.item()
+                counter[2] += msm_loss.item()
                 counter[3] += top1_acc.item()
                 counter[4] += top10_acc.item()
                 counter[5] += recall10.item()
