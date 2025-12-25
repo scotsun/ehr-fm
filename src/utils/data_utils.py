@@ -365,3 +365,20 @@ class Seq(Dataset):
             item["v"] = torch.tensor(_vs[: self.max_seq], dtype=torch.float32)
 
         return item
+
+
+class Count(Dataset):
+    def __init__(self, data: Seq | SeqSet, vocab_size: int):
+        super().__init__()
+        self.data = data
+        self.vocab_size = vocab_size
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        input_ids = self.data[index]["input_ids"]
+        token_categories, counts = torch.unique(input_ids.flatten(), return_counts=True)
+        count_vector = torch.zeros(self.vocab_size)
+        count_vector.scatter_add_(0, token_categories, counts.float())
+        return count_vector[4:]

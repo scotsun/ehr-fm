@@ -573,12 +573,13 @@ class BaseWithHeadsTrainer(Trainer):
                 scaler.scale(0 * mlm_loss + msm_loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
-                bar.set_postfix(msm_loss=float(msm_loss))
+                bar.set_postfix(mlm_loss=float(mlm_loss), msm_loss=float(msm_loss))
 
                 cur_step = epoch_id * len(dataloader) + batch_id
                 if self._is_main_process() and cur_step % 100 == 0:
                     mlflow.log_metrics(
                         {
+                            "train_mlm_loss": float(mlm_loss),
                             "train_msm_loss": float(msm_loss),
                         },
                         step=cur_step,

@@ -6,9 +6,6 @@ from src.layers import HierarchicalTransformerBlock, T2V, FFNSwiGLUBlock
 
 
 class FMTransformerEncoder(nn.Module):
-    config_class = FMConfig
-    base_model_prefix = "fm"
-
     def __init__(self, config: FMConfig):
         super().__init__()
         self.blocks = nn.ModuleList(
