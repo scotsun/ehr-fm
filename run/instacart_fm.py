@@ -54,7 +54,7 @@ def main():
         trainer=cfg_dict["trainer"],
         **cfg_dict["model"],
     )
-    model = build_model(cfg, "FMBaseWithHeads", device)
+    model = build_model(cfg, "FMBase", device)
     trainer = build_trainer(cfg, model, tk, device)
 
     if is_distributed:
@@ -74,18 +74,33 @@ def main():
         lengths=cfg.trainer["split"],
         generator=torch.Generator().manual_seed(42),
     )
-    train_loader = DataLoader(
-        dataset=train,
-        batch_size=cfg.trainer["batch_size"],
-        sampler=DistributedSampler(train),
-        num_workers=8,
-    )
-    valid_loader = DataLoader(
-        dataset=valid,
-        batch_size=cfg.trainer["batch_size"],
-        sampler=DistributedSampler(valid),
-        num_workers=8,
-    )
+
+    if is_distributed:
+        train_loader = DataLoader(
+            dataset=train,
+            batch_size=cfg.trainer["batch_size"],
+            sampler=DistributedSampler(train),
+            num_workers=8,
+        )
+        valid_loader = DataLoader(
+            dataset=valid,
+            batch_size=cfg.trainer["batch_size"],
+            sampler=DistributedSampler(valid),
+            num_workers=8,
+        )
+    else:
+        train_loader = DataLoader(
+            dataset=train,
+            batch_size=cfg.trainer["batch_size"],
+            shuffle=True,
+            num_workers=8,
+        )
+        valid_loader = DataLoader(
+            dataset=valid,
+            batch_size=cfg.trainer["batch_size"],
+            shuffle=False,
+            num_workers=8,
+        )
 
     setup_mlflow_tracked_fit(
         mlflow_uri=MLFLOW_URI,
