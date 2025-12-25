@@ -9,7 +9,7 @@ dataset:
     additional_cols: ["t"]
 trainer:
     lr: 0.00005
-    batch_size: 16
+    batch_size: 12
     epochs: 21
     split: [0.90, 0.10]
     early_stopping_patience: 5
@@ -19,9 +19,9 @@ trainer:
 model:
     tokenizer: "dataset/instacart/data/tk.json"
     t2v_scale: 1.0
-    d_model: 768
-    n_heads: 12
-    d_ff: 2048
+    d_model: 512
+    n_heads: 8
+    d_ff: 1024
     n_block: 4
     dropout: 0.0
     weight_tying: true
