@@ -13,7 +13,13 @@ from transformers import PreTrainedModel
 from tokenizers import Tokenizer
 
 from src.models import FMConfig
-from src.trainer import EarlyStopping, Trainer, BaseTrainer, BaseWithHeadsTrainer
+from src.trainer import (
+    EarlyStopping,
+    Trainer,
+    BertTrainer,
+    BaseTrainer,
+    BaseWithHeadsTrainer,
+)
 
 
 def load_cfg(cfg_path) -> dict:
@@ -74,6 +80,33 @@ def setup_mlflow_tracked_fit(
         )
 
 
+def make_bert_signature(cfg: FMConfig) -> ModelSignature:
+    max_seq = cfg.dataset["max_seq"]
+    input_scheme = Schema(
+        [
+            TensorSpec(np.dtype(np.int64), [-1, max_seq], name="input_ids"),
+            TensorSpec(np.dtype(np.int64), [-1, max_seq], name="attention_mask"),
+            TensorSpec(np.dtype(np.bool), [-1, max_seq], name="t"),
+        ]
+    )
+    output_scheme = Schema(
+        [
+            TensorSpec(
+                np.dtype(np.float32),
+                [-1, max_seq, cfg.vocab_size],
+                name="logits",
+            ),
+            TensorSpec(
+                np.dtype(np.float32),
+                [-1, max_seq, cfg.d_model],
+                name="last_hidden_state",
+            ),
+        ]
+    )
+    signature = ModelSignature(inputs=input_scheme, outputs=output_scheme)
+    return signature
+
+
 def make_fm_signature(cfg: FMConfig) -> ModelSignature:
     max_seq = cfg.dataset["max_seq"]
     max_set_size = cfg.dataset["max_set_size"]
@@ -110,7 +143,6 @@ def make_fm_signature(cfg: FMConfig) -> ModelSignature:
 def build_trainer(
     cfg: FMConfig, fm: PreTrainedModel, tk: Tokenizer, device: torch.device
 ):
-    signature = make_fm_signature(cfg)
     model_type = fm.model_type
 
     trainer_args = {
@@ -123,16 +155,21 @@ def build_trainer(
         ),
         "verbose_period": 1,
         "device": device,
-        "model_signature": signature,
         "trainer_args": cfg.trainer,
     }
 
     match model_type:
+        case "fm-bert":
+            trainer_class = BertTrainer
+            signature = make_bert_signature(cfg)
+            criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-base":
             trainer_class = BaseTrainer
+            signature = make_fm_signature(cfg)
             criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-base-with_heads":
             trainer_class = BaseWithHeadsTrainer
+            signature = make_fm_signature(cfg)
             criterions = {
                 "cross_entropy": CrossEntropyLoss(ignore_index=-100),
                 "kl_div": KLDivLoss(reduction="batchmean"),
@@ -140,6 +177,10 @@ def build_trainer(
         case _:
             raise ValueError(f"Unknown model type: {model_type}")
 
-    trainer = trainer_class(criterions=criterions, **trainer_args)
+    trainer = trainer_class(
+        criterions=criterions,
+        model_signature=signature,
+        **trainer_args,
+    )
 
     return trainer

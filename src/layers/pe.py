@@ -56,6 +56,7 @@ class T2V(nn.Module):
 
     def __init__(self, d: int, scale: float = 1.0, f=torch.sin):
         super().__init__()
+        self.d = d
         self.scale = scale
         self.f = f
         self.w0 = nn.Parameter(torch.rand(1, 1))
@@ -68,12 +69,12 @@ class T2V(nn.Module):
         self.register_parameter("b", self.b)
 
     def forward(self, t):
-        # t: (batch, max_seg, max_seq_len)
-        batch, max_seq, max_seq_len = t.shape
+        # t: (batch, max_seq, max_set_size) or (batch, max_seq)
+        batch, max_seq = t.size(0), t.size(1)
         t = t.reshape(-1, 1)
         v0 = self.scale * t @ self.w0 + self.b0
         v = self.f(self.scale * t @ self.w + self.b)
-        return torch.cat([v0, v], dim=-1).reshape(batch, max_seq, max_seq_len, -1)
+        return torch.cat([v0, v], dim=-1).reshape(batch, max_seq, -1, self.d).squeeze()
 
 
 def main():

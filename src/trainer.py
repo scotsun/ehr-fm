@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -444,7 +445,8 @@ class BaseTrainer(Trainer):
                 counter[4] += recall10.item()
                 counter[5] += ndcg10.item()
 
-        dist.all_reduce(counter, op=dist.ReduceOp.SUM)
+        if "LOCAL_RANK" in os.environ:
+            dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
             (counter[1] / counter[0]).item(),
             (counter[2] / counter[0]).item(),
@@ -675,7 +677,8 @@ class BaseWithHeadsTrainer(Trainer):
                 counter[5] += recall10.item()
                 counter[6] += ndcg10.item()
 
-        dist.all_reduce(counter, op=dist.ReduceOp.SUM)
+        if "LOCAL_RANK" in os.environ:
+            dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
             # (counter[1] / counter[0]).item(),
             (counter[2] / counter[0]).item(),

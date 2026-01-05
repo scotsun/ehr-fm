@@ -1,0 +1,27 @@
+dataset:
+    data_root: "/hpc/group/engelhardlab/ms1008/instacart"
+    max_seq: 2048
+    seq_id_col: "user_id"
+    set_id_col: "order_number"
+    token_col: "product_id"
+    val_col: null
+    additional_cols: ["t"]
+trainer:
+    lr: 0.00005
+    batch_size: 16
+    epochs: 21
+    split: [0.90, 0.10]
+    early_stopping_patience: 5
+    early_stopping_mode: 'min'
+    mlm_probability: 0.20
+    msm_probability: 0.40
+model:
+    tokenizer: "dataset/instacart/data/tk.json"
+    t2v_scale: 1.0
+    d_model: 768
+    n_heads: 12
+    d_ff: 2048
+    n_block: 4
+    dropout: 0.0
+    weight_tying: true
+    attn_backend: "efficient_attention"

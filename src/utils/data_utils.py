@@ -352,6 +352,7 @@ class Seq(Dataset):
             [],
         )
 
+        _ts, _vs = self.pad_seq(_ts, _vs)
         encoding = self.tokenizer.encode(_tokens, is_pretokenized=True)
 
         item = {
@@ -365,6 +366,24 @@ class Seq(Dataset):
             item["v"] = torch.tensor(_vs[: self.max_seq], dtype=torch.float32)
 
         return item
+
+    def pad_seq(self, times, values):
+        """pad/trunc the seq[set] to max_seq"""
+        # times: 1d list
+        # values: 1d list
+        seq_len = len(times)
+
+        if seq_len > self.max_seq:  # truncation
+            times = times[: self.max_seq]
+            if values is not None:
+                values = values[: self.max_seq]
+        else:  # pad
+            pad_length = self.max_seq - seq_len
+            times = times + [-1.0] * pad_length
+            if values is not None:
+                values = values + [-99.0] * pad_length
+
+        return times, values
 
 
 class Count(Dataset):
