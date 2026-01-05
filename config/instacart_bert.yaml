@@ -1,5 +1,5 @@
 dataset:
-    data_root: "/content/instacart"
+    data_root: "/hpc/group/engelhardlab/ms1008/instacart"
     max_seq: 2048
     seq_id_col: "user_id"
     set_id_col: "order_number"
