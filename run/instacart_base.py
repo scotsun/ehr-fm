@@ -45,7 +45,7 @@ def main():
     print(f"local_rank: {local_rank}")
     print(f"process {rank}/{world_size} using device {device}\n")
 
-    cfg_dict = load_cfg("./config/instacart_fm.yaml")
+    cfg_dict = load_cfg("./config/instacart_base.yaml")
     tk = Tokenizer.from_file(f"./{cfg_dict['model']['tokenizer']}")
 
     cfg = FMConfig(
