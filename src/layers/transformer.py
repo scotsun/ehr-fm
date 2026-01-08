@@ -130,13 +130,14 @@ class TransformerBlock(nn.Module):
             if ffn_type == "swiglu"
             else FFNLUBlock(d_model, d_ff, ffn_type)
         )
-        self.residual_connection = ResidualConnection(d_model, dropout, norm_type)
+        self.residual_connection0 = ResidualConnection(d_model, dropout, norm_type)
+        self.residual_connection1 = ResidualConnection(d_model, dropout, norm_type)
 
     def forward(self, x, mask, t=None):
-        x = self.residual_connection(
+        x = self.residual_connection0(
             x, lambda x: self.self_attn_block(x, x, x, mask, t)
         )
-        x = self.residual_connection(x, self.ffn_block)
+        x = self.residual_connection1(x, self.ffn_block)
         return x
 
 
