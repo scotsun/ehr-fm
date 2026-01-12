@@ -28,6 +28,14 @@ class FMBert(PreTrainedModel):
                 for _ in range(config.n_blocks)
             ]
         )
+        match config.norm_type:
+            case "layer":
+                self.last_norm = nn.LayerNorm(config.d_model)
+            case "rms":
+                self.last_norm = nn.RMSNorm(config.d_model)
+            case _:
+                raise ValueError(f"{config.norm_type} not implemented")
+
         self.lm_head = nn.Linear(config.d_model, config.vocab_size)
         if config.weight_tying:
             self.lm_head.weight = self.embeddings.embeddings.weight
@@ -42,5 +50,6 @@ class FMBert(PreTrainedModel):
         h = self.embeddings(input_ids)
         h = h + self.t2v(t)
         for block in self.blocks:
-            h = block(h, attention_mask, t)
+            h = block(h, attention_mask)
+        h = self.last_norm(h)
         return h

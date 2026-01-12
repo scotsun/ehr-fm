@@ -24,5 +24,7 @@ model:
     d_ff: 2048
     n_block: 4
     dropout: 0.0
+    norm_type: "layer"
+    ffn_type: "swiglu"
     weight_tying: true
     attn_backend: "efficient_attention"

@@ -22,10 +22,18 @@ class FMTransformerEncoder(nn.Module):
                 for _ in range(config.n_blocks)
             ]
         )
+        match config.norm_type:
+            case "layer":
+                self.last_norm = nn.LayerNorm(config.d_model)
+            case "rms":
+                self.last_norm = nn.RMSNorm(config.d_model)
+            case _:
+                raise ValueError(f"{config.norm_type} not implemented")
 
     def forward(self, h, attention_mask, set_attention_mask, t):
         for block in self.blocks:
             h = block(h, attention_mask, set_attention_mask, t)
+        h = self.last_norm(h)
         return h
 
 
