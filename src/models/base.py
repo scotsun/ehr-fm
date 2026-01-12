@@ -5,9 +5,14 @@ from . import FMConfig, FMEmbeddings
 from src.layers import HierarchicalTransformerBlock, T2V, FFNSwiGLUBlock
 
 
-class FMTransformerEncoder(nn.Module):
+class FMBase(PreTrainedModel):
+    config_class = FMConfig
+    model_type = "fm-base"
+
     def __init__(self, config: FMConfig):
-        super().__init__()
+        super().__init__(config)
+        self.embeddings = FMEmbeddings(config)
+        self.t2v = T2V(config.d_model, config.t2v_scale)
         self.blocks = nn.ModuleList(
             [
                 HierarchicalTransformerBlock(
@@ -29,23 +34,6 @@ class FMTransformerEncoder(nn.Module):
                 self.last_norm = nn.RMSNorm(config.d_model)
             case _:
                 raise ValueError(f"{config.norm_type} not implemented")
-
-    def forward(self, h, attention_mask, set_attention_mask, t):
-        for block in self.blocks:
-            h = block(h, attention_mask, set_attention_mask, t)
-        h = self.last_norm(h)
-        return h
-
-
-class FMBase(PreTrainedModel):
-    config_class = FMConfig
-    model_type = "fm-base"
-
-    def __init__(self, config: FMConfig):
-        super().__init__(config)
-        self.embeddings = FMEmbeddings(config)
-        self.t2v = T2V(config.d_model, config.t2v_scale)
-        self.transformer_encoder = FMTransformerEncoder(config)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size)
         if config.weight_tying:
             self.lm_head.weight = self.embeddings.embeddings.weight
@@ -59,7 +47,9 @@ class FMBase(PreTrainedModel):
     def encode(self, input_ids, attention_mask, set_attention_mask, t):
         h = self.embeddings(input_ids)
         h = h + self.t2v(t)
-        h = self.transformer_encoder(h, attention_mask, set_attention_mask, t)
+        for block in self.blocks:
+            h = block(h, attention_mask, set_attention_mask, t)
+        h = self.last_norm(h)
         # (batch, max_seq, max_set_size, d_model)
         return h
 

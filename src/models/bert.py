@@ -1,4 +1,5 @@
 import torch.nn as nn
+from torch import cumsum
 from transformers.modeling_utils import PreTrainedModel
 
 from . import FMConfig, FMEmbeddings
@@ -47,9 +48,10 @@ class FMBert(PreTrainedModel):
 
     def encode(self, input_ids, attention_mask, t):
         # shapes: (batch, L)
+        set_pos = attention_mask * cumsum(input_ids == 2, dim=1)
         h = self.embeddings(input_ids)
         h = h + self.t2v(t)
         for block in self.blocks:
-            h = block(h, attention_mask)
+            h = block(h, attention_mask, time=set_pos)
         h = self.last_norm(h)
         return h
