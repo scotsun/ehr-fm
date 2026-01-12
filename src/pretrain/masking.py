@@ -144,3 +144,101 @@ def evaluate_encounter_prediction(
     }
 
     return metrics
+
+
+def masking_last_segment(
+    input_ids: torch.Tensor,
+    segment_attention_mask: torch.Tensor,
+    tokenizer: Tokenizer,
+) -> torch.Tensor:
+    """
+    Mask all tokens in the last valid segment for each sample.
+    Used during evaluation to test next-segment prediction capability.
+
+    Args:
+        input_ids: (batch, max_seg, max_seq_len)
+        segment_attention_mask: (batch, max_seg) - which segments are valid
+        tokenizer: Tokenizer instance
+
+    Returns:
+        masked_input_ids: (batch, max_seg, max_seq_len) - with last segment masked
+    """
+    device = input_ids.device
+    batch_size, max_seg, max_seq_len = input_ids.shape
+
+    mask_id = tokenizer.token_to_id("[MASK]")
+    cls_id = tokenizer.token_to_id("[CLS]")
+
+    # Clone input for modification
+    masked_input_ids = input_ids.clone()
+
+    # Find the last valid segment for each batch
+    last_seg_idx = segment_attention_mask.sum(dim=1).long() - 1  # (batch,)
+    last_seg_idx = last_seg_idx.clamp(min=0)
+
+    # Create batch indices
+    batch_indices = torch.arange(batch_size, device=device)
+
+    # Mask all tokens in the last segment (except CLS)
+    # masked_input_ids[batch_indices, last_seg_idx] gives (batch, max_seq_len)
+    last_seg_tokens = masked_input_ids[batch_indices, last_seg_idx]  # (batch, max_seq_len)
+
+    # Replace all non-CLS tokens with [MASK]
+    is_cls = last_seg_tokens == cls_id
+    last_seg_tokens[~is_cls] = mask_id
+
+    # Put back
+    masked_input_ids[batch_indices, last_seg_idx] = last_seg_tokens
+
+    return masked_input_ids
+
+
+def observed_segment_distribution(
+    labels: torch.Tensor,
+    encounter_mask: torch.Tensor,
+    tokenizer: Tokenizer,
+) -> torch.Tensor:
+    """
+    Compute the observed token distribution for each masked segment.
+    This is the target distribution for the Distribution Matching (DM) loss.
+
+    Args:
+        labels: (batch, max_seg, max_seq_len) - original tokens, -100 for non-masked
+        encounter_mask: (batch, max_seg) - which segments were masked
+        tokenizer: Tokenizer instance
+
+    Returns:
+        target_dist: (M, vocab_size) - normalized distribution for each masked segment
+                     where M is the total number of masked segments
+    """
+    device = labels.device
+    vocab_size = tokenizer.get_vocab_size()
+
+    # Extract tokens from masked segments, skip CLS token (position 0)
+    # labels[encounter_mask]: (M, max_seq_len)
+    # [:, 1:]: skip CLS token -> (M, max_seq_len - 1)
+    obs_segment_tokens = labels[encounter_mask][:, 1:]
+
+    # Create target distribution
+    # For each masked segment, count occurrences of each token
+    num_masked_segments = obs_segment_tokens.size(0)
+    target_dist = torch.zeros(num_masked_segments, vocab_size, device=device)
+
+    # Count token occurrences using scatter_add
+    # Only count valid tokens (not -100, not PAD)
+    valid_tokens_mask = obs_segment_tokens >= 0
+    valid_tokens = obs_segment_tokens.clone()
+    valid_tokens[~valid_tokens_mask] = 0  # Replace invalid with 0 (won't affect distribution)
+
+    target_dist.scatter_add_(
+        dim=1,
+        index=valid_tokens,
+        src=valid_tokens_mask.float(),  # Only add 1 for valid tokens
+    )
+
+    # Normalize to get distribution (sum to 1 for each segment)
+    # Add small epsilon to avoid division by zero
+    token_counts = valid_tokens_mask.sum(dim=1, keepdim=True).float()
+    target_dist = target_dist / token_counts.clamp(min=1)
+
+    return target_dist

@@ -5,6 +5,7 @@ import signal
 from pathlib import Path
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -12,6 +13,8 @@ import mlflow
 from tokenizers import Tokenizer
 
 from src.pretrain.data_utils import random_masking
+from src.pretrain.masking import encounter_masking, observed_segment_distribution, masking_last_segment
+from src.metric import topk_accuracy, recall_at_k, ndcg_at_k
 
 
 class CheckpointManager:
@@ -344,23 +347,27 @@ class BaseTrainer(Trainer):
                 # Forward pass with AMP
                 if self.use_amp:
                     with torch.amp.autocast('cuda'):
-                        logits = model(
+                        output = model(
                             input_ids=masked_input_ids,
                             attention_mask=attention_mask,
                             segment_attention_mask=segment_attention_mask,
                             segment_time=segment_time,
                             token_time=token_time,
                         )
+                        # Handle both FMBase (returns logits, h) and old models (returns logits)
+                        logits = output[0] if isinstance(output, tuple) else output
                         loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
                     loss = loss / self.gradient_accumulation_steps
                 else:
-                    logits = model(
+                    output = model(
                         input_ids=masked_input_ids,
                         attention_mask=attention_mask,
                         segment_attention_mask=segment_attention_mask,
                         segment_time=segment_time,
                         token_time=token_time,
                     )
+                    # Handle both FMBase (returns logits, h) and old models (returns logits)
+                    logits = output[0] if isinstance(output, tuple) else output
                     loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
                     loss = loss / self.gradient_accumulation_steps
 
@@ -394,13 +401,24 @@ class BaseTrainer(Trainer):
                         mlflow.log_metrics({"train_mlm_loss": float(loss * self.gradient_accumulation_steps)}, step=cur_step)
         return
 
-    def evaluate(self, dataloader: DataLoader, verbose: bool, epoch_id: int) -> float:
+    def evaluate(self, dataloader: DataLoader, verbose: bool, epoch_id: int) -> dict:
+        """
+        Evaluate model with multiple metrics.
+
+        Returns:
+            dict with keys: mlm_loss, top1_acc, top10_acc, recall_10, ndcg_10
+        """
         model: nn.Module = self.model
         model.eval()
         device = self.device
 
         total_mlm = 0.0
-        total_num_batch = len(dataloader)
+        total_top1 = 0.0
+        total_top10 = 0.0
+        total_recall10 = 0.0
+        total_ndcg10 = 0.0
+        num_batches = 0
+
         with torch.no_grad():
             for batch in tqdm(
                 dataloader, unit="batch", mininterval=0, disable=not verbose
@@ -417,7 +435,6 @@ class BaseTrainer(Trainer):
 
                 # Use encounter masking or token masking
                 if self.use_encounter_masking:
-                    from src.pretrain.masking import encounter_masking
                     masked_input_ids, labels, _ = encounter_masking(
                         input_ids, segment_attention_mask, self.tokenizer, self.encounter_mask_prob
                     )
@@ -427,52 +444,467 @@ class BaseTrainer(Trainer):
                 else:
                     masked_input_ids, labels = random_masking(input_ids, self.tokenizer, self.token_mask_prob)
 
-                # Forward pass with AMP (validation)
+                # Forward pass for MLM evaluation
                 if self.use_amp:
                     with torch.amp.autocast('cuda'):
-                        logits = model(
+                        output = model(
                             input_ids=masked_input_ids,
                             attention_mask=attention_mask,
                             segment_attention_mask=segment_attention_mask,
                             segment_time=segment_time,
                             token_time=token_time,
                         )
+                        logits = output[0] if isinstance(output, tuple) else output
                         loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
                 else:
-                    logits = model(
+                    output = model(
                         input_ids=masked_input_ids,
                         attention_mask=attention_mask,
                         segment_attention_mask=segment_attention_mask,
                         segment_time=segment_time,
                         token_time=token_time,
                     )
+                    logits = output[0] if isinstance(output, tuple) else output
                     loss = self.criterion(logits.view(-1, logits.size(-1)), labels.view(-1))
 
+                # MLM metrics
                 total_mlm += loss.item()
+                total_top1 += topk_accuracy(logits, labels, k=1).item()
+                total_top10 += topk_accuracy(logits, labels, k=10).item()
 
-        return total_mlm / total_num_batch
+                # Last segment prediction (for recall/ndcg)
+                # Mask last segment and predict
+                masked_last_seg_input = masking_last_segment(
+                    input_ids, segment_attention_mask, self.tokenizer
+                )
+                if self.use_amp:
+                    with torch.amp.autocast('cuda'):
+                        last_seg_output = model(
+                            input_ids=masked_last_seg_input,
+                            attention_mask=attention_mask,
+                            segment_attention_mask=segment_attention_mask,
+                            segment_time=segment_time,
+                            token_time=token_time,
+                        )
+                        last_seg_logits = last_seg_output[0] if isinstance(last_seg_output, tuple) else last_seg_output
+                else:
+                    last_seg_output = model(
+                        input_ids=masked_last_seg_input,
+                        attention_mask=attention_mask,
+                        segment_attention_mask=segment_attention_mask,
+                        segment_time=segment_time,
+                        token_time=token_time,
+                    )
+                    last_seg_logits = last_seg_output[0] if isinstance(last_seg_output, tuple) else last_seg_output
+
+                total_recall10 += recall_at_k(last_seg_logits, input_ids, segment_attention_mask, k=10).item()
+                total_ndcg10 += ndcg_at_k(last_seg_logits, input_ids, segment_attention_mask, k=10).item()
+
+                num_batches += 1
+
+        if num_batches == 0:
+            return {"mlm_loss": 0.0, "top1_acc": 0.0, "top10_acc": 0.0, "recall_10": 0.0, "ndcg_10": 0.0}
+
+        return {
+            "mlm_loss": total_mlm / num_batches,
+            "top1_acc": total_top1 / num_batches,
+            "top10_acc": total_top10 / num_batches,
+            "recall_10": total_recall10 / num_batches,
+            "ndcg_10": total_ndcg10 / num_batches,
+        }
 
     def _valid(self, dataloader, verbose, epoch_id):
         """
         log all the metrics in mlflow;
         return the metric for save-best/early-stop.
         """
-        # Always evaluate (needed for early stopping regardless of verbose)
-        valid_mlm = self.evaluate(dataloader, verbose, epoch_id)
-        if verbose and self.use_mlflow:
-            mlflow.log_metrics({"val_mlm_loss": valid_mlm}, step=epoch_id)
+        metrics = self.evaluate(dataloader, verbose, epoch_id)
+
+        if verbose:
+            print(f"  val_mlm: {metrics['mlm_loss']:.4f} | "
+                  f"top1: {metrics['top1_acc']:.4f} | top10: {metrics['top10_acc']:.4f} | "
+                  f"recall@10: {metrics['recall_10']:.4f} | ndcg@10: {metrics['ndcg_10']:.4f}")
+
+        if self.use_mlflow:
+            mlflow.log_metrics({
+                "val_mlm_loss": metrics["mlm_loss"],
+                "val_top1_acc": metrics["top1_acc"],
+                "val_top10_acc": metrics["top10_acc"],
+                "val_recall_10": metrics["recall_10"],
+                "val_ndcg_10": metrics["ndcg_10"],
+            }, step=epoch_id)
+
         if self.early_stopping:
-            self.early_stopping.step(valid_mlm, self.model)
-        return valid_mlm
+            self.early_stopping.step(metrics["mlm_loss"], self.model)
+
+        # Return MLM loss for backward compatibility
+        return metrics["mlm_loss"]
+
+
+class BaseWithHeadsTrainer(Trainer):
+    """
+    Trainer for FMBaseWithHeads model with dual loss:
+    - MLM Loss: Token-level masked language modeling (CrossEntropy)
+    - DM Loss: Segment-level distribution matching (KL Divergence)
+    """
+
+    def __init__(
+        self,
+        model: nn.Module,
+        tokenizer: Tokenizer,
+        optimizer: Optimizer,
+        early_stopping: EarlyStopping | None,
+        verbose_period: int,
+        device: torch.device,
+        local_rank: int,
+        encounter_mask_prob: float = 0.2,
+        use_mlflow: bool = True,
+        gradient_accumulation_steps: int = 1,
+        max_grad_norm: float = 1.0,
+        use_amp: bool = False,
+        mlm_weight: float = 1.0,
+        dm_weight: float = 1.0,
+    ) -> None:
+        super().__init__(
+            model, optimizer, early_stopping, verbose_period, device, local_rank
+        )
+        self.tokenizer = tokenizer
+        self.encounter_mask_prob = encounter_mask_prob
+        self.use_mlflow = use_mlflow
+        self.gradient_accumulation_steps = gradient_accumulation_steps
+        self.max_grad_norm = max_grad_norm
+        self.use_amp = use_amp
+        self.mlm_weight = mlm_weight
+        self.dm_weight = dm_weight
+
+        # Loss functions
+        self.criterion_mlm = nn.CrossEntropyLoss(ignore_index=-100)
+        self.criterion_dm = nn.KLDivLoss(reduction='batchmean')
+
+        # Initialize AMP scaler if using mixed precision
+        if self.use_amp:
+            self.scaler = torch.amp.GradScaler(
+                'cuda',
+                init_scale=2048.0,
+                growth_factor=1.2,
+                backoff_factor=0.5,
+                growth_interval=10000
+            )
+        else:
+            self.scaler = None
+
+    def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
+        model: nn.Module = self.model
+        model.train()
+        optimizer = self.optimizer
+        device = self.device
+
+        with tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose) as bar:
+            bar.set_description(f"Epoch {epoch_id}")
+            for batch_id, batch in enumerate(bar):
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                segment_attention_mask = batch["segment_attention_mask"].to(device)
+                segment_time = batch.get("segment_time", None)
+                if segment_time is not None:
+                    segment_time = segment_time.to(device)
+                token_time = batch.get("token_time", None)
+                if token_time is not None:
+                    token_time = token_time.to(device)
+
+                # Apply encounter-level masking
+                masked_input_ids, labels, encounter_mask = encounter_masking(
+                    input_ids, segment_attention_mask, self.tokenizer, self.encounter_mask_prob
+                )
+
+                # Skip empty batches
+                if (labels != -100).sum() == 0 or encounter_mask.sum() == 0:
+                    continue
+
+                # Compute target distribution for DM loss
+                target_dist = observed_segment_distribution(
+                    labels, encounter_mask, self.tokenizer
+                )
+
+                # Forward pass
+                if self.use_amp:
+                    with torch.amp.autocast('cuda'):
+                        logits_mlm, logits_dm, _ = model(
+                            input_ids=masked_input_ids,
+                            attention_mask=attention_mask,
+                            segment_attention_mask=segment_attention_mask,
+                            segment_time=segment_time,
+                            token_time=token_time,
+                            segment_mask=encounter_mask,
+                        )
+
+                        # MLM Loss
+                        mlm_loss = self.criterion_mlm(
+                            logits_mlm.view(-1, logits_mlm.size(-1)),
+                            labels.view(-1)
+                        )
+
+                        # DM Loss (KL Divergence)
+                        dm_loss = self.criterion_dm(
+                            F.log_softmax(logits_dm, dim=-1),
+                            target_dist
+                        )
+
+                        # Combined loss
+                        loss = self.mlm_weight * mlm_loss + self.dm_weight * dm_loss
+                    loss = loss / self.gradient_accumulation_steps
+                else:
+                    logits_mlm, logits_dm, _ = model(
+                        input_ids=masked_input_ids,
+                        attention_mask=attention_mask,
+                        segment_attention_mask=segment_attention_mask,
+                        segment_time=segment_time,
+                        token_time=token_time,
+                        segment_mask=encounter_mask,
+                    )
+
+                    # MLM Loss
+                    mlm_loss = self.criterion_mlm(
+                        logits_mlm.view(-1, logits_mlm.size(-1)),
+                        labels.view(-1)
+                    )
+
+                    # DM Loss (KL Divergence)
+                    dm_loss = self.criterion_dm(
+                        F.log_softmax(logits_dm, dim=-1),
+                        target_dist
+                    )
+
+                    # Combined loss
+                    loss = self.mlm_weight * mlm_loss + self.dm_weight * dm_loss
+                    loss = loss / self.gradient_accumulation_steps
+
+                # Backward pass
+                if self.use_amp:
+                    self.scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
+                # Update weights with gradient accumulation
+                if (batch_id + 1) % self.gradient_accumulation_steps == 0:
+                    if self.use_amp:
+                        if self.max_grad_norm > 0:
+                            self.scaler.unscale_(optimizer)
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), self.max_grad_norm)
+                        self.scaler.step(optimizer)
+                        self.scaler.update()
+                    else:
+                        if self.max_grad_norm > 0:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), self.max_grad_norm)
+                        optimizer.step()
+                    optimizer.zero_grad()
+
+                # Logging (use detach().item() to avoid warning)
+                total_loss_val = (loss * self.gradient_accumulation_steps).detach().item()
+                mlm_loss_val = mlm_loss.detach().item()
+                dm_loss_val = dm_loss.detach().item()
+                bar.set_postfix(
+                    mlm=mlm_loss_val,
+                    dm=dm_loss_val,
+                    total=total_loss_val
+                )
+
+                if self.use_mlflow:
+                    cur_step = epoch_id * len(dataloader) + batch_id
+                    if self.local_rank == 0 and cur_step % 100 == 0:
+                        mlflow.log_metrics({
+                            "train_mlm_loss": mlm_loss_val,
+                            "train_dm_loss": dm_loss_val,
+                            "train_total_loss": total_loss_val,
+                        }, step=cur_step)
+        return
+
+    def evaluate(self, dataloader: DataLoader, verbose: bool, epoch_id: int) -> dict:
+        """
+        Evaluate model with multiple metrics.
+
+        Returns:
+            dict with keys: mlm_loss, dm_loss, top1_acc, top10_acc, recall_10, ndcg_10
+        """
+        model: nn.Module = self.model
+        model.eval()
+        device = self.device
+
+        total_mlm = 0.0
+        total_dm = 0.0
+        total_top1 = 0.0
+        total_top10 = 0.0
+        total_recall10 = 0.0
+        total_ndcg10 = 0.0
+        num_batches = 0
+
+        with torch.no_grad():
+            for batch in tqdm(
+                dataloader, unit="batch", mininterval=0, disable=not verbose
+            ):
+                input_ids = batch["input_ids"].to(device)
+                attention_mask = batch["attention_mask"].to(device)
+                segment_attention_mask = batch["segment_attention_mask"].to(device)
+                segment_time = batch.get("segment_time", None)
+                if segment_time is not None:
+                    segment_time = segment_time.to(device)
+                token_time = batch.get("token_time", None)
+                if token_time is not None:
+                    token_time = token_time.to(device)
+
+                # Apply encounter-level masking
+                masked_input_ids, labels, encounter_mask = encounter_masking(
+                    input_ids, segment_attention_mask, self.tokenizer, self.encounter_mask_prob
+                )
+
+                # Skip empty batches
+                if (labels != -100).sum() == 0 or encounter_mask.sum() == 0:
+                    continue
+
+                # Compute target distribution
+                target_dist = observed_segment_distribution(
+                    labels, encounter_mask, self.tokenizer
+                )
+
+                # Forward pass for MLM/DM evaluation
+                if self.use_amp:
+                    with torch.amp.autocast('cuda'):
+                        logits_mlm, logits_dm, _ = model(
+                            input_ids=masked_input_ids,
+                            attention_mask=attention_mask,
+                            segment_attention_mask=segment_attention_mask,
+                            segment_time=segment_time,
+                            token_time=token_time,
+                            segment_mask=encounter_mask,
+                        )
+
+                        mlm_loss = self.criterion_mlm(
+                            logits_mlm.view(-1, logits_mlm.size(-1)),
+                            labels.view(-1)
+                        )
+                        dm_loss = self.criterion_dm(
+                            F.log_softmax(logits_dm, dim=-1),
+                            target_dist
+                        )
+                else:
+                    logits_mlm, logits_dm, _ = model(
+                        input_ids=masked_input_ids,
+                        attention_mask=attention_mask,
+                        segment_attention_mask=segment_attention_mask,
+                        segment_time=segment_time,
+                        token_time=token_time,
+                        segment_mask=encounter_mask,
+                    )
+
+                    mlm_loss = self.criterion_mlm(
+                        logits_mlm.view(-1, logits_mlm.size(-1)),
+                        labels.view(-1)
+                    )
+                    dm_loss = self.criterion_dm(
+                        F.log_softmax(logits_dm, dim=-1),
+                        target_dist
+                    )
+
+                # Loss metrics
+                total_mlm += mlm_loss.item()
+                total_dm += dm_loss.item()
+
+                # MLM accuracy metrics
+                total_top1 += topk_accuracy(logits_mlm, labels, k=1).item()
+                total_top10 += topk_accuracy(logits_mlm, labels, k=10).item()
+
+                # Last segment prediction (for recall/ndcg)
+                masked_last_seg_input = masking_last_segment(
+                    input_ids, segment_attention_mask, self.tokenizer
+                )
+                # Use segment_attention_mask as bool for segment_mask
+                seg_mask_bool = segment_attention_mask.bool()
+                if self.use_amp:
+                    with torch.amp.autocast('cuda'):
+                        last_seg_logits, _, _ = model(
+                            input_ids=masked_last_seg_input,
+                            attention_mask=attention_mask,
+                            segment_attention_mask=segment_attention_mask,
+                            segment_time=segment_time,
+                            token_time=token_time,
+                            segment_mask=seg_mask_bool,
+                        )
+                else:
+                    last_seg_logits, _, _ = model(
+                        input_ids=masked_last_seg_input,
+                        attention_mask=attention_mask,
+                        segment_attention_mask=segment_attention_mask,
+                        segment_time=segment_time,
+                        token_time=token_time,
+                        segment_mask=seg_mask_bool,
+                    )
+
+                total_recall10 += recall_at_k(last_seg_logits, input_ids, segment_attention_mask, k=10).item()
+                total_ndcg10 += ndcg_at_k(last_seg_logits, input_ids, segment_attention_mask, k=10).item()
+
+                num_batches += 1
+
+        if num_batches == 0:
+            return {
+                "mlm_loss": 0.0, "dm_loss": 0.0,
+                "top1_acc": 0.0, "top10_acc": 0.0,
+                "recall_10": 0.0, "ndcg_10": 0.0
+            }
+
+        return {
+            "mlm_loss": total_mlm / num_batches,
+            "dm_loss": total_dm / num_batches,
+            "top1_acc": total_top1 / num_batches,
+            "top10_acc": total_top10 / num_batches,
+            "recall_10": total_recall10 / num_batches,
+            "ndcg_10": total_ndcg10 / num_batches,
+        }
+
+    def _valid(self, dataloader, verbose, epoch_id):
+        """
+        Log all the metrics in mlflow;
+        Return the metric for save-best/early-stop.
+        """
+        metrics = self.evaluate(dataloader, verbose, epoch_id)
+        val_total = self.mlm_weight * metrics["mlm_loss"] + self.dm_weight * metrics["dm_loss"]
+
+        if verbose:
+            print(f"  val_mlm: {metrics['mlm_loss']:.4f} | val_dm: {metrics['dm_loss']:.4f} | "
+                  f"top1: {metrics['top1_acc']:.4f} | top10: {metrics['top10_acc']:.4f} | "
+                  f"recall@10: {metrics['recall_10']:.4f} | ndcg@10: {metrics['ndcg_10']:.4f}")
+
+        if self.use_mlflow:
+            mlflow.log_metrics({
+                "val_mlm_loss": metrics["mlm_loss"],
+                "val_dm_loss": metrics["dm_loss"],
+                "val_total_loss": val_total,
+                "val_top1_acc": metrics["top1_acc"],
+                "val_top10_acc": metrics["top10_acc"],
+                "val_recall_10": metrics["recall_10"],
+                "val_ndcg_10": metrics["ndcg_10"],
+            }, step=epoch_id)
+
+        if self.early_stopping:
+            self.early_stopping.step(val_total, self.model)
+
+        return val_total
 
 
 def test_logging(
     trainer: Trainer,
     test_loader: DataLoader,
-    metric_names: list[str],
     expr_name: str,
     run_name: str,
 ):
+    """
+    Log test metrics to an existing MLflow run.
+
+    Args:
+        trainer: Trainer instance with model and evaluate method
+        test_loader: DataLoader for test set
+        expr_name: MLflow experiment name
+        run_name: MLflow run name to add metrics to
+    """
     mlflow.set_experiment(expr_name)
     run_data = mlflow.search_runs(filter_string=f"attributes.run_name = '{run_name}'")
     if run_data.empty:
@@ -483,7 +915,9 @@ def test_logging(
             with mlflow.start_run(run_id=run_id):
                 trainer.model = mlflow.pytorch.load_model(f"runs:/{run_id}/best_model")
                 test_scores = trainer.evaluate(test_loader, True, 0)
-                mlflow.log_metrics(metrics=dict(zip(metric_names, test_scores)), step=0)
+                # Add "test_" prefix to distinguish from validation metrics
+                test_metrics = {f"test_{k}": v for k, v in test_scores.items()}
+                mlflow.log_metrics(metrics=test_metrics, step=0)
             print(f"Successfully added metrics to run {run_id}")
         except Exception as e:
             print(f"Error updating run: {e}")

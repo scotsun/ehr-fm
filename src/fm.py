@@ -4,6 +4,7 @@ from transformers import PretrainedConfig
 
 from src.layers.hierarchical import HierarchicalTransformerBlock
 from src.layers.rope import T2V
+from src.layers.ffn import FFNSwiGLUBlock
 
 
 class FMConfig(PretrainedConfig):
@@ -107,8 +108,9 @@ class FMBase(PreTrainedModel):
     def forward(self, input_ids, attention_mask, segment_attention_mask, segment_time=None, token_time=None):
         h = self.encode(input_ids, attention_mask, segment_attention_mask, segment_time, token_time)
         logits = self.lm_head(h)
-        # (batch, max_seg, max_seq_len, vocab)
-        return logits
+        # logits: (batch, max_seg, max_seq_len, vocab)
+        # h: (batch, max_seg, max_seq_len, d_model)
+        return logits, h
 
     def encode(self, input_ids, attention_mask, segment_attention_mask, segment_time=None, token_time=None):
         h = self.embeddings(input_ids)
@@ -116,3 +118,73 @@ class FMBase(PreTrainedModel):
             h = h + self.t2v(token_time)
         h = self.transformer_encoder(h, attention_mask, segment_attention_mask, segment_time, token_time)
         return h
+
+
+class FMBaseWithHeads(PreTrainedModel):
+    """
+    FMBase with additional heads for multi-task learning:
+    - lm_head: token-level MLM prediction (inherited from FMBase)
+    - mlp_dm: segment-level distribution matching prediction (uses CLS token)
+    """
+    config_class = FMConfig
+    base_model_prefix = "fm-base-with-heads"
+
+    def __init__(self, config: FMConfig):
+        super().__init__(config)
+        self.transformer = FMBase(config)
+        # Distribution Matching head: predicts segment-level token distribution
+        self.mlp_dm = FFNSwiGLUBlock(
+            d_model=config.d_model,
+            d_ff=config.d_ff,
+        )
+        # Final projection to vocab size for distribution prediction
+        self.dm_head = nn.Linear(config.d_model, config.vocab_size)
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask,
+        segment_attention_mask,
+        segment_time=None,
+        token_time=None,
+        segment_mask=None,
+    ):
+        """
+        Args:
+            input_ids: (batch, max_seg, max_seq_len)
+            attention_mask: (batch, max_seg, max_seq_len)
+            segment_attention_mask: (batch, max_seg)
+            segment_time: (batch, max_seg) - optional
+            token_time: (batch, max_seg, max_seq_len) - optional
+            segment_mask: (batch, max_seg) - which segments are masked for DM loss
+
+        Returns:
+            logits_mlm: (batch, max_seg, max_seq_len, vocab_size) - token-level predictions
+            logits_dm: (M, vocab_size) - segment-level distribution predictions
+            h: (batch, max_seg, max_seq_len, d_model) - hidden states
+        """
+        if segment_mask is None:
+            segment_mask = segment_attention_mask
+
+        # Get token-level predictions and hidden states from base model
+        logits_mlm, h = self.transformer(
+            input_ids, attention_mask, segment_attention_mask, segment_time, token_time
+        )
+
+        # Extract CLS embeddings for masked segments
+        # h: (batch, max_seg, max_seq_len, d_model)
+        # segment_mask: (batch, max_seg)
+        # h[segment_mask]: (M, max_seq_len, d_model) where M = number of masked segments
+        # [:, 0, :]: take CLS token (position 0) -> (M, d_model)
+        h_cls = h[segment_mask][:, 0, :]
+
+        # Predict segment-level distribution
+        h_dm = self.mlp_dm(h_cls)  # (M, d_model)
+        logits_dm = self.dm_head(h_dm)  # (M, vocab_size)
+
+        return logits_mlm, logits_dm, h
+
+    def encode(self, input_ids, attention_mask, segment_attention_mask, segment_time=None, token_time=None):
+        return self.transformer.encode(
+            input_ids, attention_mask, segment_attention_mask, segment_time, token_time
+        )
