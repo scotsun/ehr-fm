@@ -101,7 +101,12 @@ class HATForSequenceClassification(nn.Module):
             param.requires_grad = True
 
     def load_pretrained(self, checkpoint_path: str, strict: bool = True):
-        """Load pre-trained encoder weights from checkpoint."""
+        """Load pre-trained encoder weights from checkpoint.
+
+        Supports both FMBase and FMBaseWithHeads checkpoints:
+        - FMBase: keys start without prefix or with 'encoder.'
+        - FMBaseWithHeads: keys start with 'transformer.' (for the inner FMBase)
+        """
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
         if 'model_state_dict' in checkpoint:
@@ -111,13 +116,27 @@ class HATForSequenceClassification(nn.Module):
         else:
             state_dict = checkpoint
 
-        # Add 'encoder.' prefix if not present
+        # Detect checkpoint type and normalize keys
+        # Check if this is a FMBaseWithHeads checkpoint (keys have 'transformer.' prefix)
+        is_with_heads = any(k.startswith('transformer.') for k in state_dict.keys())
+
         new_state_dict = {}
         for k, v in state_dict.items():
-            if k.startswith('encoder.'):
-                new_state_dict[k] = v
+            # Skip non-encoder keys from FMBaseWithHeads (mlp_dm, dm_head)
+            if k.startswith('mlp_dm.') or k.startswith('dm_head.'):
+                continue
+
+            if is_with_heads:
+                # FMBaseWithHeads: remove 'transformer.' prefix, then add 'encoder.'
+                if k.startswith('transformer.'):
+                    new_key = f'encoder.{k[len("transformer."):]}'
+                    new_state_dict[new_key] = v
             else:
-                new_state_dict[f'encoder.{k}'] = v
+                # FMBase: add 'encoder.' prefix if not present
+                if k.startswith('encoder.'):
+                    new_state_dict[k] = v
+                else:
+                    new_state_dict[f'encoder.{k}'] = v
 
         encoder_state_dict = {k: v for k, v in new_state_dict.items() if k.startswith('encoder.')}
         missing, unexpected = self.load_state_dict(encoder_state_dict, strict=False)
@@ -180,7 +199,10 @@ def create_finetune_model(
     pooling: str = "last_cls",
     freeze_encoder: bool = False,
 ) -> HATForSequenceClassification:
-    """Create a fine-tuning model from pre-trained checkpoint."""
+    """Create a fine-tuning model from pre-trained checkpoint.
+
+    Supports both FMBase and FMBaseWithHeads checkpoints.
+    """
     checkpoint = torch.load(pretrained_path, map_location='cpu')
 
     if 'config' in checkpoint:
@@ -194,6 +216,9 @@ def create_finetune_model(
         else:
             state_dict = checkpoint
 
+        # Detect if this is a FMBaseWithHeads checkpoint
+        is_with_heads = any(k.startswith('transformer.') for k in state_dict.keys())
+
         # Get vocab_size and d_model from embedding weight
         embed_key = None
         for k in state_dict.keys():
@@ -206,7 +231,7 @@ def create_finetune_model(
         else:
             vocab_size, d_model = 15000, 768
 
-        # Get d_ff from FFN layer
+        # Get d_ff from FFN layer (handle both checkpoint types)
         d_ff = 2048
         for k, v in state_dict.items():
             if 'ffn_block.linear_gate.weight' in k:
@@ -216,12 +241,15 @@ def create_finetune_model(
         # Infer n_heads (assume head_dim=64)
         n_heads = d_model // 64
 
-        # Count transformer blocks
+        # Count transformer blocks (handle both checkpoint types)
         n_blocks = 0
+        block_pattern = 'transformer.transformer_encoder.blocks.' if is_with_heads else 'transformer_encoder.blocks.'
         for k in state_dict.keys():
-            if 'transformer_encoder.blocks.' in k:
-                block_idx = int(k.split('transformer_encoder.blocks.')[1].split('.')[0])
-                n_blocks = max(n_blocks, block_idx + 1)
+            if block_pattern in k:
+                parts = k.split(block_pattern)
+                if len(parts) > 1:
+                    block_idx = int(parts[1].split('.')[0])
+                    n_blocks = max(n_blocks, block_idx + 1)
         if n_blocks == 0:
             n_blocks = 6
 
@@ -232,6 +260,8 @@ def create_finetune_model(
             n_blocks=n_blocks,
             n_heads=n_heads,
         )
+        ckpt_type = "FMBaseWithHeads" if is_with_heads else "FMBase"
+        print(f"Detected checkpoint type: {ckpt_type}")
         print(f"Inferred config: vocab_size={vocab_size}, d_model={d_model}, d_ff={d_ff}, n_blocks={n_blocks}, n_heads={n_heads}")
 
     model = HATForSequenceClassification(
