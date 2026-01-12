@@ -17,6 +17,7 @@ from src.trainer import (
     EarlyStopping,
     Trainer,
     BertTrainer,
+    LongformerTrainer,
     BaseTrainer,
     BaseWithHeadsTrainer,
 )
@@ -165,6 +166,10 @@ def build_trainer(
             criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-base":
             trainer_class = BaseTrainer
+            signature = make_fm_signature(cfg)
+            criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
+        case "fm-longformer":
+            trainer_class = LongformerTrainer
             signature = make_fm_signature(cfg)
             criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-base-with_heads":

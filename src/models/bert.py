@@ -52,6 +52,6 @@ class FMBert(PreTrainedModel):
         h = self.embeddings(input_ids)
         h = h + self.t2v(t)
         for block in self.blocks:
-            h = block(h, attention_mask, time=set_pos)
+            h = block(h, attention_mask, t=set_pos)
         h = self.last_norm(h)
         return h

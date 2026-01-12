@@ -318,6 +318,32 @@ class BertTrainer(Trainer):
         return valid_metrics
 
 
+class LongformerTrainer(BertTrainer):
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        optimizer,
+        criterions,
+        early_stopping,
+        verbose_period,
+        device,
+        model_signature,
+        trainer_args,
+    ):
+        super().__init__(
+            model,
+            tokenizer,
+            optimizer,
+            criterions,
+            early_stopping,
+            verbose_period,
+            device,
+            model_signature,
+            trainer_args,
+        )
+
+
 class BaseTrainer(Trainer):
     def __init__(
         self,
@@ -680,7 +706,7 @@ class BaseWithHeadsTrainer(Trainer):
         if "LOCAL_RANK" in os.environ:
             dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
-            # (counter[1] / counter[0]).item(),
+            (counter[1] / counter[0]).item(),
             (counter[2] / counter[0]).item(),
             (counter[3] / counter[0]).item(),
             (counter[4] / counter[0]).item(),
@@ -740,26 +766,3 @@ class BinaryTrainer(Trainer):
                 p.requires_grad = False
         self.criterion = criterion
         self.outcome_name = outcome_name
-
-
-def test_logging(
-    trainer: Trainer,
-    test_loader: DataLoader,
-    metric_names: list[str],
-    expr_name: str,
-    run_name: str,
-):
-    mlflow.set_experiment(expr_name)
-    run_data = mlflow.search_runs(filter_string=f"attributes.run_name = '{run_name}'")
-    if run_data.empty:
-        raise ValueError(f"run_name={run_name} does not exist")
-    else:
-        run_id = run_data.iloc[0].run_id
-        try:
-            with mlflow.start_run(run_id=run_id):
-                trainer.model = mlflow.pytorch.load_model(f"runs:/{run_id}/best_model")
-                test_scores = trainer.evaluate(test_loader, True, 0)
-                mlflow.log_metrics(metrics=dict(zip(metric_names, test_scores)), step=0)
-            print(f"Successfully added metrics to run {run_id}")
-        except Exception as e:
-            print(f"Error updating run: {e}")

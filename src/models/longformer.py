@@ -56,6 +56,7 @@ class LongformerMHABlock(LongformerSelfAttention):
         query_vectors = query_vectors.view(
             seq_len, batch_size, self.num_heads, self.head_dim
         ).transpose(0, 1)
+        print(query_vectors.shape)
         key_vectors = key_vectors.view(
             seq_len, batch_size, self.num_heads, self.head_dim
         ).transpose(0, 1)
@@ -263,7 +264,7 @@ class LongformerBlock(nn.Module):
                 attention_mask=attention_mask,
                 is_index_global_attn=attention_mask == 2,
                 is_index_masked=attention_mask == 0,
-                is_global_atnn=True,
+                is_global_attn=True,
             ),
         )
         x = self.residual_connection1(x, self.ffn_block(x))
@@ -277,7 +278,7 @@ class FMLongformer(PreTrainedModel):
     def __init__(self, config: FMConfig):
         super().__init__(config)
         longformer_cfg = LongformerConfig(  # longformer cfg interface
-            attention_window=[config.trainer["max_set_size"]] * config.n_blocks,
+            attention_window=[config.dataset["max_set_size"]] * config.n_blocks,
             hidden_size=config.d_model,
             num_attention_heads=config.n_heads,
             num_hidden_layers=config.n_blocks,
@@ -307,16 +308,20 @@ class FMLongformer(PreTrainedModel):
         if config.weight_tying:
             self.lm_head.weight = self.embeddings.embeddings.weight
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
-        h = self.encode(input_ids, attention_mask)
+    def forward(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, t: torch.Tensor
+    ):
+        h = self.encode(input_ids, attention_mask, t)
         logits = self.lm_head(h)
         # (batch, max_seq, max_set_size, d_model)
         return logits, h
 
-    def encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
+    def encode(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor, t: torch.Tensor
+    ):
         global_attention_mask = input_ids == 2
         h = self.embeddings(input_ids)
-        h = self.t2v(h)
+        h = self.t2v(t)
         for block in self.blocks:
             h = block(h, attention_mask, global_attention_mask)
         h = self.last_norm(h)

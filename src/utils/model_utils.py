@@ -4,6 +4,7 @@ from transformers import PreTrainedModel, PretrainedConfig
 
 from src.models.base import FMBase, FMBaseWithHeads
 from src.models.bert import FMBert
+from src.models.longformer import FMLongformer
 
 
 def is_model_half(model: torch.nn.Module):
@@ -21,6 +22,8 @@ def build_model(
     match model_class:
         case "FMBert":
             model = FMBert(cfg)
+        case "FMLongformer":
+            model = FMLongformer(cfg)
         case "FMBase":
             model = FMBase(cfg)
         case "FMBaseWithHeads":
