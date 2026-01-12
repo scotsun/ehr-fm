@@ -91,7 +91,7 @@ class ResidualConnection(nn.Module):
         self.d_model = d_model
         self.dropout = nn.Dropout(dropout)
         if norm_type == "layer":
-            self.norm = nn.LayerNorm(d_model)
+            self.norm = nn.LayerNorm(d_model, bias=False)
         elif norm_type == "rms":
             self.norm = nn.RMSNorm(d_model)
         else:

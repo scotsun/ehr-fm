@@ -26,6 +26,16 @@ class LongformerMHABlock(LongformerSelfAttention):
         self.rope_q = RoPE(self.head_dim)
         self.rope_k = RoPE(self.head_dim)
 
+        self.query = nn.Linear(config.hidden_size, self.embed_dim, bias=False)
+        self.key = nn.Linear(config.hidden_size, self.embed_dim, bias=False)
+        self.value = nn.Linear(config.hidden_size, self.embed_dim, bias=False)
+
+        self.query_global = nn.Linear(config.hidden_size, self.embed_dim, bias=False)
+        self.key_global = nn.Linear(config.hidden_size, self.embed_dim, bias=False)
+        self.value_global = nn.Linear(config.hidden_size, self.embed_dim, bias=False)
+
+        self.w_o = nn.Linear(config.hidden_size, config.hidden_size, bias=False)
+
     def forward(
         self,
         hidden_states,
@@ -215,18 +225,7 @@ class LongformerMHABlock(LongformerSelfAttention):
             # Fill with 0 now, the correct values are in 'global_attn_probs'.
             attn_probs[is_index_global_attn_nonzero_orig] = 0
 
-        # outputs = (attn_output.transpose(0, 1),)
-
-        return attn_output.transpose(0, 1)
-
-        # if output_attentions:
-        #     outputs += (attn_probs,)
-
-        # return (
-        #     outputs + (global_attn_probs,)
-        #     if (is_global_attn and output_attentions)
-        #     else outputs
-        # )
+        return self.w_o(attn_output.transpose(0, 1))
 
 
 class LongformerBlock(nn.Module):
