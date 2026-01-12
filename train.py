@@ -19,8 +19,8 @@ from tqdm import tqdm
 
 from src.tokenizer import get_tokenizer
 from src.pretrain.data_utils import EHRDataset
-from src.fm import FMConfig, FMBase
-from src.pretrain.trainer import BaseTrainer, EarlyStopping, CheckpointManager
+from src.fm import FMConfig, FMBase, FMBaseWithHeads
+from src.pretrain.trainer import BaseTrainer, BaseWithHeadsTrainer, EarlyStopping, CheckpointManager
 
 def parse_args():
     parser = argparse.ArgumentParser(description="HAT Model Training")
@@ -44,6 +44,9 @@ def parse_args():
     # ========================================================================
     # MODEL PARAMETERS - Optimized defaults, rarely need changes
     # ========================================================================
+    parser.add_argument("--model_type", type=str, default="base",
+                       choices=["base", "with_heads"],
+                       help="'base' (MLM only) or 'with_heads' (MLM + DM dual-task)")
     parser.add_argument("--d_model", type=int, default=768)
     parser.add_argument("--n_heads", type=int, default=12)
     parser.add_argument("--n_blocks", type=int, default=8)
@@ -58,6 +61,12 @@ def parse_args():
                        help="Whether to use Time2Vec encoding")
     parser.add_argument("--t2v_scale", type=float, default=1.0,
                        help="Time2Vec scale factor")
+
+    # Dual-task loss weights (only used when model_type=with_heads)
+    parser.add_argument("--mlm_weight", type=float, default=1.0,
+                       help="Weight for MLM loss (default: 1.0)")
+    parser.add_argument("--dm_weight", type=float, default=1.0,
+                       help="Weight for Distribution Matching loss (default: 1.0)")
     
     # ========================================================================
     # TRAINING PARAMETERS - Good defaults
@@ -300,42 +309,74 @@ def main():
     
     # Model
     print("Creating model...")
-    model = FMBase(FMConfig(
+    config = FMConfig(
         vocab_size=vocab_size, d_model=args.d_model, n_blocks=args.n_blocks,
         n_heads=args.n_heads, d_ff=args.d_ff, dropout=args.dropout,
         swe_rope=args.swe_rope, use_t2v=args.use_t2v, t2v_scale=args.t2v_scale
-    ))
-    
+    )
+
+    if args.model_type == "with_heads":
+        model = FMBaseWithHeads(config)
+        print(f"Model type: FMBaseWithHeads (MLM + DM dual-task)")
+    else:
+        model = FMBase(config)
+        print(f"Model type: FMBase (MLM only)")
+
     # Move model to device (GPU if available)
     device = torch.device(args.device)
     model = model.to(device)
-    
+
     print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
     print(f"SWE RoPE: {'Enabled' if args.swe_rope else 'Disabled'} (CSE RoPE: Always Enabled)")
     print(f"T2V: {'Enabled' if args.use_t2v else 'Disabled'}" + (f" (scale={args.t2v_scale})" if args.use_t2v else ""))
     print(f"Device: {device}\n")
-    
+
     # Trainer
     use_encounter = (args.masking_strategy == "encounter")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
 
-    trainer = BaseTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        optimizer=optimizer,
-        criterion=nn.CrossEntropyLoss(ignore_index=-100),
-        early_stopping=EarlyStopping(patience=args.patience, min_delta=0.001, mode="min", use_mlflow=args.use_mlflow),
-        verbose_period=1,
-        device=device,
-        local_rank=0,
-        use_encounter_masking=use_encounter,
-        encounter_mask_prob=args.encounter_mask_prob,
-        token_mask_prob=args.token_mask_prob,
-        use_mlflow=args.use_mlflow,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        max_grad_norm=args.max_grad_norm,
-        use_amp=args.use_amp
-    )
+    if args.model_type == "with_heads":
+        # Use BaseWithHeadsTrainer for dual-task learning (MLM + DM)
+        # Note: with_heads model requires encounter masking
+        if not use_encounter:
+            print("Warning: with_heads model requires encounter masking. Switching to encounter masking.")
+            use_encounter = True
+
+        trainer = BaseWithHeadsTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            early_stopping=EarlyStopping(patience=args.patience, min_delta=0.001, mode="min", use_mlflow=args.use_mlflow),
+            verbose_period=1,
+            device=device,
+            local_rank=0,
+            encounter_mask_prob=args.encounter_mask_prob,
+            use_mlflow=args.use_mlflow,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            max_grad_norm=args.max_grad_norm,
+            use_amp=args.use_amp,
+            mlm_weight=args.mlm_weight,
+            dm_weight=args.dm_weight,
+        )
+        print(f"Loss weights: MLM={args.mlm_weight}, DM={args.dm_weight}")
+    else:
+        trainer = BaseTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            criterion=nn.CrossEntropyLoss(ignore_index=-100),
+            early_stopping=EarlyStopping(patience=args.patience, min_delta=0.001, mode="min", use_mlflow=args.use_mlflow),
+            verbose_period=1,
+            device=device,
+            local_rank=0,
+            use_encounter_masking=use_encounter,
+            encounter_mask_prob=args.encounter_mask_prob,
+            token_mask_prob=args.token_mask_prob,
+            use_mlflow=args.use_mlflow,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            max_grad_norm=args.max_grad_norm,
+            use_amp=args.use_amp
+        )
 
     # Setup checkpoint manager for Slurm graceful shutdown
     ckpt_manager = CheckpointManager(
@@ -376,11 +417,12 @@ def main():
     # Start MLflow run if enabled
     if args.use_mlflow:
         import mlflow
-        run_name = f"{args.masking_strategy}_bs{args.batch_size}_lr{args.learning_rate}"
+        run_name = f"{args.model_type}_{args.masking_strategy}_bs{args.batch_size}_lr{args.learning_rate}"
         mlflow_run = mlflow.start_run(run_name=run_name)
-        
+
         # Log all parameters
-        mlflow.log_params({
+        params = {
+            "model_type": args.model_type,
             "data_path": args.data_path,
             "n_patients": n_patients_total,
             "batch_size": args.batch_size,
@@ -395,7 +437,11 @@ def main():
             "max_seq_len": args.max_seq_len,
             "use_t2v": args.use_t2v,
             "t2v_scale": args.t2v_scale,
-        })
+        }
+        if args.model_type == "with_heads":
+            params["mlm_weight"] = args.mlm_weight
+            params["dm_weight"] = args.dm_weight
+        mlflow.log_params(params)
         print(f"✅ MLflow run started: {run_name}")
         print(f"   Run ID: {mlflow_run.info.run_id}\n")
     
@@ -408,17 +454,50 @@ def main():
 
     # Custom training loop with checkpoint saving
     best_val_loss = float('inf')
+    use_dual_loss = (args.model_type == "with_heads")
+
     for epoch in range(start_epoch, args.num_epochs):
         ckpt_manager.update_epoch(epoch, best_val_loss)
 
         # Train one epoch
         trainer._train(train_loader, verbose=True, epoch_id=epoch)
 
-        # Validate
-        val_loss = trainer.evaluate(val_loader, verbose=True, epoch_id=epoch)
-        if args.use_mlflow:
-            import mlflow
-            mlflow.log_metrics({"val_mlm_loss": val_loss}, step=epoch)
+        # Validate (evaluate returns dict with metrics)
+        metrics = trainer.evaluate(val_loader, verbose=True, epoch_id=epoch)
+
+        # Handle different return types
+        if use_dual_loss:
+            val_mlm = metrics["mlm_loss"]
+            val_dm = metrics["dm_loss"]
+            val_loss = args.mlm_weight * val_mlm + args.dm_weight * val_dm
+            print(f"Epoch {epoch} | val_mlm: {val_mlm:.4f} | val_dm: {val_dm:.4f} | "
+                  f"top1: {metrics['top1_acc']:.4f} | top10: {metrics['top10_acc']:.4f} | "
+                  f"recall@10: {metrics['recall_10']:.4f} | ndcg@10: {metrics['ndcg_10']:.4f}")
+            if args.use_mlflow:
+                import mlflow
+                mlflow.log_metrics({
+                    "val_mlm_loss": val_mlm,
+                    "val_dm_loss": val_dm,
+                    "val_total_loss": val_loss,
+                    "val_top1_acc": metrics["top1_acc"],
+                    "val_top10_acc": metrics["top10_acc"],
+                    "val_recall_10": metrics["recall_10"],
+                    "val_ndcg_10": metrics["ndcg_10"],
+                }, step=epoch)
+        else:
+            val_loss = metrics["mlm_loss"]
+            print(f"Epoch {epoch} | val_mlm: {val_loss:.4f} | "
+                  f"top1: {metrics['top1_acc']:.4f} | top10: {metrics['top10_acc']:.4f} | "
+                  f"recall@10: {metrics['recall_10']:.4f} | ndcg@10: {metrics['ndcg_10']:.4f}")
+            if args.use_mlflow:
+                import mlflow
+                mlflow.log_metrics({
+                    "val_mlm_loss": val_loss,
+                    "val_top1_acc": metrics["top1_acc"],
+                    "val_top10_acc": metrics["top10_acc"],
+                    "val_recall_10": metrics["recall_10"],
+                    "val_ndcg_10": metrics["ndcg_10"],
+                }, step=epoch)
 
         # Check if best model
         is_best = val_loss < best_val_loss
@@ -438,17 +517,42 @@ def main():
             if trainer.early_stopping.early_stop:
                 print(f"Early stopping triggered at epoch {epoch}")
                 break
-    
+
     # Test
     print("\n" + "="*80)
     print("Testing...")
     print("="*80)
-    test_loss = trainer.evaluate(test_loader, verbose=True, epoch_id=0)
-    print(f"Test Loss: {test_loss:.4f}")
-    
-    # Log test loss to MLflow
+    test_metrics = trainer.evaluate(test_loader, verbose=True, epoch_id=0)
+
+    if use_dual_loss:
+        test_mlm = test_metrics["mlm_loss"]
+        test_dm = test_metrics["dm_loss"]
+        test_loss = args.mlm_weight * test_mlm + args.dm_weight * test_dm
+        print(f"Test MLM Loss: {test_mlm:.4f}")
+        print(f"Test DM Loss: {test_dm:.4f}")
+        print(f"Test Total Loss: {test_loss:.4f}")
+    else:
+        test_loss = test_metrics["mlm_loss"]
+        print(f"Test Loss: {test_loss:.4f}")
+
+    print(f"Test Top-1 Acc: {test_metrics['top1_acc']:.4f}")
+    print(f"Test Top-10 Acc: {test_metrics['top10_acc']:.4f}")
+    print(f"Test Recall@10: {test_metrics['recall_10']:.4f}")
+    print(f"Test NDCG@10: {test_metrics['ndcg_10']:.4f}")
+
+    # Log test metrics to MLflow
     if args.use_mlflow:
-        mlflow.log_metric("test_loss", test_loss)
+        test_log = {
+            "test_mlm_loss": test_metrics["mlm_loss"],
+            "test_top1_acc": test_metrics["top1_acc"],
+            "test_top10_acc": test_metrics["top10_acc"],
+            "test_recall_10": test_metrics["recall_10"],
+            "test_ndcg_10": test_metrics["ndcg_10"],
+        }
+        if use_dual_loss:
+            test_log["test_dm_loss"] = test_dm
+            test_log["test_total_loss"] = test_loss
+        mlflow.log_metrics(test_log)
         mlflow.end_run()
         print(f"\n✅ MLflow run completed. View at: http://localhost:5000")
 
