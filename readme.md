@@ -1,9 +1,9 @@
 # todo:
 - [ ] allow attention retrieval from transformer layer
-- [ ] add multiset loss
+- [x] add multinomial loss (MSM)
 
 ```
-torchrun --nproc_per_node=1 run/instacart_fm.py --experiment-name fm-base
+torchrun --nproc_per_node=1 run/instacart_base.py --experiment-name fm-base
 ```
 
 ## mlflow cmd
@@ -30,39 +30,4 @@ value = self._reshape(value)
 mask = mask[:, None, None, :]
 
 x, attention_scores = mha.attention(query, key, value, mask)
-```
-
-
-### layout
-
-```{plaintext}
-.\ehr-fm/
-├── configs/               # Configuration files
-│   └── settings.json
-├── data/                  # Data processing and datasets
-│   ├── raw/               # Raw data files
-│   ├── processed/         # Processed data files
-│   └── splits/           # Data splits and mappings
-├── docs/                  # Documentation
-│   └── readme.md
-├── models/                # Model implementations
-│   ├── fm.py
-│   └── model_utils.py
-├── notebooks/             # Jupyter notebooks
-│   ├── scratch_data.ipynb
-│   └── test.ipynb
-├── src/                   # Source code
-│   ├── layers/            # Custom layers
-│   │   └── layer.py
-│   ├── losses/            # Loss functions
-│   │   └── loss.py
-│   ├── utils/             # Utility functions
-│   │   ├── data_utils.py
-│   │   └── trainer.py
-│   └── tests/             # Test files
-│       └── test_flash_attn.py
-└── mlruns/                # ML experiment tracking
-    ├── 0/
-    │   └── meta.yaml
-    └── models/
 ```
