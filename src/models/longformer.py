@@ -52,19 +52,25 @@ class LongformerMHABlock(LongformerSelfAttention):
         # normalize query
         query_vectors /= sqrt(self.head_dim)
 
-        # Reshape to (seq_len, batch_size, num_heads, head_dim)
+        # (seq_len, batch_size, hidden_size)
+        # -> (seq_len, batch_size, num_heads, head_dim)
+        # -> (batch_size, num_heads, seq_len, head_dim)
         query_vectors = query_vectors.view(
             seq_len, batch_size, self.num_heads, self.head_dim
-        ).transpose(0, 1)
-        print(query_vectors.shape)
+        ).permute(1, 2, 0, 3)
         key_vectors = key_vectors.view(
             seq_len, batch_size, self.num_heads, self.head_dim
-        ).transpose(0, 1)
+        ).permute(1, 2, 0, 3)
 
         # RoPE with set position
         set_pos = (~is_index_masked) * cumsum(is_index_global_attn, dim=1)
         query_vectors = self.rope_q(query_vectors, time=set_pos)
         key_vectors = self.rope_k(key_vectors, time=set_pos)
+
+        # (batch_size, num_heads, seq_len, head_dim)
+        # -> (batch_size, seq_len, num_heads, head_dim)
+        query_vectors = query_vectors.permute(0, 2, 1, 3)
+        key_vectors = key_vectors.permute(0, 2, 1, 3)
 
         # continue with original Longformer logic (sparse attention mechanism)
         attn_scores = self._sliding_chunks_query_key_matmul(
@@ -209,16 +215,18 @@ class LongformerMHABlock(LongformerSelfAttention):
             # Fill with 0 now, the correct values are in 'global_attn_probs'.
             attn_probs[is_index_global_attn_nonzero_orig] = 0
 
-        outputs = (attn_output.transpose(0, 1),)
+        # outputs = (attn_output.transpose(0, 1),)
 
-        if output_attentions:
-            outputs += (attn_probs,)
+        return attn_output.transpose(0, 1)
 
-        return (
-            outputs + (global_attn_probs,)
-            if (is_global_attn and output_attentions)
-            else outputs
-        )
+        # if output_attentions:
+        #     outputs += (attn_probs,)
+
+        # return (
+        #     outputs + (global_attn_probs,)
+        #     if (is_global_attn and output_attentions)
+        #     else outputs
+        # )
 
 
 class LongformerBlock(nn.Module):
@@ -259,7 +267,7 @@ class LongformerBlock(nn.Module):
         )
         x = self.residual_connection0(
             x,
-            self.longformer_self_attn_block(
+            lambda x: self.longformer_self_attn_block(
                 hidden_states=x,
                 attention_mask=attention_mask,
                 is_index_global_attn=attention_mask == 2,
@@ -267,7 +275,7 @@ class LongformerBlock(nn.Module):
                 is_global_attn=True,
             ),
         )
-        x = self.residual_connection1(x, self.ffn_block(x))
+        x = self.residual_connection1(x, self.ffn_block)
         return x
 
 

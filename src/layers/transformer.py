@@ -71,8 +71,6 @@ class MultiHeadAttentionBlock(nn.Module):
         if self.with_rope:
             query, key = self.rope_q(query, t), self.rope_k(key, t)
 
-        print(query.shape)
-
         mh_out = self._attn_func(query, key, value, mask)
         # (-1, h, seq_len, d_k) -> (-1, seq_len, h, d_k) -> (-1, seq_len, d_model)
         mh_out = (
