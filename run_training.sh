@@ -101,7 +101,7 @@ python train.py \
     --output_dir "${OUTPUT_DIR}" \
     --masking_strategy "${MASKING_STRATEGY}" \
     --batch_size 24 \
-    --num_epochs 100 \
+    --num_epochs 50 \
     ${MASK_PROB_ARG} \
     --d_model 768 \
     --n_heads 12 \
