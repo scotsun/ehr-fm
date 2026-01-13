@@ -35,22 +35,19 @@ def parse_args():
                        help="Output directory for models and logs")
     parser.add_argument("--batch_size", type=int, default=8,
                        help="Batch size (adjust for GPU memory)")
-    parser.add_argument("--num_epochs", type=int, default=100,
+    parser.add_argument("--num_epochs", type=int, default=50,
                        help="Number of epochs")
-    parser.add_argument("--masking_strategy", type=str, default="encounter", 
-                       choices=["token", "encounter"],
-                       help="'encounter' (default) or 'token'")
-    
+    parser.add_argument("--masking_strategy", type=str, default="both",
+                       choices=["token", "encounter", "both"],
+                       help="'token' (MLM only), 'encounter' (DM only), 'both' (MLM+DM, default)")
+
     # ========================================================================
     # MODEL PARAMETERS - Optimized defaults, rarely need changes
     # ========================================================================
-    parser.add_argument("--model_type", type=str, default="base",
-                       choices=["base", "with_heads"],
-                       help="'base' (MLM only) or 'with_heads' (MLM + DM dual-task)")
     parser.add_argument("--d_model", type=int, default=768)
     parser.add_argument("--n_heads", type=int, default=12)
-    parser.add_argument("--n_blocks", type=int, default=8)
-    parser.add_argument("--d_ff", type=int, default=3072)
+    parser.add_argument("--n_blocks", type=int, default=6)
+    parser.add_argument("--d_ff", type=int, default=2048)
     parser.add_argument("--max_seg", type=int, default=8)
     parser.add_argument("--max_seq_len", type=int, default=512)
     parser.add_argument("--swe_rope", type=lambda x: x.lower() == 'true',
@@ -62,7 +59,7 @@ def parse_args():
     parser.add_argument("--t2v_scale", type=float, default=1.0,
                        help="Time2Vec scale factor")
 
-    # Dual-task loss weights (only used when model_type=with_heads)
+    # Dual-task loss weights (used when masking_strategy='encounter' or 'both')
     parser.add_argument("--mlm_weight", type=float, default=1.0,
                        help="Weight for MLM loss (default: 1.0)")
     parser.add_argument("--dm_weight", type=float, default=1.0,
@@ -74,7 +71,7 @@ def parse_args():
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--encounter_mask_prob", type=float, default=0.2)
     parser.add_argument("--patience", type=int, default=10)
-    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2,
                        help="Gradient accumulation steps (effective batch_size=32)")
     parser.add_argument("--max_grad_norm", type=float, default=5.0,
@@ -315,12 +312,17 @@ def main():
         swe_rope=args.swe_rope, use_t2v=args.use_t2v, t2v_scale=args.t2v_scale
     )
 
-    if args.model_type == "with_heads":
-        model = FMBaseWithHeads(config)
-        print(f"Model type: FMBaseWithHeads (MLM + DM dual-task)")
-    else:
+    # Choose model based on masking strategy
+    if args.masking_strategy == "token":
         model = FMBase(config)
-        print(f"Model type: FMBase (MLM only)")
+        print(f"Model: FMBase | Strategy: token | Loss: MLM only")
+    else:
+        # "encounter" or "both" need FMBaseWithHeads
+        model = FMBaseWithHeads(config)
+        if args.masking_strategy == "encounter":
+            print(f"Model: FMBaseWithHeads | Strategy: encounter | Loss: DM only")
+        else:
+            print(f"Model: FMBaseWithHeads | Strategy: both | Loss: MLM + DM")
 
     # Move model to device (GPU if available)
     device = torch.device(args.device)
@@ -332,16 +334,48 @@ def main():
     print(f"Device: {device}\n")
 
     # Trainer
-    use_encounter = (args.masking_strategy == "encounter")
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate, weight_decay=0.01)
 
-    if args.model_type == "with_heads":
-        # Use BaseWithHeadsTrainer for dual-task learning (MLM + DM)
-        # Note: with_heads model requires encounter masking
-        if not use_encounter:
-            print("Warning: with_heads model requires encounter masking. Switching to encounter masking.")
-            use_encounter = True
-
+    if args.masking_strategy == "token":
+        # Token-level masking with MLM only (FMBase)
+        trainer = BaseTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            criterion=nn.CrossEntropyLoss(ignore_index=-100),
+            early_stopping=EarlyStopping(patience=args.patience, min_delta=0.001, mode="min", use_mlflow=args.use_mlflow),
+            verbose_period=1,
+            device=device,
+            local_rank=0,
+            use_encounter_masking=False,
+            encounter_mask_prob=args.encounter_mask_prob,
+            token_mask_prob=args.token_mask_prob,
+            use_mlflow=args.use_mlflow,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            max_grad_norm=args.max_grad_norm,
+            use_amp=args.use_amp
+        )
+    elif args.masking_strategy == "encounter":
+        # Encounter-level masking with DM only (FMBaseWithHeads, mlm_weight=0)
+        trainer = BaseWithHeadsTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            early_stopping=EarlyStopping(patience=args.patience, min_delta=0.001, mode="min", use_mlflow=args.use_mlflow),
+            verbose_period=1,
+            device=device,
+            local_rank=0,
+            encounter_mask_prob=args.encounter_mask_prob,
+            use_mlflow=args.use_mlflow,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            max_grad_norm=args.max_grad_norm,
+            use_amp=args.use_amp,
+            mlm_weight=0.0,  # DM only
+            dm_weight=args.dm_weight,
+        )
+        print(f"Loss weights: MLM=0.0 (disabled), DM={args.dm_weight}")
+    else:
+        # "both": Encounter-level masking with MLM + DM (FMBaseWithHeads)
         trainer = BaseWithHeadsTrainer(
             model=model,
             tokenizer=tokenizer,
@@ -359,24 +393,6 @@ def main():
             dm_weight=args.dm_weight,
         )
         print(f"Loss weights: MLM={args.mlm_weight}, DM={args.dm_weight}")
-    else:
-        trainer = BaseTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            optimizer=optimizer,
-            criterion=nn.CrossEntropyLoss(ignore_index=-100),
-            early_stopping=EarlyStopping(patience=args.patience, min_delta=0.001, mode="min", use_mlflow=args.use_mlflow),
-            verbose_period=1,
-            device=device,
-            local_rank=0,
-            use_encounter_masking=use_encounter,
-            encounter_mask_prob=args.encounter_mask_prob,
-            token_mask_prob=args.token_mask_prob,
-            use_mlflow=args.use_mlflow,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            max_grad_norm=args.max_grad_norm,
-            use_amp=args.use_amp
-        )
 
     # Setup checkpoint manager for Slurm graceful shutdown
     ckpt_manager = CheckpointManager(
@@ -401,10 +417,10 @@ def main():
                 start_epoch = ckpt['epoch'] + 1
 
     print(f"Masking strategy: {args.masking_strategy}")
-    if use_encounter:
-        print(f"  - Encounter mask probability: {args.encounter_mask_prob}")
-    else:
+    if args.masking_strategy == "token":
         print(f"  - Token mask probability: {args.token_mask_prob}")
+    else:
+        print(f"  - Encounter mask probability: {args.encounter_mask_prob}")
     print(f"Mixed Precision (AMP): {'Enabled' if args.use_amp else 'Disabled'}")
     print()
     
@@ -417,18 +433,17 @@ def main():
     # Start MLflow run if enabled
     if args.use_mlflow:
         import mlflow
-        run_name = f"{args.model_type}_{args.masking_strategy}_bs{args.batch_size}_lr{args.learning_rate}"
+        run_name = f"{args.masking_strategy}_bs{args.batch_size}_lr{args.learning_rate}"
         mlflow_run = mlflow.start_run(run_name=run_name)
 
         # Log all parameters
         params = {
-            "model_type": args.model_type,
+            "masking_strategy": args.masking_strategy,
             "data_path": args.data_path,
             "n_patients": n_patients_total,
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
             "num_epochs": args.num_epochs,
-            "masking_strategy": args.masking_strategy,
             "encounter_mask_prob": args.encounter_mask_prob,
             "d_model": args.d_model,
             "n_heads": args.n_heads,
@@ -438,13 +453,13 @@ def main():
             "use_t2v": args.use_t2v,
             "t2v_scale": args.t2v_scale,
         }
-        if args.model_type == "with_heads":
-            params["mlm_weight"] = args.mlm_weight
+        if args.masking_strategy in ["encounter", "both"]:
+            params["mlm_weight"] = args.mlm_weight if args.masking_strategy == "both" else 0.0
             params["dm_weight"] = args.dm_weight
         mlflow.log_params(params)
         print(f"✅ MLflow run started: {run_name}")
         print(f"   Run ID: {mlflow_run.info.run_id}\n")
-    
+
     # Training
     print("="*80)
     print("Training...")
@@ -454,7 +469,7 @@ def main():
 
     # Custom training loop with checkpoint saving
     best_val_loss = float('inf')
-    use_dual_loss = (args.model_type == "with_heads")
+    use_dual_loss = (args.masking_strategy in ["encounter", "both"])
 
     for epoch in range(start_epoch, args.num_epochs):
         ckpt_manager.update_epoch(epoch, best_val_loss)

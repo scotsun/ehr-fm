@@ -18,13 +18,16 @@
 # Effective batch size: 24 × 2 = 48 patients
 # Mixed Precision: AMP enabled (FP16 training for 2-3x speedup)
 #
-# Model Types:
-#   - base: FMBase with MLM only (token/encounter masking)
-#   - with_heads: FMBaseWithHeads with MLM + Distribution Matching (dual-task)
+# Masking Strategies:
+#   - token:     Token-level masking (15%), MLM loss only
+#   - encounter: Segment-level masking (20%), DM loss only
+#   - both:      Segment-level masking (20%), MLM + DM loss (default)
 #
 # Usage:
-#   sbatch run_training.sh              # Default: base model with token masking
-#   sbatch run_training.sh with_heads   # Dual-task model with encounter masking
+#   sbatch run_training.sh              # Default: both (MLM + DM)
+#   sbatch run_training.sh token        # MLM only
+#   sbatch run_training.sh encounter    # DM only (ablation)
+#   sbatch run_training.sh both         # MLM + DM
 # ============================================================================
 
 echo "=========================================="
@@ -49,22 +52,31 @@ cd /hpc/group/engelhardlab/hg176/ehr-fm
 mkdir -p checkpoints logs
 
 # ==================== Configuration ====================
-# Model type: "base" (MLM only) or "with_heads" (MLM + DM dual-task)
-MODEL_TYPE=${1:-base}
+# Masking strategy: "token" (MLM only), "encounter" (DM only), "both" (MLM+DM)
+MASKING_STRATEGY=${1:-both}
 
-# Set masking strategy based on model type
-if [ "$MODEL_TYPE" == "with_heads" ]; then
-    MASKING_STRATEGY="encounter"
-    MASK_PROB_ARG="--encounter_mask_prob 0.2"
-    EXTRA_ARGS="--mlm_weight 1.0 --dm_weight 1.0"
-else
-    MASKING_STRATEGY="token"
-    MASK_PROB_ARG="--token_mask_prob 0.15"
-    EXTRA_ARGS=""
-fi
+# Set parameters based on masking strategy
+case "$MASKING_STRATEGY" in
+    "token")
+        MASK_PROB_ARG="--token_mask_prob 0.15"
+        EXTRA_ARGS=""
+        ;;
+    "encounter")
+        MASK_PROB_ARG="--encounter_mask_prob 0.2"
+        EXTRA_ARGS="--mlm_weight 0.0 --dm_weight 1.0"
+        ;;
+    "both")
+        MASK_PROB_ARG="--encounter_mask_prob 0.2"
+        EXTRA_ARGS="--mlm_weight 1.0 --dm_weight 1.0"
+        ;;
+    *)
+        echo "Error: Invalid masking_strategy '$MASKING_STRATEGY'. Use 'token', 'encounter', or 'both'."
+        exit 1
+        ;;
+esac
 
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-OUTPUT_DIR="checkpoints/run_${MODEL_TYPE}_${TIMESTAMP}"
+OUTPUT_DIR="checkpoints/run_${MASKING_STRATEGY}_${TIMESTAMP}"
 
 # Display GPU info
 echo ""
@@ -73,12 +85,11 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 echo ""
 
 echo "Training Configuration:"
-echo "  Model type:      ${MODEL_TYPE}"
-echo "  Context window:  8 segments × 512 tokens = 4,096 tokens/patient"
-echo "  Batch size:      24 (real) × 2 (accumulation) = 48 (effective)"
-echo "  Masking:         ${MASKING_STRATEGY}"
+echo "  Masking strategy: ${MASKING_STRATEGY}"
+echo "  Context window:   8 segments × 512 tokens = 4,096 tokens/patient"
+echo "  Batch size:       24 (real) × 2 (accumulation) = 48 (effective)"
 echo "  Mixed Precision: AMP enabled (FP16)"
-echo "  Architecture:    8 layers, 768 dim, 12 heads"
+echo "  Architecture:    6 layers, 768 dim, 12 heads"
 echo "  Time encoding:   T2V (scale=1.0) + RoPE"
 echo "  Checkpoint:      Save every epoch after epoch 5 (keep last 3)"
 echo "  Output:          ${OUTPUT_DIR}"
@@ -88,16 +99,14 @@ echo ""
 python train.py \
     --data_path /hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet \
     --output_dir "${OUTPUT_DIR}" \
-    --model_type "${MODEL_TYPE}" \
+    --masking_strategy "${MASKING_STRATEGY}" \
     --batch_size 24 \
     --num_epochs 100 \
-    --masking_strategy "${MASKING_STRATEGY}" \
     ${MASK_PROB_ARG} \
     --d_model 768 \
     --n_heads 12 \
-    --n_blocks 8 \
-    --d_ff 3072 \
-    --dropout 0.1 \
+    --n_blocks 6 \
+    --d_ff 2048 \
     --max_seg 8 \
     --max_seq_len 512 \
     --swe_rope True \
