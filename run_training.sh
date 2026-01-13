@@ -27,12 +27,15 @@
 #   - token:     Token-level masking only, MLM loss only (FMBase)
 #   - encounter: Dual-line masking, DM loss only (ablation)
 #   - both:      Dual-line masking, MLM + DM loss (default)
+#   - staged:    Staged training: MLM first (stage1), then DM (stage2)
 #
 # Usage:
 #   sbatch run_training.sh              # Default: both (MLM + DM)
 #   sbatch run_training.sh token        # MLM only
 #   sbatch run_training.sh encounter    # DM only (ablation)
 #   sbatch run_training.sh both         # MLM + DM
+#   sbatch run_training.sh staged       # Staged: MLM -> DM
+#   sbatch run_training.sh staged 25    # Staged with 25 epochs for stage1
 # ============================================================================
 
 echo "=========================================="
@@ -57,8 +60,9 @@ cd /hpc/group/engelhardlab/hg176/ehr-fm
 mkdir -p checkpoints logs
 
 # ==================== Configuration ====================
-# Masking strategy: "token" (MLM only), "encounter" (DM only), "both" (MLM+DM)
+# Masking strategy: "token" (MLM only), "encounter" (DM only), "both" (MLM+DM), "staged" (MLM->DM)
 MASKING_STRATEGY=${1:-both}
+STAGE1_EPOCHS=${2:-20}  # For staged training: epochs for Stage 1 (MLM only)
 
 # Masking probabilities (aligned with teammate's config)
 TOKEN_MASK_PROB=0.20      # Token-level masking for MLM
@@ -78,8 +82,12 @@ case "$MASKING_STRATEGY" in
         # Dual-line masking, both losses (default)
         EXTRA_ARGS="--mlm_weight 1.0 --dm_weight 1.0"
         ;;
+    "staged")
+        # Staged training: MLM first (stage1), then DM (stage2)
+        EXTRA_ARGS="--stage1_epochs ${STAGE1_EPOCHS}"
+        ;;
     *)
-        echo "Error: Invalid masking_strategy '$MASKING_STRATEGY'. Use 'token', 'encounter', or 'both'."
+        echo "Error: Invalid masking_strategy '$MASKING_STRATEGY'. Use 'token', 'encounter', 'both', or 'staged'."
         exit 1
         ;;
 esac
@@ -95,6 +103,10 @@ echo ""
 
 echo "Training Configuration:"
 echo "  Masking strategy: ${MASKING_STRATEGY}"
+if [ "$MASKING_STRATEGY" == "staged" ]; then
+    echo "  Stage 1 epochs:      ${STAGE1_EPOCHS} (MLM only)"
+    echo "  Stage 2 epochs:      $((50 - STAGE1_EPOCHS)) (DM only)"
+fi
 echo "  Token mask prob:     ${TOKEN_MASK_PROB} (token-level)"
 echo "  Encounter mask prob: ${ENCOUNTER_MASK_PROB} (segment-level)"
 echo "  Context window:   8 segments × 512 tokens = 4,096 tokens/patient"

@@ -38,8 +38,10 @@ def parse_args():
     parser.add_argument("--num_epochs", type=int, default=50,
                        help="Number of epochs")
     parser.add_argument("--masking_strategy", type=str, default="both",
-                       choices=["token", "encounter", "both"],
-                       help="'token' (MLM only), 'encounter' (DM only), 'both' (MLM+DM, default)")
+                       choices=["token", "encounter", "both", "staged"],
+                       help="'token' (MLM only), 'encounter' (DM only), 'both' (MLM+DM), 'staged' (MLM→DM)")
+    parser.add_argument("--stage1_epochs", type=int, default=20,
+                       help="Number of epochs for Stage 1 (MLM only) in 'staged' strategy (default: 20)")
 
     # ========================================================================
     # MODEL PARAMETERS - Optimized defaults, rarely need changes
@@ -319,10 +321,12 @@ def main():
         model = FMBase(config)
         print(f"Model: FMBase | Strategy: token | Loss: MLM only")
     else:
-        # "encounter" or "both" need FMBaseWithHeads
+        # "encounter", "both", or "staged" need FMBaseWithHeads
         model = FMBaseWithHeads(config)
         if args.masking_strategy == "encounter":
             print(f"Model: FMBaseWithHeads | Strategy: encounter | Loss: DM only")
+        elif args.masking_strategy == "staged":
+            print(f"Model: FMBaseWithHeads | Strategy: staged | Loss: MLM (epoch 0-{args.stage1_epochs-1}) → DM (epoch {args.stage1_epochs}+)")
         else:
             print(f"Model: FMBaseWithHeads | Strategy: both | Loss: MLM + DM")
 
@@ -378,6 +382,28 @@ def main():
             dm_weight=args.dm_weight,
         )
         print(f"Loss weights: MLM=0.0 (disabled), DM={args.dm_weight}")
+    elif args.masking_strategy == "staged":
+        # Staged training: MLM first, then DM (FMBaseWithHeads)
+        # Dynamically switches loss weights based on epoch
+        trainer = BaseWithHeadsTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            optimizer=optimizer,
+            early_stopping=EarlyStopping(patience=args.patience, min_delta=0.001, mode="min", use_mlflow=args.use_mlflow),
+            verbose_period=1,
+            device=device,
+            local_rank=0,
+            token_mask_prob=args.token_mask_prob,
+            encounter_mask_prob=args.encounter_mask_prob,
+            use_mlflow=args.use_mlflow,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            max_grad_norm=args.max_grad_norm,
+            use_amp=args.use_amp,
+            mlm_weight=1.0,  # Will be dynamically adjusted
+            dm_weight=1.0,   # Will be dynamically adjusted
+            stage1_epochs=args.stage1_epochs,  # Enable staged training
+        )
+        print(f"Staged training: Stage 1 (MLM) for epochs 0-{args.stage1_epochs-1}, Stage 2 (DM) for epochs {args.stage1_epochs}+")
     else:
         # "both": Dual-line masking with MLM + DM (FMBaseWithHeads)
         trainer = BaseWithHeadsTrainer(
@@ -424,6 +450,11 @@ def main():
     print(f"Masking strategy: {args.masking_strategy}")
     if args.masking_strategy == "token":
         print(f"  - Token mask probability: {args.token_mask_prob}")
+    elif args.masking_strategy == "staged":
+        print(f"  - Stage 1 (MLM only): epochs 0-{args.stage1_epochs-1}")
+        print(f"  - Stage 2 (DM only): epochs {args.stage1_epochs}+")
+        print(f"  - Token mask probability: {args.token_mask_prob}")
+        print(f"  - Encounter mask probability: {args.encounter_mask_prob}")
     else:
         print(f"  - Token mask probability: {args.token_mask_prob} (token-level)")
         print(f"  - Encounter mask probability: {args.encounter_mask_prob} (segment-level)")
@@ -476,7 +507,7 @@ def main():
 
     # Custom training loop with checkpoint saving
     best_val_loss = float('inf')
-    use_dual_loss = (args.masking_strategy in ["encounter", "both"])
+    use_dual_loss = (args.masking_strategy in ["encounter", "both", "staged"])
 
     for epoch in range(start_epoch, args.num_epochs):
         ckpt_manager.update_epoch(epoch, best_val_loss)
@@ -491,8 +522,19 @@ def main():
         if use_dual_loss:
             val_mlm = metrics["mlm_loss"]
             val_dm = metrics["dm_loss"]
-            val_loss = args.mlm_weight * val_mlm + args.dm_weight * val_dm
-            print(f"Epoch {epoch} | val_mlm: {val_mlm:.4f} | val_dm: {val_dm:.4f} | "
+            # For staged training, use epoch-dependent weights
+            if args.masking_strategy == "staged":
+                if epoch < args.stage1_epochs:
+                    eff_mlm_weight, eff_dm_weight = 1.0, 0.0
+                    stage_str = f"[Stage1-MLM] "
+                else:
+                    eff_mlm_weight, eff_dm_weight = 0.0, 1.0
+                    stage_str = f"[Stage2-DM] "
+            else:
+                eff_mlm_weight, eff_dm_weight = args.mlm_weight, args.dm_weight
+                stage_str = ""
+            val_loss = eff_mlm_weight * val_mlm + eff_dm_weight * val_dm
+            print(f"Epoch {epoch} {stage_str}| val_mlm: {val_mlm:.4f} | val_dm: {val_dm:.4f} | "
                   f"top1: {metrics['top1_acc']:.4f} | top10: {metrics['top10_acc']:.4f} | "
                   f"recall@10: {metrics['recall_10']:.4f} | ndcg@10: {metrics['ndcg_10']:.4f}")
             if args.use_mlflow:
@@ -549,10 +591,16 @@ def main():
     if use_dual_loss:
         test_mlm = test_metrics["mlm_loss"]
         test_dm = test_metrics["dm_loss"]
-        test_loss = args.mlm_weight * test_mlm + args.dm_weight * test_dm
-        print(f"Test MLM Loss: {test_mlm:.4f}")
-        print(f"Test DM Loss: {test_dm:.4f}")
-        print(f"Test Total Loss: {test_loss:.4f}")
+        # For staged training, final test uses DM loss (Stage 2 objective)
+        if args.masking_strategy == "staged":
+            test_loss = test_dm  # After training, model is optimized for DM
+            print(f"Test MLM Loss: {test_mlm:.4f}")
+            print(f"Test DM Loss: {test_dm:.4f} (final objective)")
+        else:
+            test_loss = args.mlm_weight * test_mlm + args.dm_weight * test_dm
+            print(f"Test MLM Loss: {test_mlm:.4f}")
+            print(f"Test DM Loss: {test_dm:.4f}")
+            print(f"Test Total Loss: {test_loss:.4f}")
     else:
         test_loss = test_metrics["mlm_loss"]
         print(f"Test Loss: {test_loss:.4f}")

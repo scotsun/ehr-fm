@@ -567,6 +567,7 @@ class BaseWithHeadsTrainer(Trainer):
         use_amp: bool = False,
         mlm_weight: float = 1.0,
         dm_weight: float = 1.0,
+        stage1_epochs: int = None,  # If set, enables staged training (MLM → DM)
     ) -> None:
         super().__init__(
             model, optimizer, early_stopping, verbose_period, device, local_rank
@@ -580,6 +581,7 @@ class BaseWithHeadsTrainer(Trainer):
         self.use_amp = use_amp
         self.mlm_weight = mlm_weight
         self.dm_weight = dm_weight
+        self.stage1_epochs = stage1_epochs  # For staged training
 
         # Loss functions
         self.criterion_mlm = nn.CrossEntropyLoss(ignore_index=-100)
@@ -610,14 +612,33 @@ class BaseWithHeadsTrainer(Trainer):
         Memory optimization:
         - If mlm_weight=0 (encounter mode): skip MLM forward pass entirely
         - If dm_weight=0: skip DM forward pass entirely
+
+        Staged training (when stage1_epochs is set):
+        - Stage 1 (epoch < stage1_epochs): MLM only (mlm_weight=1.0, dm_weight=0.0)
+        - Stage 2 (epoch >= stage1_epochs): DM only (mlm_weight=0.0, dm_weight=1.0)
         """
         model: nn.Module = self.model
         model.train()
         optimizer = self.optimizer
         device = self.device
 
+        # Determine effective weights for this epoch (staged training support)
+        if self.stage1_epochs is not None:
+            if epoch_id < self.stage1_epochs:
+                mlm_weight, dm_weight = 1.0, 0.0  # Stage 1: MLM only
+                stage_name = "Stage1-MLM"
+            else:
+                mlm_weight, dm_weight = 0.0, 1.0  # Stage 2: DM only
+                stage_name = "Stage2-DM"
+        else:
+            mlm_weight, dm_weight = self.mlm_weight, self.dm_weight
+            stage_name = None
+
         with tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose) as bar:
-            bar.set_description(f"Epoch {epoch_id}")
+            if stage_name:
+                bar.set_description(f"Epoch {epoch_id} [{stage_name}]")
+            else:
+                bar.set_description(f"Epoch {epoch_id}")
             for batch_id, batch in enumerate(bar):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
@@ -636,7 +657,7 @@ class BaseWithHeadsTrainer(Trainer):
                 # ============================================================
                 # Line 1: MLM (Token-level masking) - Skip if mlm_weight=0
                 # ============================================================
-                if self.mlm_weight > 0:
+                if mlm_weight > 0:
                     mlm_input_ids, mlm_labels = random_masking(
                         input_ids.clone(), self.tokenizer, self.token_mask_prob
                     )
@@ -664,7 +685,7 @@ class BaseWithHeadsTrainer(Trainer):
                                 mlm_logits.view(-1, mlm_logits.size(-1)),
                                 mlm_labels.view(-1)
                             )
-                            mlm_loss_scaled = (self.mlm_weight * mlm_loss) / self.gradient_accumulation_steps
+                            mlm_loss_scaled = (mlm_weight * mlm_loss) / self.gradient_accumulation_steps
                         self.scaler.scale(mlm_loss_scaled).backward()
                     else:
                         mlm_logits, _, _ = model(
@@ -679,7 +700,7 @@ class BaseWithHeadsTrainer(Trainer):
                             mlm_logits.view(-1, mlm_logits.size(-1)),
                             mlm_labels.view(-1)
                         )
-                        mlm_loss_scaled = (self.mlm_weight * mlm_loss) / self.gradient_accumulation_steps
+                        mlm_loss_scaled = (mlm_weight * mlm_loss) / self.gradient_accumulation_steps
                         mlm_loss_scaled.backward()
 
                     mlm_loss_val = mlm_loss.detach().item()
@@ -687,7 +708,7 @@ class BaseWithHeadsTrainer(Trainer):
                 # ============================================================
                 # Line 2: DM (Segment-level masking) - Skip if dm_weight=0
                 # ============================================================
-                if self.dm_weight > 0:
+                if dm_weight > 0:
                     dm_input_ids, dm_labels, encounter_mask = encounter_masking(
                         input_ids.clone(), segment_attention_mask, self.tokenizer, self.encounter_mask_prob
                     )
@@ -715,7 +736,7 @@ class BaseWithHeadsTrainer(Trainer):
                                 F.log_softmax(dm_logits, dim=-1),
                                 target_dist
                             )
-                            dm_loss_scaled = (self.dm_weight * dm_loss) / self.gradient_accumulation_steps
+                            dm_loss_scaled = (dm_weight * dm_loss) / self.gradient_accumulation_steps
                         self.scaler.scale(dm_loss_scaled).backward()
                     else:
                         _, dm_logits, _ = model(
@@ -730,7 +751,7 @@ class BaseWithHeadsTrainer(Trainer):
                             F.log_softmax(dm_logits, dim=-1),
                             target_dist
                         )
-                        dm_loss_scaled = (self.dm_weight * dm_loss) / self.gradient_accumulation_steps
+                        dm_loss_scaled = (dm_weight * dm_loss) / self.gradient_accumulation_steps
                         dm_loss_scaled.backward()
 
                     dm_loss_val = dm_loss.detach().item()
@@ -750,7 +771,7 @@ class BaseWithHeadsTrainer(Trainer):
                     optimizer.zero_grad()
 
                 # Logging
-                total_loss_val = self.mlm_weight * mlm_loss_val + self.dm_weight * dm_loss_val
+                total_loss_val = mlm_weight * mlm_loss_val + dm_weight * dm_loss_val
                 bar.set_postfix(
                     mlm=mlm_loss_val,
                     dm=dm_loss_val,
@@ -943,8 +964,17 @@ class BaseWithHeadsTrainer(Trainer):
         Log all the metrics in mlflow;
         Return the metric for save-best/early-stop.
         """
+        # Determine effective weights for this epoch (staged training support)
+        if self.stage1_epochs is not None:
+            if epoch_id < self.stage1_epochs:
+                mlm_weight, dm_weight = 1.0, 0.0  # Stage 1: MLM only
+            else:
+                mlm_weight, dm_weight = 0.0, 1.0  # Stage 2: DM only
+        else:
+            mlm_weight, dm_weight = self.mlm_weight, self.dm_weight
+
         metrics = self.evaluate(dataloader, verbose, epoch_id)
-        val_total = self.mlm_weight * metrics["mlm_loss"] + self.dm_weight * metrics["dm_loss"]
+        val_total = mlm_weight * metrics["mlm_loss"] + dm_weight * metrics["dm_loss"]
 
         if verbose:
             print(f"  val_mlm: {metrics['mlm_loss']:.4f} | val_dm: {metrics['dm_loss']:.4f} | "
