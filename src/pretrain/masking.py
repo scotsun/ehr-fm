@@ -16,6 +16,11 @@ def encounter_masking(
     """
     Vectorized encounter-level masking: randomly select encounters and mask all their tokens.
 
+    Uses 100% [MASK] strategy (unlike token-level MLM's 80/10/10) because:
+    - DM task requires CLS token to encode entire segment information from context
+    - No information leakage from unchanged tokens
+    - Forces model to learn cross-segment contextual patterns
+
     Args:
         input_ids: (batch, max_seg, max_seq_len)
         segment_attention_mask: (batch, max_seg) - which segments are valid
@@ -34,7 +39,6 @@ def encounter_masking(
     pad_id = tokenizer.token_to_id("[PAD]")
     cls_id = tokenizer.token_to_id("[CLS]")
     mask_id = tokenizer.token_to_id("[MASK]")
-    vocab_size = tokenizer.get_vocab_size()
 
     # Clone input for modification
     masked_input_ids = input_ids.clone()
@@ -61,25 +65,9 @@ def encounter_masking(
     labels = torch.full_like(input_ids, -100)
     labels[tokens_to_mask] = input_ids[tokens_to_mask]
 
-    # Step 6: Apply 80/10/10 strategy
-    # Generate random values for all positions
-    rand_vals = torch.rand(batch_size, max_seg, max_seq_len, device=device)
-
-    # 80% -> [MASK]
-    mask_token_indices = tokens_to_mask & (rand_vals < 0.8)
-    masked_input_ids[mask_token_indices] = mask_id
-
-    # 10% -> random token (exclude special tokens 0-3)
-    random_token_indices = tokens_to_mask & (rand_vals >= 0.8) & (rand_vals < 0.9)
-    random_tokens = torch.randint(
-        4, vocab_size,
-        (batch_size, max_seg, max_seq_len),
-        device=device,
-        dtype=input_ids.dtype
-    )
-    masked_input_ids[random_token_indices] = random_tokens[random_token_indices]
-
-    # 10% -> unchanged (rand >= 0.9), nothing to do
+    # Step 6: Apply 100% [MASK] strategy for DM task
+    # All tokens in masked encounters become [MASK] (no 80/10/10)
+    masked_input_ids[tokens_to_mask] = mask_id
 
     return masked_input_ids, labels, encounter_mask
 

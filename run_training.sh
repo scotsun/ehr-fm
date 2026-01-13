@@ -13,15 +13,20 @@
 #SBATCH --signal=B:TERM@120  # Send SIGTERM 120 seconds before timeout for graceful checkpoint save
 
 # ============================================================================
-# HAT Model Training - MIMIC-IV on H200 GPU (Optimized)
+# HAT Model Training - MIMIC-IV on H200 GPU (Dual-Line Masking)
 # Context: max_seg=8, max_seq_len=512 (4,096 tokens/patient)
 # Effective batch size: 24 × 2 = 48 patients
 # Mixed Precision: AMP enabled (FP16 training for 2-3x speedup)
 #
+# Dual-Line Masking Strategy (aligned with teammate's design):
+#   - Line 1 (MLM): Token-level random masking (20%) → MLM loss
+#   - Line 2 (DM):  Segment-level encounter masking (40%) → DM loss
+#   - Two separate forward passes per batch
+#
 # Masking Strategies:
-#   - token:     Token-level masking (15%), MLM loss only
-#   - encounter: Segment-level masking (20%), DM loss only
-#   - both:      Segment-level masking (20%), MLM + DM loss (default)
+#   - token:     Token-level masking only, MLM loss only (FMBase)
+#   - encounter: Dual-line masking, DM loss only (ablation)
+#   - both:      Dual-line masking, MLM + DM loss (default)
 #
 # Usage:
 #   sbatch run_training.sh              # Default: both (MLM + DM)
@@ -55,18 +60,22 @@ mkdir -p checkpoints logs
 # Masking strategy: "token" (MLM only), "encounter" (DM only), "both" (MLM+DM)
 MASKING_STRATEGY=${1:-both}
 
-# Set parameters based on masking strategy
+# Masking probabilities (aligned with teammate's config)
+TOKEN_MASK_PROB=0.20      # Token-level masking for MLM
+ENCOUNTER_MASK_PROB=0.40  # Segment-level masking for DM
+
+# Set extra args based on masking strategy
 case "$MASKING_STRATEGY" in
     "token")
-        MASK_PROB_ARG="--token_mask_prob 0.15"
+        # Token-level masking only (no DM)
         EXTRA_ARGS=""
         ;;
     "encounter")
-        MASK_PROB_ARG="--encounter_mask_prob 0.2"
+        # Dual-line masking, DM loss only (ablation study)
         EXTRA_ARGS="--mlm_weight 0.0 --dm_weight 1.0"
         ;;
     "both")
-        MASK_PROB_ARG="--encounter_mask_prob 0.2"
+        # Dual-line masking, both losses (default)
         EXTRA_ARGS="--mlm_weight 1.0 --dm_weight 1.0"
         ;;
     *)
@@ -86,13 +95,15 @@ echo ""
 
 echo "Training Configuration:"
 echo "  Masking strategy: ${MASKING_STRATEGY}"
+echo "  Token mask prob:     ${TOKEN_MASK_PROB} (token-level)"
+echo "  Encounter mask prob: ${ENCOUNTER_MASK_PROB} (segment-level)"
 echo "  Context window:   8 segments × 512 tokens = 4,096 tokens/patient"
 echo "  Batch size:       24 (real) × 2 (accumulation) = 48 (effective)"
-echo "  Mixed Precision: AMP enabled (FP16)"
-echo "  Architecture:    6 layers, 768 dim, 12 heads"
-echo "  Time encoding:   T2V (scale=1.0) + RoPE"
-echo "  Checkpoint:      Save every epoch after epoch 5 (keep last 3)"
-echo "  Output:          ${OUTPUT_DIR}"
+echo "  Mixed Precision:  AMP enabled (FP16)"
+echo "  Architecture:     6 layers, 768 dim, 12 heads"
+echo "  Time encoding:    T2V (scale=1.0) + RoPE"
+echo "  Checkpoint:       Save every epoch after epoch 5 (keep last 3)"
+echo "  Output:           ${OUTPUT_DIR}"
 echo ""
 
 # Start training
@@ -100,9 +111,10 @@ python train.py \
     --data_path /hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet \
     --output_dir "${OUTPUT_DIR}" \
     --masking_strategy "${MASKING_STRATEGY}" \
+    --token_mask_prob ${TOKEN_MASK_PROB} \
+    --encounter_mask_prob ${ENCOUNTER_MASK_PROB} \
     --batch_size 24 \
     --num_epochs 50 \
-    ${MASK_PROB_ARG} \
     --d_model 768 \
     --n_heads 12 \
     --n_blocks 6 \

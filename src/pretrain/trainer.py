@@ -543,9 +543,11 @@ class BaseTrainer(Trainer):
 
 class BaseWithHeadsTrainer(Trainer):
     """
-    Trainer for FMBaseWithHeads model with dual loss:
-    - MLM Loss: Token-level masked language modeling (CrossEntropy)
-    - DM Loss: Segment-level distribution matching (KL Divergence)
+    Trainer for FMBaseWithHeads model with dual-line masking and dual loss:
+    - Line 1 (MLM): Token-level random masking → MLM loss (CrossEntropy)
+    - Line 2 (DM):  Segment-level encounter masking → DM loss (KL Divergence)
+
+    Two separate masking operations and two forward passes per batch.
     """
 
     def __init__(
@@ -557,7 +559,8 @@ class BaseWithHeadsTrainer(Trainer):
         verbose_period: int,
         device: torch.device,
         local_rank: int,
-        encounter_mask_prob: float = 0.2,
+        token_mask_prob: float = 0.20,      # Token-level masking probability
+        encounter_mask_prob: float = 0.40,  # Segment-level masking probability
         use_mlflow: bool = True,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
@@ -569,6 +572,7 @@ class BaseWithHeadsTrainer(Trainer):
             model, optimizer, early_stopping, verbose_period, device, local_rank
         )
         self.tokenizer = tokenizer
+        self.token_mask_prob = token_mask_prob
         self.encounter_mask_prob = encounter_mask_prob
         self.use_mlflow = use_mlflow
         self.gradient_accumulation_steps = gradient_accumulation_steps
@@ -594,6 +598,19 @@ class BaseWithHeadsTrainer(Trainer):
             self.scaler = None
 
     def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
+        """
+        Dual-line training with SEQUENTIAL BACKWARD for memory efficiency:
+        - Line 1: Token-level random masking (token_mask_prob) → MLM loss → backward
+        - Line 2: Segment-level encounter masking (encounter_mask_prob) → DM loss → backward
+
+        Sequential backward: each forward pass is immediately followed by backward,
+        releasing the computation graph before the next forward pass. This reduces
+        peak memory from 2x to 1x compared to storing both graphs simultaneously.
+
+        Memory optimization:
+        - If mlm_weight=0 (encounter mode): skip MLM forward pass entirely
+        - If dm_weight=0: skip DM forward pass entirely
+        """
         model: nn.Module = self.model
         model.train()
         optimizer = self.optimizer
@@ -612,78 +629,111 @@ class BaseWithHeadsTrainer(Trainer):
                 if token_time is not None:
                     token_time = token_time.to(device)
 
-                # Apply encounter-level masking
-                masked_input_ids, labels, encounter_mask = encounter_masking(
-                    input_ids, segment_attention_mask, self.tokenizer, self.encounter_mask_prob
-                )
+                # Initialize loss values for logging
+                mlm_loss_val = 0.0
+                dm_loss_val = 0.0
 
-                # Skip empty batches
-                if (labels != -100).sum() == 0 or encounter_mask.sum() == 0:
-                    continue
+                # ============================================================
+                # Line 1: MLM (Token-level masking) - Skip if mlm_weight=0
+                # ============================================================
+                if self.mlm_weight > 0:
+                    mlm_input_ids, mlm_labels = random_masking(
+                        input_ids.clone(), self.tokenizer, self.token_mask_prob
+                    )
+                    # Skip if no tokens masked
+                    if (mlm_labels != -100).sum() == 0:
+                        continue
 
-                # Compute target distribution for DM loss
-                target_dist = observed_segment_distribution(
-                    labels, encounter_mask, self.tokenizer
-                )
+                    # Need encounter_mask for model compatibility (even if not used for DM)
+                    _, _, encounter_mask = encounter_masking(
+                        input_ids.clone(), segment_attention_mask, self.tokenizer, self.encounter_mask_prob
+                    )
 
-                # Forward pass
-                if self.use_amp:
-                    with torch.amp.autocast('cuda'):
-                        logits_mlm, logits_dm, _ = model(
-                            input_ids=masked_input_ids,
+                    # MLM Forward + Backward (graph released after backward)
+                    if self.use_amp:
+                        with torch.amp.autocast('cuda'):
+                            mlm_logits, _, _ = model(
+                                input_ids=mlm_input_ids,
+                                attention_mask=attention_mask,
+                                segment_attention_mask=segment_attention_mask,
+                                segment_time=segment_time,
+                                token_time=token_time,
+                                segment_mask=encounter_mask,
+                            )
+                            mlm_loss = self.criterion_mlm(
+                                mlm_logits.view(-1, mlm_logits.size(-1)),
+                                mlm_labels.view(-1)
+                            )
+                            mlm_loss_scaled = (self.mlm_weight * mlm_loss) / self.gradient_accumulation_steps
+                        self.scaler.scale(mlm_loss_scaled).backward()
+                    else:
+                        mlm_logits, _, _ = model(
+                            input_ids=mlm_input_ids,
                             attention_mask=attention_mask,
                             segment_attention_mask=segment_attention_mask,
                             segment_time=segment_time,
                             token_time=token_time,
                             segment_mask=encounter_mask,
                         )
-
-                        # MLM Loss
                         mlm_loss = self.criterion_mlm(
-                            logits_mlm.view(-1, logits_mlm.size(-1)),
-                            labels.view(-1)
+                            mlm_logits.view(-1, mlm_logits.size(-1)),
+                            mlm_labels.view(-1)
                         )
+                        mlm_loss_scaled = (self.mlm_weight * mlm_loss) / self.gradient_accumulation_steps
+                        mlm_loss_scaled.backward()
 
-                        # DM Loss (KL Divergence)
+                    mlm_loss_val = mlm_loss.detach().item()
+
+                # ============================================================
+                # Line 2: DM (Segment-level masking) - Skip if dm_weight=0
+                # ============================================================
+                if self.dm_weight > 0:
+                    dm_input_ids, dm_labels, encounter_mask = encounter_masking(
+                        input_ids.clone(), segment_attention_mask, self.tokenizer, self.encounter_mask_prob
+                    )
+                    # Skip if no segments masked
+                    if encounter_mask.sum() == 0:
+                        continue
+
+                    # Compute target distribution for DM loss
+                    target_dist = observed_segment_distribution(
+                        dm_labels, encounter_mask, self.tokenizer
+                    )
+
+                    # DM Forward + Backward (graph released after backward)
+                    if self.use_amp:
+                        with torch.amp.autocast('cuda'):
+                            _, dm_logits, _ = model(
+                                input_ids=dm_input_ids,
+                                attention_mask=attention_mask,
+                                segment_attention_mask=segment_attention_mask,
+                                segment_time=segment_time,
+                                token_time=token_time,
+                                segment_mask=encounter_mask,
+                            )
+                            dm_loss = self.criterion_dm(
+                                F.log_softmax(dm_logits, dim=-1),
+                                target_dist
+                            )
+                            dm_loss_scaled = (self.dm_weight * dm_loss) / self.gradient_accumulation_steps
+                        self.scaler.scale(dm_loss_scaled).backward()
+                    else:
+                        _, dm_logits, _ = model(
+                            input_ids=dm_input_ids,
+                            attention_mask=attention_mask,
+                            segment_attention_mask=segment_attention_mask,
+                            segment_time=segment_time,
+                            token_time=token_time,
+                            segment_mask=encounter_mask,
+                        )
                         dm_loss = self.criterion_dm(
-                            F.log_softmax(logits_dm, dim=-1),
+                            F.log_softmax(dm_logits, dim=-1),
                             target_dist
                         )
+                        dm_loss_scaled = (self.dm_weight * dm_loss) / self.gradient_accumulation_steps
+                        dm_loss_scaled.backward()
 
-                        # Combined loss
-                        loss = self.mlm_weight * mlm_loss + self.dm_weight * dm_loss
-                    loss = loss / self.gradient_accumulation_steps
-                else:
-                    logits_mlm, logits_dm, _ = model(
-                        input_ids=masked_input_ids,
-                        attention_mask=attention_mask,
-                        segment_attention_mask=segment_attention_mask,
-                        segment_time=segment_time,
-                        token_time=token_time,
-                        segment_mask=encounter_mask,
-                    )
-
-                    # MLM Loss
-                    mlm_loss = self.criterion_mlm(
-                        logits_mlm.view(-1, logits_mlm.size(-1)),
-                        labels.view(-1)
-                    )
-
-                    # DM Loss (KL Divergence)
-                    dm_loss = self.criterion_dm(
-                        F.log_softmax(logits_dm, dim=-1),
-                        target_dist
-                    )
-
-                    # Combined loss
-                    loss = self.mlm_weight * mlm_loss + self.dm_weight * dm_loss
-                    loss = loss / self.gradient_accumulation_steps
-
-                # Backward pass
-                if self.use_amp:
-                    self.scaler.scale(loss).backward()
-                else:
-                    loss.backward()
+                    dm_loss_val = dm_loss.detach().item()
 
                 # Update weights with gradient accumulation
                 if (batch_id + 1) % self.gradient_accumulation_steps == 0:
@@ -699,10 +749,8 @@ class BaseWithHeadsTrainer(Trainer):
                         optimizer.step()
                     optimizer.zero_grad()
 
-                # Logging (use detach().item() to avoid warning)
-                total_loss_val = (loss * self.gradient_accumulation_steps).detach().item()
-                mlm_loss_val = mlm_loss.detach().item()
-                dm_loss_val = dm_loss.detach().item()
+                # Logging
+                total_loss_val = self.mlm_weight * mlm_loss_val + self.dm_weight * dm_loss_val
                 bar.set_postfix(
                     mlm=mlm_loss_val,
                     dm=dm_loss_val,
@@ -721,7 +769,7 @@ class BaseWithHeadsTrainer(Trainer):
 
     def evaluate(self, dataloader: DataLoader, verbose: bool, epoch_id: int) -> dict:
         """
-        Evaluate model with multiple metrics.
+        Evaluate model with dual-line masking (same as training).
 
         Returns:
             dict with keys: mlm_loss, dm_loss, top1_acc, top10_acc, recall_10, ndcg_10
@@ -752,25 +800,45 @@ class BaseWithHeadsTrainer(Trainer):
                 if token_time is not None:
                     token_time = token_time.to(device)
 
-                # Apply encounter-level masking
-                masked_input_ids, labels, encounter_mask = encounter_masking(
-                    input_ids, segment_attention_mask, self.tokenizer, self.encounter_mask_prob
+                # ============================================================
+                # Line 1: Token-level random masking for MLM
+                # ============================================================
+                mlm_input_ids, mlm_labels = random_masking(
+                    input_ids.clone(), self.tokenizer, self.token_mask_prob
                 )
+                if (mlm_labels != -100).sum() == 0:
+                    continue
 
-                # Skip empty batches
-                if (labels != -100).sum() == 0 or encounter_mask.sum() == 0:
+                # ============================================================
+                # Line 2: Segment-level encounter masking for DM
+                # ============================================================
+                dm_input_ids, dm_labels, encounter_mask = encounter_masking(
+                    input_ids.clone(), segment_attention_mask, self.tokenizer, self.encounter_mask_prob
+                )
+                if encounter_mask.sum() == 0:
                     continue
 
                 # Compute target distribution
                 target_dist = observed_segment_distribution(
-                    labels, encounter_mask, self.tokenizer
+                    dm_labels, encounter_mask, self.tokenizer
                 )
 
-                # Forward pass for MLM/DM evaluation
+                # Forward passes
                 if self.use_amp:
                     with torch.amp.autocast('cuda'):
-                        logits_mlm, logits_dm, _ = model(
-                            input_ids=masked_input_ids,
+                        # Forward pass 1: MLM
+                        mlm_logits, _, _ = model(
+                            input_ids=mlm_input_ids,
+                            attention_mask=attention_mask,
+                            segment_attention_mask=segment_attention_mask,
+                            segment_time=segment_time,
+                            token_time=token_time,
+                            segment_mask=encounter_mask,
+                        )
+
+                        # Forward pass 2: DM
+                        _, dm_logits, _ = model(
+                            input_ids=dm_input_ids,
                             attention_mask=attention_mask,
                             segment_attention_mask=segment_attention_mask,
                             segment_time=segment_time,
@@ -779,16 +847,27 @@ class BaseWithHeadsTrainer(Trainer):
                         )
 
                         mlm_loss = self.criterion_mlm(
-                            logits_mlm.view(-1, logits_mlm.size(-1)),
-                            labels.view(-1)
+                            mlm_logits.view(-1, mlm_logits.size(-1)),
+                            mlm_labels.view(-1)
                         )
                         dm_loss = self.criterion_dm(
-                            F.log_softmax(logits_dm, dim=-1),
+                            F.log_softmax(dm_logits, dim=-1),
                             target_dist
                         )
                 else:
-                    logits_mlm, logits_dm, _ = model(
-                        input_ids=masked_input_ids,
+                    # Forward pass 1: MLM
+                    mlm_logits, _, _ = model(
+                        input_ids=mlm_input_ids,
+                        attention_mask=attention_mask,
+                        segment_attention_mask=segment_attention_mask,
+                        segment_time=segment_time,
+                        token_time=token_time,
+                        segment_mask=encounter_mask,
+                    )
+
+                    # Forward pass 2: DM
+                    _, dm_logits, _ = model(
+                        input_ids=dm_input_ids,
                         attention_mask=attention_mask,
                         segment_attention_mask=segment_attention_mask,
                         segment_time=segment_time,
@@ -797,11 +876,11 @@ class BaseWithHeadsTrainer(Trainer):
                     )
 
                     mlm_loss = self.criterion_mlm(
-                        logits_mlm.view(-1, logits_mlm.size(-1)),
-                        labels.view(-1)
+                        mlm_logits.view(-1, mlm_logits.size(-1)),
+                        mlm_labels.view(-1)
                     )
                     dm_loss = self.criterion_dm(
-                        F.log_softmax(logits_dm, dim=-1),
+                        F.log_softmax(dm_logits, dim=-1),
                         target_dist
                     )
 
@@ -809,15 +888,14 @@ class BaseWithHeadsTrainer(Trainer):
                 total_mlm += mlm_loss.item()
                 total_dm += dm_loss.item()
 
-                # MLM accuracy metrics
-                total_top1 += topk_accuracy(logits_mlm, labels, k=1).item()
-                total_top10 += topk_accuracy(logits_mlm, labels, k=10).item()
+                # MLM accuracy metrics (using token-level masked logits/labels)
+                total_top1 += topk_accuracy(mlm_logits, mlm_labels, k=1).item()
+                total_top10 += topk_accuracy(mlm_logits, mlm_labels, k=10).item()
 
                 # Last segment prediction (for recall/ndcg)
                 masked_last_seg_input = masking_last_segment(
                     input_ids, segment_attention_mask, self.tokenizer
                 )
-                # Use segment_attention_mask as bool for segment_mask
                 seg_mask_bool = segment_attention_mask.bool()
                 if self.use_amp:
                     with torch.amp.autocast('cuda'):

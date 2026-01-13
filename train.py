@@ -66,24 +66,26 @@ def parse_args():
                        help="Weight for Distribution Matching loss (default: 1.0)")
     
     # ========================================================================
-    # TRAINING PARAMETERS - Good defaults
+    # TRAINING PARAMETERS - Good defaults (aligned with teammate's config)
     # ========================================================================
     parser.add_argument("--learning_rate", type=float, default=5e-5)
-    parser.add_argument("--encounter_mask_prob", type=float, default=0.2)
+    parser.add_argument("--token_mask_prob", type=float, default=0.20,
+                       help="Token-level masking probability for MLM (default: 0.20)")
+    parser.add_argument("--encounter_mask_prob", type=float, default=0.40,
+                       help="Segment-level masking probability for DM (default: 0.40)")
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2,
                        help="Gradient accumulation steps (effective batch_size=32)")
     parser.add_argument("--max_grad_norm", type=float, default=5.0,
                        help="Max gradient norm for clipping (0 = disabled)")
-    
+
     # ========================================================================
     # OPTIONAL - For debugging/testing
     # ========================================================================
     parser.add_argument("--max_patients", type=int, default=None)
     parser.add_argument("--train_ratio", type=float, default=0.8)
     parser.add_argument("--val_ratio", type=float, default=0.1)
-    parser.add_argument("--token_mask_prob", type=float, default=0.15)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use_mlflow", action="store_true",
@@ -348,7 +350,7 @@ def main():
             device=device,
             local_rank=0,
             use_encounter_masking=False,
-            encounter_mask_prob=args.encounter_mask_prob,
+            encounter_mask_prob=args.encounter_mask_prob,  # Not used when use_encounter_masking=False
             token_mask_prob=args.token_mask_prob,
             use_mlflow=args.use_mlflow,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -356,7 +358,8 @@ def main():
             use_amp=args.use_amp
         )
     elif args.masking_strategy == "encounter":
-        # Encounter-level masking with DM only (FMBaseWithHeads, mlm_weight=0)
+        # DM only mode (FMBaseWithHeads, mlm_weight=0)
+        # Still uses dual-line masking but ignores MLM loss
         trainer = BaseWithHeadsTrainer(
             model=model,
             tokenizer=tokenizer,
@@ -365,6 +368,7 @@ def main():
             verbose_period=1,
             device=device,
             local_rank=0,
+            token_mask_prob=args.token_mask_prob,
             encounter_mask_prob=args.encounter_mask_prob,
             use_mlflow=args.use_mlflow,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -375,7 +379,7 @@ def main():
         )
         print(f"Loss weights: MLM=0.0 (disabled), DM={args.dm_weight}")
     else:
-        # "both": Encounter-level masking with MLM + DM (FMBaseWithHeads)
+        # "both": Dual-line masking with MLM + DM (FMBaseWithHeads)
         trainer = BaseWithHeadsTrainer(
             model=model,
             tokenizer=tokenizer,
@@ -384,6 +388,7 @@ def main():
             verbose_period=1,
             device=device,
             local_rank=0,
+            token_mask_prob=args.token_mask_prob,
             encounter_mask_prob=args.encounter_mask_prob,
             use_mlflow=args.use_mlflow,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
@@ -420,7 +425,8 @@ def main():
     if args.masking_strategy == "token":
         print(f"  - Token mask probability: {args.token_mask_prob}")
     else:
-        print(f"  - Encounter mask probability: {args.encounter_mask_prob}")
+        print(f"  - Token mask probability: {args.token_mask_prob} (token-level)")
+        print(f"  - Encounter mask probability: {args.encounter_mask_prob} (segment-level)")
     print(f"Mixed Precision (AMP): {'Enabled' if args.use_amp else 'Disabled'}")
     print()
     
@@ -444,6 +450,7 @@ def main():
             "batch_size": args.batch_size,
             "learning_rate": args.learning_rate,
             "num_epochs": args.num_epochs,
+            "token_mask_prob": args.token_mask_prob,
             "encounter_mask_prob": args.encounter_mask_prob,
             "d_model": args.d_model,
             "n_heads": args.n_heads,
