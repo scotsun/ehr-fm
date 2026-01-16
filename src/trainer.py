@@ -583,7 +583,7 @@ class BaseWithHeadsTrainer(Trainer):
                         t=t,
                         set_mask=set_select_mask,
                     )
-                    _, msm_logits, _ = model(
+                    _, msm_set_logits, _ = model(
                         input_ids=msm_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
@@ -595,7 +595,7 @@ class BaseWithHeadsTrainer(Trainer):
                         mlm_labels.view(-1),
                     )
                     msm_loss = criterions["kl_div"](
-                        F.log_softmax(msm_logits, dim=-1), target_dist
+                        F.log_softmax(msm_set_logits, dim=-1), target_dist
                     )
 
                 scaler.scale(0 * mlm_loss + msm_loss).backward()
@@ -635,9 +635,10 @@ class BaseWithHeadsTrainer(Trainer):
                 set_attention_mask = batch["set_attention_mask"].to(device)
                 t = batch["t"].to(device)
 
-                masked_last_set_input_ids = masking_last_set(
-                    input_ids.clone(), set_attention_mask, self.tokenizer
-                )
+                if trainer_args["eval_last_set"]:
+                    masked_last_set_input_ids = masking_last_set(
+                        input_ids.clone(), set_attention_mask, self.tokenizer
+                    )
                 mlm_input_ids, mlm_labels = random_masking(
                     input_ids=input_ids.clone(),
                     tokenizer=self.tokenizer,
@@ -665,7 +666,7 @@ class BaseWithHeadsTrainer(Trainer):
                         t=t,
                         set_mask=set_select_mask,
                     )
-                    _, msm_logits, _ = model(
+                    msm_logits, msm_set_logits, _ = model(
                         input_ids=msm_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
@@ -677,27 +678,31 @@ class BaseWithHeadsTrainer(Trainer):
                         mlm_labels.view(-1),
                     )
                     msm_loss = criterions["kl_div"](
-                        F.log_softmax(msm_logits, dim=-1), target_dist
+                        F.log_softmax(msm_set_logits, dim=-1), target_dist
                     )
 
-                    masked_last_set_logits, _, _ = model(
-                        input_ids=masked_last_set_input_ids,
-                        attention_mask=attention_mask,
-                        set_attention_mask=set_attention_mask,
-                        t=t,
-                    )
+                    if trainer_args["eval_last_set"]:
+                        masked_last_set_logits, _, _ = model(
+                            input_ids=masked_last_set_input_ids,
+                            attention_mask=attention_mask,
+                            set_attention_mask=set_attention_mask,
+                            t=t,
+                        )
                 top1_acc = topk_accuracy(mlm_logits, mlm_labels, 1)
                 top10_acc = topk_accuracy(mlm_logits, mlm_labels, 10)
 
                 if trainer_args["eval_last_set"]:
                     set_select_mask = select_last_set(set_attention_mask)
+                    recall10 = recall_at_k(
+                        masked_last_set_logits, input_ids, set_select_mask, 10
+                    )
+                    ndcg10 = ndcg_at_k(
+                        masked_last_set_logits, input_ids, set_select_mask, 10
+                    )
+                else:
+                    recall10 = recall_at_k(msm_logits, input_ids, set_select_mask, 10)
+                    ndcg10 = ndcg_at_k(msm_logits, input_ids, set_select_mask, 10)
 
-                recall10 = recall_at_k(
-                    masked_last_set_logits, input_ids, set_select_mask, 10
-                )
-                ndcg10 = ndcg_at_k(
-                    masked_last_set_logits, input_ids, set_select_mask, 10
-                )
                 counter[0] += 1
                 counter[1] += mlm_loss.item()
                 counter[2] += msm_loss.item()

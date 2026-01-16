@@ -400,4 +400,9 @@ class Count(Dataset):
         token_categories, counts = torch.unique(input_ids.flatten(), return_counts=True)
         count_vector = torch.zeros(self.vocab_size)
         count_vector.scatter_add_(0, token_categories, counts.float())
-        return count_vector[4:]
+
+        item = {"count_vector": count_vector[4:]}  # remove special token counts
+        for _outcome in self.data.outcome_vars:
+            item[_outcome] = self.data[index][_outcome]
+
+        return item
