@@ -25,7 +25,7 @@ from src.utils.data_utils import (
 )
 from src.models.base import FMBase, FMBaseWithHeads
 from src.models.bert import FMBert
-from src.metric import topk_accuracy, recall_at_k, ndcg_at_k
+from src.metric import topk_accuracy, recall_at_k, ndcg_at_k, select_last_set
 
 
 class EarlyStopping:
@@ -559,7 +559,7 @@ class BaseWithHeadsTrainer(Trainer):
                     mlm_probability=trainer_args["mlm_probability"],
                 )
 
-                msm_input_ids, msm_labels, set_mask = random_masking_set(
+                msm_input_ids, msm_labels, set_select_mask = random_masking_set(
                     input_ids=input_ids.clone(),
                     set_attention_mask=set_attention_mask,
                     tokenizer=self.tokenizer,
@@ -571,7 +571,7 @@ class BaseWithHeadsTrainer(Trainer):
                 target_dist = observed_set_distribution(
                     masked_input_ids=msm_input_ids,
                     labels=msm_labels,
-                    set_mask=set_mask,
+                    set_select_mask=set_select_mask,
                     tokenizer=self.tokenizer,
                 )
 
@@ -581,14 +581,14 @@ class BaseWithHeadsTrainer(Trainer):
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
-                        set_mask=set_mask,
+                        set_mask=set_select_mask,
                     )
                     _, msm_logits, _ = model(
                         input_ids=msm_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
-                        set_mask=set_mask,
+                        set_mask=set_select_mask,
                     )
                     mlm_loss = criterions["cross_entropy"](
                         mlm_logits.view(-1, mlm_logits.size(-1)),
@@ -643,7 +643,7 @@ class BaseWithHeadsTrainer(Trainer):
                     tokenizer=self.tokenizer,
                     mlm_probability=trainer_args["mlm_probability"],
                 )
-                msm_input_ids, msm_labels, set_mask = random_masking_set(
+                msm_input_ids, msm_labels, set_select_mask = random_masking_set(
                     input_ids=input_ids.clone(),
                     set_attention_mask=set_attention_mask,
                     tokenizer=self.tokenizer,
@@ -653,7 +653,7 @@ class BaseWithHeadsTrainer(Trainer):
                 target_dist = observed_set_distribution(
                     masked_input_ids=msm_input_ids,
                     labels=msm_labels,
-                    set_mask=set_mask,
+                    set_select_mask=set_select_mask,
                     tokenizer=self.tokenizer,
                 )
 
@@ -663,14 +663,14 @@ class BaseWithHeadsTrainer(Trainer):
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
-                        set_mask=set_mask,
+                        set_mask=set_select_mask,
                     )
                     _, msm_logits, _ = model(
                         input_ids=msm_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
-                        set_mask=set_mask,
+                        set_mask=set_select_mask,
                     )
                     mlm_loss = criterions["cross_entropy"](
                         mlm_logits.view(-1, mlm_logits.size(-1)),
@@ -689,11 +689,14 @@ class BaseWithHeadsTrainer(Trainer):
                 top1_acc = topk_accuracy(mlm_logits, mlm_labels, 1)
                 top10_acc = topk_accuracy(mlm_logits, mlm_labels, 10)
 
+                if trainer_args["eval_last_set"]:
+                    set_select_mask = select_last_set(set_attention_mask)
+
                 recall10 = recall_at_k(
-                    masked_last_set_logits, input_ids, set_attention_mask, 10
+                    masked_last_set_logits, input_ids, set_select_mask, 10
                 )
                 ndcg10 = ndcg_at_k(
-                    masked_last_set_logits, input_ids, set_attention_mask, 10
+                    masked_last_set_logits, input_ids, set_select_mask, 10
                 )
                 counter[0] += 1
                 counter[1] += mlm_loss.item()

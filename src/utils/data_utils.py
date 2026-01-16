@@ -181,17 +181,17 @@ def random_masking_set(
     labels = input_ids.clone()
     device = input_ids.device
 
-    set_mask = set_attention_mask * (
+    set_select_mask = set_attention_mask * (
         torch.rand_like(set_attention_mask, dtype=torch.float32, device=device)
         < mask_probability
     )
 
-    labels[~set_mask] = -100
-    input_ids[set_mask] = tokenizer.token_to_id("[MASK]")
-    _b_idx, s_idx = set_mask.nonzero(as_tuple=True)
+    labels[~set_select_mask] = -100
+    input_ids[set_select_mask] = tokenizer.token_to_id("[MASK]")
+    _b_idx, s_idx = set_select_mask.nonzero(as_tuple=True)
     input_ids[_b_idx, s_idx, 0] = tokenizer.token_to_id("[CLS]")
 
-    return input_ids, labels, set_mask
+    return input_ids, labels, set_select_mask
 
 
 def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probability=0.15):
@@ -233,22 +233,22 @@ def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probabilit
 def observed_set_distribution(
     masked_input_ids: torch.Tensor,
     labels: torch.Tensor,
-    set_mask: torch.Tensor,
+    set_select_mask: torch.Tensor,
     tokenizer: Tokenizer,
 ) -> torch.Tensor:
     """
     Compute the observed set distribution for each set in the sequence.
 
     Args:
-        masked_input_ids (torch.Tensor): Input token IDs of shape (batch_size, seq_len, max_set_size).
-        set_mask (torch.Tensor): Set mask of shape (batch_size, seq_len, max_set_size).
+        masked_input_ids & labels (torch.Tensor): token IDs of shape (batch_size, seq_len, max_set_size).
+        set_select_mask (torch.Tensor): Set mask of shape (batch_size, seq_len).
         tokenizer (Tokenizer): Tokenizer used for encoding the input.
 
     Returns:
         torch.Tensor: Observed set distribution of shape (batch_size, seq_len, max_set_size, vocab_size).
     """
     device = masked_input_ids.device
-    obs_set_tokens = labels[set_mask][:, 1:]
+    obs_set_tokens = labels[set_select_mask][:, 1:]
     target_dist = torch.zeros(
         obs_set_tokens.size(0), tokenizer.get_vocab_size(), device=device
     )

@@ -15,16 +15,22 @@ def topk_accuracy(logits: torch.Tensor, labels: torch.Tensor, k=1):
     return correct.float().mean()
 
 
+def select_last_set(set_attention_mask: torch.Tensor):
+    last_set_id = set_attention_mask.sum(dim=1) - 1
+    set_select_mask = torch.zeros_like(set_attention_mask, dtype=torch.bool)
+    set_select_mask[range(len(last_set_id)), last_set_id] = True
+    return set_select_mask
+
+
 def pred_and_target_sets(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
-    set_attention_mask: torch.Tensor,
-    k: int,
+    set_select_mask: torch.Tensor,
+    k: int = 10,
 ):
-    last_set_id = set_attention_mask.sum(dim=1) - 1
-    t_tokens = input_ids[range(len(last_set_id)), last_set_id, 1 : k + 1]
+    t_tokens = input_ids[set_select_mask, 1 : k + 1]
     p_tokens = (
-        logits[range(len(last_set_id)), last_set_id, 1]
+        logits[set_select_mask, 1]
         .topk(
             k=k,
             dim=-1,
@@ -37,13 +43,13 @@ def pred_and_target_sets(
 def recall_at_k(
     logits: torch.Tensor,
     input_ids: torch.Tensor,
-    set_attention_mask: torch.Tensor,
-    k=10,
+    set_select_mask: torch.Tensor,
+    k: int = 10,
 ):
     device = logits.device
     batch_size, vocab_size = logits.size(0), logits.size(-1)
 
-    p_tokens, t_tokens = pred_and_target_sets(logits, input_ids, set_attention_mask, k)
+    p_tokens, t_tokens = pred_and_target_sets(logits, input_ids, set_select_mask, k)
     # (batch_size, k)
 
     t_setsize = (t_tokens > 3).sum(dim=-1)

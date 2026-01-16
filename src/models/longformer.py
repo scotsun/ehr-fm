@@ -305,7 +305,7 @@ class FMLongformer(PreTrainedModel):
 
         match config.norm_type:
             case "layer":
-                self.last_norm = nn.LayerNorm(config.d_model)
+                self.last_norm = nn.LayerNorm(config.d_model, bias=False)
             case "rms":
                 self.last_norm = nn.RMSNorm(config.d_model)
             case _:
