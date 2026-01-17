@@ -65,6 +65,7 @@ def main():
     instacart = Seq(
         tokenizer=tk,
         data_folder="/".join([cfg.dataset["data_root"], "instacart.parquet"]),
+        split="train",
         downstream_task_cohort=None,
         outcome_vars=None,
         **kwargs,

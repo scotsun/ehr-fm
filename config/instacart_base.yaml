@@ -17,6 +17,8 @@ trainer:
     mlm_probability: 0.20
     msm_probability: 0.40
     eval_last_set: true
+    l_mlm: 1
+    l_msm: 1
 model:
     tokenizer: "dataset/instacart/data/tk.json"
     t2v_scale: 1.0

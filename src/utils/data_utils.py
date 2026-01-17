@@ -15,6 +15,7 @@ class SeqSet(Dataset):
         tokenizer: Tokenizer,
         data_root: str,
         data_folder: str,
+        split: str | None,
         max_seq: int,
         max_set_size: int,
         downstream_task_cohort: None | pd.DataFrame,
@@ -32,9 +33,11 @@ class SeqSet(Dataset):
         if self.downstream_task_cohort is not None:
             self.seq_ids = downstream_task_cohort[seq_id_col].values
         else:
-            self.seq_ids = pd.read_csv(f"{self.data_root}/metadata.csv")[
-                "subdir"
-            ].values
+            metadata = pd.read_csv(f"{self.data_root}/metadata.csv")
+            if split:
+                self.seq_ids = metadata[metadata["split"] == split]["subdir"].values
+            else:
+                self.seq_ids = metadata["subdir"].values
         self.tokenizer = tokenizer
         self.tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=max_set_size)
         self.tokenizer.enable_truncation(max_length=max_set_size)
@@ -268,6 +271,7 @@ class Seq(Dataset):
         data_root: str,
         data_folder: str,
         max_seq: int,
+        split: str | None,
         downstream_task_cohort: None | pd.DataFrame,
         outcome_vars: None | list[str],
         time_operation: Callable[[pd.DataFrame], pd.Series],
@@ -283,9 +287,11 @@ class Seq(Dataset):
         if self.downstream_task_cohort is not None:
             self.seq_ids = downstream_task_cohort[seq_id_col].values
         else:
-            self.seq_ids = pd.read_csv(f"{self.data_root}/metadata.csv")[
-                "subdir"
-            ].values
+            metadata = pd.read_csv(f"{self.data_root}/metadata.csv")
+            if split:
+                self.seq_ids = metadata[metadata["split"] == split]["subdir"].values
+            else:
+                self.seq_ids = metadata["subdir"].values
         self.tokenizer = tokenizer
         self.tokenizer.enable_padding(pad_id=0, pad_token="[PAD]", length=max_seq)
         self.tokenizer.enable_truncation(max_length=max_seq)
@@ -384,6 +390,32 @@ class Seq(Dataset):
                 values = values + [-99.0] * pad_length
 
         return times, values
+
+
+def masking_last_set_1d(input_ids: torch.Tensor, tokenizer: Tokenizer):
+    """
+    input_ids: LongTensor of shape (B, L)
+    """
+    _, L = input_ids.shape
+    device = input_ids.device
+
+    # mask of cls positions
+    cls_mask = input_ids == tokenizer.token_to_id("[CLS]")
+    # argmax gives first; flip to get last
+    last_cls_idx = L - 1 - torch.flip(cls_mask, dims=[1]).long().argmax(dim=1)
+    # positions [0, L)
+    pos = torch.arange(L, device=device).unsqueeze(0)
+    # clone output
+    out = input_ids.clone()
+    # pad everything strictly after last cls
+    out[pos > last_cls_idx.unsqueeze(1)] = tokenizer.token_to_id("[PAD]")
+
+    # set token immediately after last cls to mask (if in bounds)
+    next_pos = last_cls_idx + 1
+    valid = next_pos < L
+    out[valid, next_pos[valid]] = tokenizer.token_to_id("[MASK]")
+
+    return out
 
 
 class Count(Dataset):
