@@ -71,7 +71,7 @@ def ndcg_at_k(p_tokens: torch.Tensor, t_tokens: torch.Tensor):
     # p_tokens: (batch_size, k); t_tokens: (batch_size, n)
 
     _valid = t_tokens > 3  # get rid of special tokens
-    t_setsize = _valid.sum(dim=-1).clamp(min=k)
+    t_setsize = _valid.sum(dim=-1).clamp(max=k)
 
     hits = (p_tokens.unsqueeze(2) == t_tokens.unsqueeze(1)) & _valid.unsqueeze(1)
     hits = hits.any(dim=2)  # (B, k)
