@@ -360,8 +360,8 @@ class BertTrainer(Trainer):
             "val_top10_acc": val_top10,
         }
         if self.trainer_args["eval_last_set"]:
-            logged_metrics["val_recall@10"] = val_recall10
-            logged_metrics["val_ndcg@10"] = val_ndcg10
+            logged_metrics["val_recall10"] = val_recall10
+            logged_metrics["val_ndcg10"] = val_ndcg10
         valid_metrics = {
             "callback_metric": val_mlm,
             "logged_metrics": logged_metrics,
@@ -554,8 +554,8 @@ class BaseTrainer(Trainer):
             )
             if self.trainer_args["eval_last_set"]:
                 print(
-                    f"epoch {epoch_id}/val_recall@10: {round(val_recall10, 3)}/"
-                    f"val_ndcg@10: {round(val_ndcg10, 3)}/"
+                    f"epoch {epoch_id}/val_recall10: {round(val_recall10, 3)}/"
+                    f"val_ndcg10: {round(val_ndcg10, 3)}/"
                 )
 
         logged_metrics = {
@@ -564,8 +564,8 @@ class BaseTrainer(Trainer):
             "val_top10_acc": val_top10,
         }
         if self.trainer_args["eval_last_set"]:
-            logged_metrics["val_recall@10"] = val_recall10
-            logged_metrics["val_ndcg@10"] = val_ndcg10
+            logged_metrics["val_recall10"] = val_recall10
+            logged_metrics["val_ndcg10"] = val_ndcg10
         valid_metrics = {
             "callback_metric": val_mlm,
             "logged_metrics": logged_metrics,
