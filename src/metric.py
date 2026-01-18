@@ -49,7 +49,7 @@ def pred_and_target_sets(
     k: int = 10,
 ):
     # one-mask-for-all-query
-    p_tokens = logits[set_select_mask, 1].topk(k=k, dim=-1).indices
+    p_tokens = logits[set_select_mask][:, 1, :].topk(k=k, dim=-1).indices
     t_tokens = input_ids[set_select_mask]
     # p_tokens: (B, k); t_tokens: (B, max_set_size)
     return p_tokens, t_tokens
