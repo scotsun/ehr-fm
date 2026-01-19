@@ -29,15 +29,18 @@ def pred_and_target_sets_1d(
     k: int = 10,
     max_set_size: int = 32,
 ):
+    sample_id = mask_pos[:, 0]
+    sample_mask_pos = mask_pos[:, 1]
     B = logits.shape[0]
 
     t_tokens = torch.full((B, max_set_size), 0, dtype=torch.long, device=logits.device)
-    for i in range(B):
-        _tokens = input_ids[i, mask_pos[i, 1] :]
+    for i, j in enumerate(sample_mask_pos.tolist()):
+        _tokens = input_ids[i, j:]
         t_tokens[i, : min(max_set_size, _tokens.size(0))] = _tokens[
             : min(max_set_size, _tokens.size(0))
         ]
-    p_tokens = logits[torch.arange(B), mask_pos[:, 1], :].topk(k=k, dim=-1).indices
+    t_tokens = t_tokens[sample_id]
+    p_tokens = logits[sample_id, sample_mask_pos, :].topk(k=k, dim=-1).indices
     # p_tokens: (B, k); t_tokens: (B, max_set_size)
     return p_tokens, t_tokens
 
