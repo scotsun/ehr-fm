@@ -35,6 +35,8 @@ def parse_args():
                        help="Output directory for models and logs")
     parser.add_argument("--batch_size", type=int, default=8,
                        help="Batch size (adjust for GPU memory)")
+    parser.add_argument("--num_workers", type=int, default=6,
+                       help="Number of DataLoader workers (default: 6)")
     parser.add_argument("--num_epochs", type=int, default=50,
                        help="Number of epochs")
     parser.add_argument("--masking_strategy", type=str, default="both",
@@ -285,27 +287,27 @@ def main():
         print("Creating datasets with LAZY LOADING...")
         train_loader = DataLoader(
             EHRDataset(data=str(data_path), supervised_task_cohort=train_cohort, **common_cfg),
-            batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=use_gpu
+            batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=use_gpu
         )
         val_loader = DataLoader(
             EHRDataset(data=str(data_path), supervised_task_cohort=val_cohort, **common_cfg),
-            batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=use_gpu
+            batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=use_gpu
         )
         test_loader = DataLoader(
             EHRDataset(data=str(data_path), supervised_task_cohort=test_cohort, **common_cfg),
-            batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=use_gpu
+            batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=use_gpu
         )
     else:
         # Eager mode (legacy)
         print("Creating datasets with EAGER LOADING...")
         train_loader = DataLoader(EHRDataset(data=train_df, **common_cfg), 
-                                  batch_size=args.batch_size, shuffle=True, num_workers=4,
+                                  batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
                                   pin_memory=use_gpu)
         val_loader = DataLoader(EHRDataset(data=val_df, **common_cfg),
-                                batch_size=args.batch_size, shuffle=False, num_workers=4,
+                                batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                                 pin_memory=use_gpu)
         test_loader = DataLoader(EHRDataset(data=test_df, **common_cfg),
-                                 batch_size=args.batch_size, shuffle=False, num_workers=4,
+                                 batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                                  pin_memory=use_gpu)
     
     # Model

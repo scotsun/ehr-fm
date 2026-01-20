@@ -5,8 +5,8 @@
 #SBATCH --partition=h200ea
 #SBATCH --account=h200ea
 #SBATCH --gres=gpu:h200:1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=120G
+#SBATCH --cpus-per-task=10
+#SBATCH --mem=36G
 #SBATCH --time=72:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=hg176@duke.edu
@@ -110,7 +110,7 @@ fi
 echo "  Token mask prob:     ${TOKEN_MASK_PROB} (token-level)"
 echo "  Encounter mask prob: ${ENCOUNTER_MASK_PROB} (segment-level)"
 echo "  Context window:   8 segments × 512 tokens = 4,096 tokens/patient"
-echo "  Batch size:       24 (real) × 2 (accumulation) = 48 (effective)"
+echo "  Batch size:       36 (real) × 2 (accumulation) = 72 (effective)"
 echo "  Mixed Precision:  AMP enabled (FP16)"
 echo "  Architecture:     6 layers, 768 dim, 12 heads"
 echo "  Time encoding:    T2V (scale=1.0) + RoPE"
@@ -125,7 +125,7 @@ python train.py \
     --masking_strategy "${MASKING_STRATEGY}" \
     --token_mask_prob ${TOKEN_MASK_PROB} \
     --encounter_mask_prob ${ENCOUNTER_MASK_PROB} \
-    --batch_size 24 \
+    --batch_size 36 \
     --num_epochs 50 \
     --d_model 768 \
     --n_heads 12 \
