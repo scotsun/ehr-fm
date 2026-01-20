@@ -527,6 +527,10 @@ class HEART(PreTrainedModel):
         if visit_ids is None:
             visit_ids = torch.zeros_like(input_ids)
 
+        # CRITICAL: Ensure time stays in FP32 for numerical stability with AMP
+        if time_offsets is not None:
+            time_offsets = time_offsets.float()
+
         # Token embeddings
         h = self.embeddings(input_ids)
 

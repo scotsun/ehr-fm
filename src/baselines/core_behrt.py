@@ -138,7 +138,7 @@ class BEHRT(PreTrainedModel):
         Encode input tokens to hidden representations.
 
         Aligned with FMBert:
-        - set_pos: cumsum of [SEP] tokens for RoPE position
+        - set_pos: cumsum of [CLS] tokens for RoPE position (encounter id)
         - T2V: time encoding added to embeddings
 
         Args:
@@ -149,7 +149,11 @@ class BEHRT(PreTrainedModel):
         Returns:
             hidden_states: (batch, seq_len, d_model)
         """
-        # Compute set position based on [SEP] token (aligned with FMBert)
+        # CRITICAL: Ensure time stays in FP32 for numerical stability with AMP
+        # Large time values lose precision in FP16
+        t = t.float()
+
+        # Compute set position based on [CLS] token (encounter id for RoPE)
         set_pos = attention_mask * cumsum(input_ids == self.config.sep_token_id, dim=1)
 
         # Embeddings + T2V time encoding
@@ -158,7 +162,7 @@ class BEHRT(PreTrainedModel):
 
         # Transformer blocks with RoPE using set_pos
         for block in self.blocks:
-            h = block(h, attention_mask, t=set_pos)
+            h = block(h, attention_mask, time=set_pos)
 
         h = self.final_norm(h)
         return h
