@@ -3,7 +3,7 @@
 - [x] add multinomial loss (MSM)
 
 ```
-torchrun --nproc_per_node=1 run/instacart_base.py --experiment-name fm-base
+torchrun --nproc_per_node=1 run/instacart_base.py --experiment-name instacart --run-name base
 ```
 
 ## mlflow cmd

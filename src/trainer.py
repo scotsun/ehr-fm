@@ -784,13 +784,13 @@ class BaseWithHeadsTrainer(Trainer):
         )
 
     def _valid(self, dataloader, verbose, epoch_id):
-        val_mlm, val_dm, val_top1_acc, val_top10_acc, val_recall10, val_ndcg10 = (
+        val_mlm, val_msm, val_top1_acc, val_top10_acc, val_recall10, val_ndcg10 = (
             self.evaluate(dataloader, verbose)
         )
         if verbose:
             print(
                 f"epoch {epoch_id}/val_mlm_loss: {round(val_mlm, 3)}/"
-                f"val_dm_loss: {round(val_dm, 3)}/"
+                f"val_msm_loss: {round(val_msm, 3)}/"
                 f"val_top1_acc: {round(val_top1_acc, 3)}/"
                 f"val_top10_acc: {round(val_top10_acc, 3)}/"
                 f"val_recall10: {round(val_recall10, 3)}/"
@@ -801,7 +801,7 @@ class BaseWithHeadsTrainer(Trainer):
             "callback_metric": val_mlm,
             "logged_metrics": {
                 "val_mlm_loss": val_mlm,
-                "val_dm_loss": val_dm,
+                "val_msm_loss": val_msm,
                 "val_top1_acc": val_top1_acc,
                 "val_top10_acc": val_top10_acc,
                 "val_recall10": val_recall10,
