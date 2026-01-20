@@ -44,11 +44,11 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 echo ""
 
 # ==================== Configuration ====================
-# Use the best pretrain from 20251210_081245
-PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251210_081245/best_model.pt"
+# Use the best pretrain from 20251217_073037
+PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251217_073037/best_model.pt"
 DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
 LABELS_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/downstream_labels.csv"
-TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251210_081245/tokenizer.json"
+TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251217_073037/tokenizer.json"
 OUTPUT_DIR="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/finetune"
 
 # Training hyperparameters
