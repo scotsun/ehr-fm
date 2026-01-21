@@ -626,13 +626,15 @@ class BaseWithHeadsTrainer(Trainer):
                 if (msm_labels == -100).all() or (mlm_labels == -100).all():
                     continue
 
-                target_dist = observed_set_distribution(
-                    masked_input_ids=msm_input_ids,
-                    labels=msm_labels,
-                    set_select_mask=set_select_mask,
+                target_dist = observed_set_distribution(  # TODO: decide between masked-only or mixed
+                    # labels=msm_labels,
+                    # set_select_mask=set_select_mask,
+                    labels=input_ids,
+                    set_select_mask=set_attention_mask,
                     tokenizer=self.tokenizer,
                 )
 
+                # --- PASS 1: MLM ---
                 with autocast(device_type="cuda", dtype=torch.float16):
                     mlm_logits, _, _ = model(
                         input_ids=mlm_input_ids,
@@ -641,27 +643,36 @@ class BaseWithHeadsTrainer(Trainer):
                         t=t,
                         set_mask=set_select_mask,
                     )
+
+                    mlm_loss = criterions["cross_entropy"](
+                        mlm_logits.view(-1, mlm_logits.size(-1)), mlm_labels.view(-1)
+                    )
+                    scaled_mlm_loss = trainer_args["l_mlm"] * mlm_loss
+
+                scaler.scale(scaled_mlm_loss).backward()
+
+                # --- PASS 2: MSM ---
+                with autocast(device_type="cuda", dtype=torch.float16):
                     _, msm_set_logits, _ = model(
                         input_ids=msm_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
-                        set_mask=set_select_mask,
+                        # set_mask=set_select_mask, # TODO: decide between masked-only or mixed
+                        set_mask=set_attention_mask,
                     )
-                    mlm_loss = criterions["cross_entropy"](
-                        mlm_logits.view(-1, mlm_logits.size(-1)),
-                        mlm_labels.view(-1),
-                    )
+
                     msm_loss = criterions["kl_div"](
                         F.log_softmax(msm_set_logits, dim=-1), target_dist
                     )
+                    scaled_msm_loss = trainer_args["l_msm"] * msm_loss
 
-                loss = (
-                    trainer_args["l_mlm"] * mlm_loss + trainer_args["l_msm"] * msm_loss
-                )
-                scaler.scale(loss).backward()
+                scaler.scale(scaled_msm_loss).backward()
+
+                # --- OPTIMIZER STEP ---
                 scaler.step(optimizer)
                 scaler.update()
+
                 bar.set_postfix(mlm_loss=float(mlm_loss), msm_loss=float(msm_loss))
 
                 cur_step = epoch_id * len(dataloader) + batch_id
@@ -711,9 +722,10 @@ class BaseWithHeadsTrainer(Trainer):
             )
 
             target_dist = observed_set_distribution(
-                masked_input_ids=msm_input_ids,
-                labels=msm_labels,
-                set_select_mask=set_select_mask,
+                # labels=msm_labels,
+                # set_select_mask=set_select_mask,
+                labels=input_ids,
+                set_select_mask=set_attention_mask,
                 tokenizer=self.tokenizer,
             )
 
@@ -730,7 +742,8 @@ class BaseWithHeadsTrainer(Trainer):
                     attention_mask=attention_mask,
                     set_attention_mask=set_attention_mask,
                     t=t,
-                    set_mask=set_select_mask,
+                    # set_mask=set_select_mask, # TODO: decide between masked-only or mixed
+                    set_mask=set_attention_mask,
                 )
                 mlm_loss = criterions["cross_entropy"](
                     mlm_logits.view(-1, mlm_logits.size(-1)),

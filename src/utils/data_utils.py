@@ -234,7 +234,6 @@ def random_masking(input_ids: torch.Tensor, tokenizer: Tokenizer, mlm_probabilit
 
 
 def observed_set_distribution(
-    masked_input_ids: torch.Tensor,
     labels: torch.Tensor,
     set_select_mask: torch.Tensor,
     tokenizer: Tokenizer,
@@ -243,14 +242,14 @@ def observed_set_distribution(
     Compute the observed set distribution for each set in the sequence.
 
     Args:
-        masked_input_ids & labels (torch.Tensor): token IDs of shape (batch_size, seq_len, max_set_size).
+        labels (torch.Tensor): token IDs of shape (batch_size, seq_len, max_set_size).
         set_select_mask (torch.Tensor): Set mask of shape (batch_size, seq_len).
         tokenizer (Tokenizer): Tokenizer used for encoding the input.
 
     Returns:
         torch.Tensor: Observed set distribution of shape (batch_size, seq_len, max_set_size, vocab_size).
     """
-    device = masked_input_ids.device
+    device = labels.device
     obs_set_tokens = labels[set_select_mask][:, 1:]
     target_dist = torch.zeros(
         obs_set_tokens.size(0), tokenizer.get_vocab_size(), device=device
