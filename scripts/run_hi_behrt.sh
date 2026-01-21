@@ -65,16 +65,18 @@ mkdir -p checkpoints logs
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 OUTPUT_DIR="checkpoints/hi-behrt_${TASK}_${TIMESTAMP}"
 
-# Hi-BEHRT paper hyperparameters
-D_MODEL=150
-N_EXTRACTOR_LAYERS=4
-N_AGGREGATOR_LAYERS=4
-N_HEADS=6
-D_FF=108
+# Unified model configuration for fair comparison with HAT
+# All baselines use the same architecture hyperparameters
+D_MODEL=768
+N_EXTRACTOR_LAYERS=6
+N_AGGREGATOR_LAYERS=6
+N_HEADS=12
+D_FF=2048
 WINDOW_SIZE=50
 STRIDE=30
-BATCH_SIZE=32
-DROPOUT=0.2
+BATCH_SIZE=16  # Smaller due to hierarchical model memory
+DROPOUT=0.0
+LEARNING_RATE=5e-5
 
 # Display GPU info
 echo ""
@@ -94,7 +96,7 @@ echo "  window_size:    ${WINDOW_SIZE}"
 echo "  stride:         ${STRIDE}"
 echo "  batch_size:     ${BATCH_SIZE}"
 echo "  dropout:        ${DROPOUT}"
-echo "  learning_rate:  5e-5"
+echo "  learning_rate:  ${LEARNING_RATE}"
 echo "  Mixed Precision: AMP enabled"
 echo "  Output:         ${OUTPUT_DIR}"
 echo ""
@@ -133,7 +135,7 @@ echo "=========================================="
 #     --window_size ${WINDOW_SIZE} \
 #     --stride ${STRIDE} \
 #     --dropout ${DROPOUT} \
-#     --learning_rate 5e-5 \
+#     --learning_rate ${LEARNING_RATE} \
 #     --patience 10 \
 #     --use_amp
 
