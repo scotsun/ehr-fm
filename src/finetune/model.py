@@ -274,3 +274,250 @@ def create_finetune_model(
 
     model.load_pretrained(pretrained_path, strict=False)
     return model
+
+
+class VocabPredictionHead(nn.Module):
+    """Prediction head for next visit token prediction (multi-label over vocabulary)."""
+
+    def __init__(
+        self,
+        d_model: int,
+        vocab_size: int,
+        dropout: float = 0.1,
+        pooling: str = "last_cls",
+    ):
+        super().__init__()
+        self.pooling = pooling
+        self.dropout = nn.Dropout(dropout)
+
+        if pooling == "attention":
+            self.attention = nn.Sequential(
+                nn.Linear(d_model, d_model // 4),
+                nn.Tanh(),
+                nn.Linear(d_model // 4, 1),
+            )
+
+        self.predictor = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model, vocab_size),
+        )
+
+    def forward(self, hidden_states, segment_attention_mask):
+        """
+        Args:
+            hidden_states: (batch, max_seg, max_seq_len, d_model)
+            segment_attention_mask: (batch, max_seg)
+        Returns:
+            logits: (batch, vocab_size)
+        """
+        cls_tokens = hidden_states[:, :, 0, :]  # (batch, max_seg, d_model)
+
+        if self.pooling == "last_cls":
+            valid_counts = segment_attention_mask.sum(dim=1).long()
+            batch_size = cls_tokens.shape[0]
+            last_indices = (valid_counts - 1).clamp(min=0)
+            batch_indices = torch.arange(batch_size, device=cls_tokens.device)
+            pooled = cls_tokens[batch_indices, last_indices]
+
+        elif self.pooling == "mean_cls":
+            mask = segment_attention_mask.unsqueeze(-1)
+            pooled = (cls_tokens * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+
+        elif self.pooling == "attention":
+            attn_scores = self.attention(cls_tokens).squeeze(-1)
+            attn_scores = attn_scores.masked_fill(segment_attention_mask == 0, float('-inf'))
+            attn_weights = F.softmax(attn_scores, dim=1)
+            pooled = (cls_tokens * attn_weights.unsqueeze(-1)).sum(dim=1)
+
+        pooled = self.dropout(pooled)
+        return self.predictor(pooled)
+
+
+class HATForNextVisit(nn.Module):
+    """HAT model for Next Visit Prediction (multi-label token prediction)."""
+
+    def __init__(
+        self,
+        config: FMConfig,
+        vocab_size: int,
+        dropout: float = 0.1,
+        pooling: str = "last_cls",
+        freeze_encoder: bool = False,
+    ):
+        super().__init__()
+        self.config = config
+        self.vocab_size = vocab_size
+
+        self.encoder = FMBase(config)
+        self.predictor = VocabPredictionHead(
+            d_model=config.d_model,
+            vocab_size=vocab_size,
+            dropout=dropout,
+            pooling=pooling,
+        )
+
+        if freeze_encoder:
+            self.freeze_encoder()
+
+    def freeze_encoder(self):
+        for param in self.encoder.parameters():
+            param.requires_grad = False
+
+    def unfreeze_encoder(self):
+        for param in self.encoder.parameters():
+            param.requires_grad = True
+
+    def load_pretrained(self, checkpoint_path: str, strict: bool = True):
+        """Load pre-trained encoder weights from checkpoint."""
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        elif 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        else:
+            state_dict = checkpoint
+
+        is_with_heads = any(k.startswith('transformer.') for k in state_dict.keys())
+
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('mlp_dm.') or k.startswith('dm_head.'):
+                continue
+
+            if is_with_heads:
+                if k.startswith('transformer.'):
+                    new_key = f'encoder.{k[len("transformer."):]}'
+                    new_state_dict[new_key] = v
+            else:
+                if k.startswith('encoder.'):
+                    new_state_dict[k] = v
+                else:
+                    new_state_dict[f'encoder.{k}'] = v
+
+        encoder_state_dict = {k: v for k, v in new_state_dict.items() if k.startswith('encoder.')}
+        missing, unexpected = self.load_state_dict(encoder_state_dict, strict=False)
+
+        missing = [k for k in missing if not k.startswith('predictor.')]
+
+        if missing and strict:
+            raise RuntimeError(f"Missing keys in checkpoint: {missing}")
+
+        return missing, unexpected
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask,
+        segment_attention_mask,
+        segment_time=None,
+        token_time=None,
+        labels=None,
+    ):
+        """
+        Args:
+            input_ids: (batch, max_seg, max_seq_len)
+            attention_mask: (batch, max_seg, max_seq_len)
+            segment_attention_mask: (batch, max_seg)
+            segment_time: (batch, max_seg) - optional
+            token_time: (batch, max_seg, max_seq_len) - optional
+            labels: (batch, vocab_size) - multi-hot labels, optional
+        Returns:
+            dict with 'loss' (if labels provided) and 'logits'
+        """
+        hidden_states = self.encoder.encode(
+            input_ids,
+            attention_mask,
+            segment_attention_mask,
+            segment_time,
+            token_time,
+        )
+
+        logits = self.predictor(hidden_states, segment_attention_mask)
+        output = {"logits": logits}
+
+        if labels is not None:
+            output["loss"] = F.binary_cross_entropy_with_logits(logits, labels)
+
+        return output
+
+    def predict_proba(self, logits):
+        """Convert logits to probabilities."""
+        return torch.sigmoid(logits)
+
+
+def create_next_visit_model(
+    pretrained_path: str,
+    vocab_size: int,
+    dropout: float = 0.1,
+    pooling: str = "last_cls",
+    freeze_encoder: bool = False,
+) -> HATForNextVisit:
+    """Create a Next Visit Prediction model from pre-trained checkpoint."""
+    checkpoint = torch.load(pretrained_path, map_location='cpu')
+
+    if 'config' in checkpoint:
+        config = checkpoint['config']
+        if isinstance(config, dict):
+            config = FMConfig(**config)
+    else:
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        else:
+            state_dict = checkpoint
+
+        is_with_heads = any(k.startswith('transformer.') for k in state_dict.keys())
+
+        embed_key = None
+        for k in state_dict.keys():
+            if 'embeddings.embeddings.weight' in k:
+                embed_key = k
+                break
+
+        if embed_key:
+            ckpt_vocab_size, d_model = state_dict[embed_key].shape
+        else:
+            ckpt_vocab_size, d_model = 15000, 768
+
+        d_ff = 2048
+        for k, v in state_dict.items():
+            if 'ffn_block.linear_gate.weight' in k:
+                d_ff = v.shape[0]
+                break
+
+        n_heads = d_model // 64
+
+        n_blocks = 0
+        block_pattern = 'transformer.transformer_encoder.blocks.' if is_with_heads else 'transformer_encoder.blocks.'
+        for k in state_dict.keys():
+            if block_pattern in k:
+                parts = k.split(block_pattern)
+                if len(parts) > 1:
+                    block_idx = int(parts[1].split('.')[0])
+                    n_blocks = max(n_blocks, block_idx + 1)
+        if n_blocks == 0:
+            n_blocks = 6
+
+        config = FMConfig(
+            vocab_size=ckpt_vocab_size,
+            d_model=d_model,
+            d_ff=d_ff,
+            n_blocks=n_blocks,
+            n_heads=n_heads,
+        )
+        ckpt_type = "FMBaseWithHeads" if is_with_heads else "FMBase"
+        print(f"Detected checkpoint type: {ckpt_type}")
+        print(f"Inferred config: vocab_size={ckpt_vocab_size}, d_model={d_model}, d_ff={d_ff}, n_blocks={n_blocks}, n_heads={n_heads}")
+
+    model = HATForNextVisit(
+        config=config,
+        vocab_size=vocab_size,
+        dropout=dropout,
+        pooling=pooling,
+        freeze_encoder=freeze_encoder,
+    )
+
+    model.load_pretrained(pretrained_path, strict=False)
+    return model

@@ -23,9 +23,9 @@ import pandas as pd
 from tokenizers import Tokenizer
 from torch.utils.data import DataLoader
 
-from src.finetune.data_utils import FinetuneDataset, DownstreamTask, collate_finetune
-from src.finetune.model import create_finetune_model
-from src.finetune.trainer import FinetuneTrainer
+from src.finetune.data_utils import FinetuneDataset, NextVisitDataset, DownstreamTask, collate_finetune
+from src.finetune.model import create_finetune_model, create_next_visit_model
+from src.finetune.trainer import FinetuneTrainer, NextVisitTrainer
 
 
 def parse_args():
@@ -43,7 +43,7 @@ def parse_args():
     parser.add_argument(
         "--task",
         type=str,
-        choices=["mortality", "readmission_30d", "prolonged_los", "icd_chapter", "icd_category_multilabel"],
+        choices=["mortality", "readmission_30d", "prolonged_los", "icd_chapter", "icd_category_multilabel", "next_visit"],
         help="Task to fine-tune on",
     )
     parser.add_argument(
@@ -116,8 +116,16 @@ def parse_args():
         "--metric",
         type=str,
         default="auprc",
-        choices=["auroc", "auprc", "accuracy"],
+        choices=["auroc", "auprc", "accuracy", "recall@10", "recall@20", "recall@30"],
         help="Metric for best model selection",
+    )
+
+    # Next visit specific
+    parser.add_argument(
+        "--k-values",
+        type=str,
+        default="10,20,30",
+        help="Comma-separated K values for Recall@K and NDCG@K (next_visit task)",
     )
 
     # Logging
@@ -270,30 +278,186 @@ def run_single_task(args, task: str):
     return test_metrics
 
 
+def run_next_visit_task(args):
+    """Run fine-tuning for Next Visit Prediction task."""
+    print(f"\n{'='*60}")
+    print("Fine-tuning HAT for task: next_visit")
+    print(f"{'='*60}")
+
+    # Set seed
+    torch.manual_seed(args.seed)
+
+    # Load tokenizer
+    print(f"Loading tokenizer from {args.tokenizer_path}")
+    tokenizer = Tokenizer.from_file(args.tokenizer_path)
+
+    # Load labels
+    print(f"Loading labels from {args.labels_path}")
+    labels_df = pd.read_csv(args.labels_path)
+
+    # Parse k_values
+    k_values = [int(k) for k in args.k_values.split(",")]
+
+    # Validate and determine metric for best model
+    if args.metric.startswith("recall@"):
+        metric_k = int(args.metric.split("@")[1])
+        if metric_k not in k_values:
+            default_k = k_values[1] if len(k_values) > 1 else k_values[0]
+            print(f"  Warning: {args.metric} not in k_values {k_values}, using recall@{default_k}")
+            metric = f"recall@{default_k}"
+        else:
+            metric = args.metric
+    else:
+        default_k = k_values[1] if len(k_values) > 1 else k_values[0]
+        metric = f"recall@{default_k}"
+
+    # Create datasets
+    print("Creating datasets...")
+    train_dataset = NextVisitDataset(
+        data_path=args.data_path,
+        labels_df=labels_df,
+        tokenizer=tokenizer,
+        max_seg=args.max_seg,
+        max_seq_len=args.max_seq_len,
+        split="train",
+        seed=args.seed,
+    )
+    val_dataset = NextVisitDataset(
+        data_path=args.data_path,
+        labels_df=labels_df,
+        tokenizer=tokenizer,
+        max_seg=args.max_seg,
+        max_seq_len=args.max_seq_len,
+        split="val",
+        seed=args.seed,
+    )
+
+    print(f"  Train samples: {len(train_dataset):,}")
+    print(f"  Val samples:   {len(val_dataset):,}")
+    print(f"  Vocab size:    {tokenizer.get_vocab_size()}")
+
+    # Create model
+    print(f"Loading pre-trained model from {args.pretrained}")
+    model = create_next_visit_model(
+        pretrained_path=args.pretrained,
+        vocab_size=tokenizer.get_vocab_size(),
+        dropout=args.dropout,
+        pooling=args.pooling,
+        freeze_encoder=args.freeze_encoder,
+    )
+
+    # Create output directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_dir = Path(args.output_dir) / f"next_visit_{timestamp}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save args
+    with open(output_dir / "args.json", "w") as f:
+        json.dump(vars(args), f, indent=2)
+
+    # Create trainer
+    trainer = NextVisitTrainer(
+        model=model,
+        train_dataset=train_dataset,
+        val_dataset=val_dataset,
+        output_dir=str(output_dir),
+        learning_rate=args.lr,
+        batch_size=args.batch_size,
+        num_epochs=args.epochs,
+        warmup_ratio=args.warmup_ratio,
+        weight_decay=args.weight_decay,
+        gradient_accumulation_steps=args.gradient_accumulation,
+        patience=args.patience,
+        k_values=k_values,
+        metric_for_best_model=metric,
+        use_wandb=args.wandb,
+        wandb_project=args.wandb_project,
+        wandb_run_name=f"next_visit_{timestamp}",
+        num_workers=args.num_workers,
+    )
+
+    # Train
+    best_metric = trainer.train()
+
+    # Evaluate on test set
+    print("\nEvaluating on test set...")
+    test_dataset = NextVisitDataset(
+        data_path=args.data_path,
+        labels_df=labels_df,
+        tokenizer=tokenizer,
+        max_seg=args.max_seg,
+        max_seq_len=args.max_seq_len,
+        split="test",
+        seed=args.seed,
+    )
+
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size * 2,
+        shuffle=False,
+        collate_fn=collate_finetune,
+        num_workers=args.num_workers,
+    )
+
+    test_metrics = trainer.evaluate(test_loader)
+
+    # Print results
+    print(f"\n{'='*60}")
+    print("Test Results for next_visit")
+    print(f"{'='*60}")
+    for k, v in test_metrics.items():
+        print(f"  {k}: {v:.4f}")
+
+    # Save results
+    results = {
+        "task": "next_visit",
+        "best_val_metric": best_metric,
+        "test_metrics": test_metrics,
+        "args": vars(args),
+    }
+    with open(output_dir / "test_results.json", "w") as f:
+        json.dump(results, f, indent=2)
+
+    return test_metrics
+
+
 def main():
     args = parse_args()
 
     if args.all:
-        # Run all tasks
-        tasks = ["mortality", "readmission_30d", "prolonged_los", "icd_chapter", "icd_category_multilabel"]
+        # Run all tasks (including next_visit)
+        classification_tasks = ["mortality", "readmission_30d", "prolonged_los", "icd_chapter", "icd_category_multilabel"]
         all_results = {}
 
-        for task in tasks:
+        for task in classification_tasks:
             results = run_single_task(args, task)
             all_results[task] = results
+
+        # Run next_visit separately
+        next_visit_results = run_next_visit_task(args)
+        all_results["next_visit"] = next_visit_results
 
         # Print summary
         print(f"\n{'='*60}")
         print("Summary of All Tasks")
         print(f"{'='*60}")
         for task, metrics in all_results.items():
-            auroc = metrics.get("auroc", "N/A")
-            auprc = metrics.get("auprc", "N/A")
-            if isinstance(auroc, float):
-                auroc = f"{auroc:.4f}"
-            if isinstance(auprc, float):
-                auprc = f"{auprc:.4f}"
-            print(f"  {task:20s}: AUROC={auroc}, AUPRC={auprc}")
+            if task == "next_visit":
+                recall20 = metrics.get("recall@20", "N/A")
+                ndcg20 = metrics.get("ndcg@20", "N/A")
+                if isinstance(recall20, float):
+                    recall20 = f"{recall20:.4f}"
+                if isinstance(ndcg20, float):
+                    ndcg20 = f"{ndcg20:.4f}"
+                print(f"  {task:25s}: Recall@20={recall20}, NDCG@20={ndcg20}")
+            else:
+                auroc = metrics.get("auroc", "N/A")
+                auprc = metrics.get("auprc", "N/A")
+                if isinstance(auroc, float):
+                    auroc = f"{auroc:.4f}"
+                if isinstance(auprc, float):
+                    auprc = f"{auprc:.4f}"
+                print(f"  {task:25s}: AUROC={auroc}, AUPRC={auprc}")
 
         # Save summary
         summary_path = Path(args.output_dir) / "summary.json"
@@ -302,7 +466,10 @@ def main():
         print(f"\nSummary saved to {summary_path}")
 
     elif args.task:
-        run_single_task(args, args.task)
+        if args.task == "next_visit":
+            run_next_visit_task(args)
+        else:
+            run_single_task(args, args.task)
     else:
         print("Error: Please specify --task or --all")
         exit(1)
