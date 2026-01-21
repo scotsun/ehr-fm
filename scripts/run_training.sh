@@ -15,7 +15,7 @@
 # ============================================================================
 # HAT Model Training - MIMIC-IV on H200 GPU (Dual-Line Masking)
 # Context: max_seg=8, max_seq_len=512 (4,096 tokens/patient)
-# Effective batch size: 24 × 2 = 48 patients
+# Effective batch size: 36 × 2 = 72 patients
 # Mixed Precision: AMP enabled (FP16 training for 2-3x speedup)
 #
 # Dual-Line Masking Strategy (aligned with teammate's design):
@@ -36,6 +36,7 @@
 #   sbatch run_training.sh both         # MLM + DM
 #   sbatch run_training.sh staged       # Staged: MLM -> DM
 #   sbatch run_training.sh staged 25    # Staged with 25 epochs for stage1
+#   sbatch run_training.sh both --resume checkpoints/run_both_20250115  # Resume
 # ============================================================================
 
 echo "=========================================="
@@ -62,7 +63,22 @@ mkdir -p checkpoints logs
 # ==================== Configuration ====================
 # Masking strategy: "token" (MLM only), "encounter" (DM only), "both" (MLM+DM), "staged" (MLM->DM)
 MASKING_STRATEGY=${1:-both}
-STAGE1_EPOCHS=${2:-20}  # For staged training: epochs for Stage 1 (MLM only)
+
+# Parse --resume flag FIRST (before positional arg parsing)
+RESUME_DIR=""
+for i in $(seq 1 $#); do
+    arg="${!i}"
+    if [[ "$arg" == "--resume" ]]; then
+        next=$((i + 1))
+        RESUME_DIR="${!next}"
+    fi
+done
+
+# Parse STAGE1_EPOCHS, skipping --resume and its value
+STAGE1_EPOCHS=20  # Default
+if [[ -n "$2" && "$2" != "--resume" && ! "$2" =~ ^checkpoints/ ]]; then
+    STAGE1_EPOCHS=$2
+fi
 
 # Masking probabilities (aligned with teammate's config)
 TOKEN_MASK_PROB=0.20      # Token-level masking for MLM
@@ -92,8 +108,25 @@ case "$MASKING_STRATEGY" in
         ;;
 esac
 
-TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-OUTPUT_DIR="checkpoints/run_${MASKING_STRATEGY}_${TIMESTAMP}"
+# Determine output directory
+if [ -n "$RESUME_DIR" ]; then
+    # Resume from existing checkpoint directory
+    OUTPUT_DIR="$RESUME_DIR"
+    if [ ! -d "$OUTPUT_DIR" ]; then
+        echo "Error: Resume directory '$OUTPUT_DIR' does not exist!"
+        exit 1
+    fi
+    if [ -f "$OUTPUT_DIR/latest_checkpoint.pt" ]; then
+        echo "✓ Resuming from: ${OUTPUT_DIR}/latest_checkpoint.pt"
+    else
+        echo "Warning: No checkpoint found in '$OUTPUT_DIR'. Starting fresh."
+    fi
+else
+    # Start new training run
+    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+    OUTPUT_DIR="checkpoints/run_${MASKING_STRATEGY}_${TIMESTAMP}"
+    echo "✓ Starting fresh training run"
+fi
 
 # Display GPU info
 echo ""
@@ -105,7 +138,7 @@ echo "Training Configuration:"
 echo "  Masking strategy: ${MASKING_STRATEGY}"
 if [ "$MASKING_STRATEGY" == "staged" ]; then
     echo "  Stage 1 epochs:      ${STAGE1_EPOCHS} (MLM only)"
-    echo "  Stage 2 epochs:      $((50 - STAGE1_EPOCHS)) (DM only)"
+    echo "  Stage 2 epochs:      $((40 - STAGE1_EPOCHS)) (DM only)"
 fi
 echo "  Token mask prob:     ${TOKEN_MASK_PROB} (token-level)"
 echo "  Encounter mask prob: ${ENCOUNTER_MASK_PROB} (segment-level)"
@@ -126,7 +159,7 @@ python train.py \
     --token_mask_prob ${TOKEN_MASK_PROB} \
     --encounter_mask_prob ${ENCOUNTER_MASK_PROB} \
     --batch_size 36 \
-    --num_epochs 50 \
+    --num_epochs 40 \
     --d_model 768 \
     --n_heads 12 \
     --n_blocks 6 \
