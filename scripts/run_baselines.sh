@@ -64,29 +64,23 @@ mkdir -p checkpoints logs
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 OUTPUT_DIR="checkpoints/${MODEL}_${TIMESTAMP}"
 
-# Model-specific configurations (from original papers/code)
-# CORE-BEHRT: arXiv:2404.15201 - "6 layers, 6 heads, hidden_size=192, intermediate_size=64"
-# HEART: pretrain.py defaults - "5 layers, 6 heads, hidden_size=288, intermediate_size=288"
+# Unified model configuration for fair comparison with HAT
+# All baselines use the same architecture hyperparameters
+D_MODEL=768
+N_BLOCKS=6
+N_HEADS=12
+D_FF=2048
+DROPOUT=0.0
+MASK_PROB=0.20  # Aligned with HAT token_mask_prob
+LEARNING_RATE=5e-5
+
+# Model-specific batch sizes (due to memory differences)
 case "$MODEL" in
     "core-behrt")
-        D_MODEL=192
-        N_BLOCKS=6
-        N_HEADS=6
-        D_FF=64
-        DROPOUT=0.1
-        LEARNING_RATE=1e-3  # Original paper uses 1e-3 for pretraining
-        MASK_PROB=0.15
         BATCH_SIZE=32
         ;;
     "heart")
-        D_MODEL=288
-        N_BLOCKS=5
-        N_HEADS=6
-        D_FF=288
-        DROPOUT=0.2
-        LEARNING_RATE=2e-5
-        MASK_PROB=0.7  # HEART uses 70% mask rate for MEP
-        BATCH_SIZE=24  # Smaller due to edge module memory
+        BATCH_SIZE=16  # Smaller due to edge module memory overhead
         ;;
 esac
 
