@@ -13,7 +13,7 @@
 
 # ============================================================================
 # HAT Fine-tuning for Downstream Tasks on H200 GPU
-# Tasks: mortality, readmission_30d, prolonged_los, icd_chapter, icd_category_multilabel
+# Tasks: mortality, readmission_30d, prolonged_los, icd_chapter, icd_category_multilabel, next_visit
 # ============================================================================
 
 echo "=========================================="
@@ -62,11 +62,21 @@ MAX_SEQ_LEN=512
 # ==================== Parse Arguments ====================
 TASK=${1:-mortality}  # Default to mortality if not specified
 
-# Check if --wandb flag is present
+# Check for optional flags
 WANDB_FLAG=""
+K_VALUES="10,20,30"  # Default k values for next_visit task
+METRIC=""            # Auto-determined by task type
+
 for arg in "$@"; do
     if [ "$arg" == "--wandb" ]; then
         WANDB_FLAG="--wandb"
+    fi
+done
+
+# Parse --k-values if provided (for next_visit task)
+for i in "${!@}"; do
+    if [[ "${!i}" == "--k-values="* ]]; then
+        K_VALUES="${!i#*=}"
     fi
 done
 
@@ -78,6 +88,9 @@ echo "  Batch size:  $BATCH_SIZE"
 echo "  Epochs:      $EPOCHS"
 echo "  Max seg:     $MAX_SEG"
 echo "  Max seq len: $MAX_SEQ_LEN"
+if [ "$TASK" == "next_visit" ] || [ "$TASK" == "all" ]; then
+    echo "  K values:    $K_VALUES (for next_visit)"
+fi
 echo "=========================================="
 echo ""
 
@@ -96,6 +109,24 @@ if [ "$TASK" == "all" ]; then
         --warmup-ratio $WARMUP_RATIO \
         --max-seg $MAX_SEG \
         --max-seq-len $MAX_SEQ_LEN \
+        --k-values "$K_VALUES" \
+        $WANDB_FLAG
+elif [ "$TASK" == "next_visit" ]; then
+    python run_finetune.py \
+        --task "$TASK" \
+        --pretrained "$PRETRAINED" \
+        --data-path "$DATA_PATH" \
+        --labels-path "$LABELS_PATH" \
+        --tokenizer-path "$TOKENIZER_PATH" \
+        --output-dir "$OUTPUT_DIR" \
+        --lr $LR \
+        --batch-size $BATCH_SIZE \
+        --epochs $EPOCHS \
+        --warmup-ratio $WARMUP_RATIO \
+        --max-seg $MAX_SEG \
+        --max-seq-len $MAX_SEQ_LEN \
+        --k-values "$K_VALUES" \
+        --metric "recall@20" \
         $WANDB_FLAG
 else
     python run_finetune.py \
