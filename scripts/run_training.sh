@@ -138,7 +138,7 @@ echo "Training Configuration:"
 echo "  Masking strategy: ${MASKING_STRATEGY}"
 if [ "$MASKING_STRATEGY" == "staged" ]; then
     echo "  Stage 1 epochs:      ${STAGE1_EPOCHS} (MLM only)"
-    echo "  Stage 2 epochs:      $((40 - STAGE1_EPOCHS)) (DM only)"
+    echo "  Stage 2 epochs:      $((30 - STAGE1_EPOCHS)) (DM only)"
 fi
 echo "  Token mask prob:     ${TOKEN_MASK_PROB} (token-level)"
 echo "  Encounter mask prob: ${ENCOUNTER_MASK_PROB} (segment-level)"
@@ -159,7 +159,7 @@ python train.py \
     --token_mask_prob ${TOKEN_MASK_PROB} \
     --encounter_mask_prob ${ENCOUNTER_MASK_PROB} \
     --batch_size 36 \
-    --num_epochs 40 \
+    --num_epochs 30 \
     --d_model 768 \
     --n_heads 12 \
     --n_blocks 6 \

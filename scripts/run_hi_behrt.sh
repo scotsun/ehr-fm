@@ -126,7 +126,7 @@ echo "=========================================="
 #     --tokenizer_path /hpc/group/engelhardlab/hg176/ehr-fm/tokenizer.json \
 #     --output_dir "${OUTPUT_DIR}" \
 #     --batch_size ${BATCH_SIZE} \
-#     --num_epochs 50 \
+#     --num_epochs 30 \
 #     --d_model ${D_MODEL} \
 #     --n_extractor_layers ${N_EXTRACTOR_LAYERS} \
 #     --n_aggregator_layers ${N_AGGREGATOR_LAYERS} \

@@ -112,7 +112,7 @@ python train_baselines.py \
     --tokenizer_path /hpc/group/engelhardlab/hg176/ehr-fm/tokenizer.json \
     --output_dir "${OUTPUT_DIR}" \
     --batch_size ${BATCH_SIZE} \
-    --num_epochs 50 \
+    --num_epochs 30 \
     --d_model ${D_MODEL} \
     --n_blocks ${N_BLOCKS} \
     --n_heads ${N_HEADS} \
