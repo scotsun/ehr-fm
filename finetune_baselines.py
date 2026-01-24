@@ -126,7 +126,7 @@ def create_finetune_model(model_type, pretrained_path, num_classes, args):
             dropout=0.0,
             n_token_types=8,
             edge_hidden_size=64,
-            max_visits=args.max_seg,
+            max_visits=50,  # Must match pretrained model
         )
         model = HEARTForSequenceClassification(
             config=config,
