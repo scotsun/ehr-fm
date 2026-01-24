@@ -80,13 +80,13 @@ def main():
         train_loader = DataLoader(
             dataset=train,
             batch_size=cfg.trainer["batch_size"],
-            sampler=DistributedSampler(train),
+            sampler=DistributedSampler(train, drop_last=True),
             num_workers=8,
         )
         valid_loader = DataLoader(
             dataset=valid,
             batch_size=cfg.trainer["batch_size"],
-            sampler=DistributedSampler(valid),
+            sampler=DistributedSampler(valid, drop_last=True),
             num_workers=8,
         )
     else:
