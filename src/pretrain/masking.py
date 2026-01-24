@@ -182,7 +182,7 @@ def masking_last_segment(
 
 
 def observed_segment_distribution(
-    labels: torch.Tensor,
+    input_ids: torch.Tensor,
     encounter_mask: torch.Tensor,
     tokenizer: Tokenizer,
 ) -> torch.Tensor:
@@ -190,8 +190,13 @@ def observed_segment_distribution(
     Compute the observed token distribution for each masked segment.
     This is the target distribution for the Distribution Matching (DM) loss.
 
+    Aligned with teammate's implementation:
+    - Uses input_ids directly (includes PAD tokens)
+    - Counts ALL tokens including PAD
+    - Normalizes by fixed max_seq_len - 1 (not actual token count)
+
     Args:
-        labels: (batch, max_seg, max_seq_len) - original tokens, -100 for non-masked
+        input_ids: (batch, max_seg, max_seq_len) - original input tokens (NOT labels)
         encounter_mask: (batch, max_seg) - which segments were masked
         tokenizer: Tokenizer instance
 
@@ -199,34 +204,27 @@ def observed_segment_distribution(
         target_dist: (M, vocab_size) - normalized distribution for each masked segment
                      where M is the total number of masked segments
     """
-    device = labels.device
+    device = input_ids.device
     vocab_size = tokenizer.get_vocab_size()
 
     # Extract tokens from masked segments, skip CLS token (position 0)
-    # labels[encounter_mask]: (M, max_seq_len)
+    # input_ids[encounter_mask]: (M, max_seq_len)
     # [:, 1:]: skip CLS token -> (M, max_seq_len - 1)
-    obs_segment_tokens = labels[encounter_mask][:, 1:]
+    obs_segment_tokens = input_ids[encounter_mask][:, 1:]
 
     # Create target distribution
-    # For each masked segment, count occurrences of each token
     num_masked_segments = obs_segment_tokens.size(0)
     target_dist = torch.zeros(num_masked_segments, vocab_size, device=device)
 
-    # Count token occurrences using scatter_add
-    # Only count valid tokens (not -100, not PAD)
-    valid_tokens_mask = obs_segment_tokens >= 0
-    valid_tokens = obs_segment_tokens.clone()
-    valid_tokens[~valid_tokens_mask] = 0  # Replace invalid with 0 (won't affect distribution)
-
+    # Count ALL tokens including PAD (aligned with teammate's code)
     target_dist.scatter_add_(
         dim=1,
-        index=valid_tokens,
-        src=valid_tokens_mask.float(),  # Only add 1 for valid tokens
+        index=obs_segment_tokens,
+        src=torch.ones_like(obs_segment_tokens, dtype=torch.float32),
     )
 
-    # Normalize to get distribution (sum to 1 for each segment)
-    # Add small epsilon to avoid division by zero
-    token_counts = valid_tokens_mask.sum(dim=1, keepdim=True).float()
-    target_dist = target_dist / token_counts.clamp(min=1)
+    # Normalize by fixed max_seq_len - 1 (aligned with teammate's code)
+    # This includes PAD tokens in the distribution
+    target_dist = target_dist / obs_segment_tokens.size(1)
 
     return target_dist

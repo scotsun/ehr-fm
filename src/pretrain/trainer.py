@@ -717,8 +717,9 @@ class BaseWithHeadsTrainer(Trainer):
                         continue
 
                     # Compute target distribution for DM loss
+                    # Use input_ids (not dm_labels) to include PAD tokens in distribution
                     target_dist = observed_segment_distribution(
-                        dm_labels, encounter_mask, self.tokenizer
+                        input_ids, encounter_mask, self.tokenizer
                     )
 
                     # DM Forward + Backward (graph released after backward)
@@ -840,8 +841,9 @@ class BaseWithHeadsTrainer(Trainer):
                     continue
 
                 # Compute target distribution
+                # Use input_ids (not dm_labels) to include PAD tokens in distribution
                 target_dist = observed_segment_distribution(
-                    dm_labels, encounter_mask, self.tokenizer
+                    input_ids, encounter_mask, self.tokenizer
                 )
 
                 # Forward passes
