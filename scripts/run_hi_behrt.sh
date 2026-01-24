@@ -35,8 +35,8 @@
 # Check task argument
 TASK=${1:-mortality}
 
-if [[ ! "$TASK" =~ ^(mortality|readmission|los)$ ]]; then
-    echo "Error: Invalid task '$TASK'. Use 'mortality', 'readmission', or 'los'."
+if [[ ! "$TASK" =~ ^(mortality|readmission|los|icd_chapter)$ ]]; then
+    echo "Error: Invalid task '$TASK'. Use 'mortality', 'readmission', 'los', or 'icd_chapter'."
     exit 1
 fi
 
@@ -101,43 +101,47 @@ echo "  Mixed Precision: AMP enabled"
 echo "  Output:         ${OUTPUT_DIR}"
 echo ""
 
-# TODO: Implement downstream task training script
-# For now, print instructions
-echo "=========================================="
-echo "NOTE: Hi-BEHRT downstream task training requires:"
-echo "  1. Downstream task cohort with labels"
-echo "  2. train_hi_behrt.py script (to be implemented)"
-echo ""
-echo "Hi-BEHRT is designed for end-to-end training on:"
-echo "  - Mortality prediction"
-echo "  - Readmission prediction"
-echo "  - Length of stay prediction"
-echo "  - Next diagnosis prediction"
-echo ""
-echo "Unlike CORE-BEHRT and HEART, Hi-BEHRT does NOT use"
-echo "MLM pre-training. It is trained directly on the"
-echo "downstream task with task-specific labels."
-echo "=========================================="
+# Map task names to match train_hi_behrt.py expectations
+case "$TASK" in
+    "mortality")
+        TASK_ARG="mortality"
+        ;;
+    "readmission")
+        TASK_ARG="readmission_30d"
+        ;;
+    "los")
+        TASK_ARG="prolonged_los"
+        ;;
+    "icd_chapter")
+        TASK_ARG="icd_chapter"
+        ;;
+esac
 
-# Placeholder for actual training command
-# python train_hi_behrt.py \
-#     --task "${TASK}" \
-#     --data_path /hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet \
-#     --tokenizer_path /hpc/group/engelhardlab/hg176/ehr-fm/tokenizer.json \
-#     --output_dir "${OUTPUT_DIR}" \
-#     --batch_size ${BATCH_SIZE} \
-#     --num_epochs 30 \
-#     --d_model ${D_MODEL} \
-#     --n_extractor_layers ${N_EXTRACTOR_LAYERS} \
-#     --n_aggregator_layers ${N_AGGREGATOR_LAYERS} \
-#     --n_heads ${N_HEADS} \
-#     --d_ff ${D_FF} \
-#     --window_size ${WINDOW_SIZE} \
-#     --stride ${STRIDE} \
-#     --dropout ${DROPOUT} \
-#     --learning_rate ${LEARNING_RATE} \
-#     --patience 10 \
-#     --use_amp
+# Data paths
+DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
+LABELS_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/downstream_labels.csv"
+TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/tokenizer.json"
+
+# Run end-to-end training
+python train_hi_behrt.py \
+    --task "${TASK_ARG}" \
+    --data_path "${DATA_PATH}" \
+    --labels_path "${LABELS_PATH}" \
+    --tokenizer_path "${TOKENIZER_PATH}" \
+    --output_dir "${OUTPUT_DIR}" \
+    --batch_size ${BATCH_SIZE} \
+    --num_epochs 30 \
+    --d_model ${D_MODEL} \
+    --n_extractor_layers ${N_EXTRACTOR_LAYERS} \
+    --n_aggregator_layers ${N_AGGREGATOR_LAYERS} \
+    --n_heads ${N_HEADS} \
+    --d_ff ${D_FF} \
+    --window_size ${WINDOW_SIZE} \
+    --stride ${STRIDE} \
+    --dropout ${DROPOUT} \
+    --learning_rate ${LEARNING_RATE} \
+    --patience 10 \
+    --use_amp
 
 echo ""
 echo "=========================================="
