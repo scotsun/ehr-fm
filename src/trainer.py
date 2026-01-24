@@ -627,10 +627,10 @@ class BaseWithHeadsTrainer(Trainer):
                     continue
 
                 target_dist = observed_set_distribution(  # TODO: decide between masked-only or mixed
-                    # labels=msm_labels,
-                    # set_select_mask=set_select_mask,
-                    labels=input_ids,
-                    set_select_mask=set_attention_mask,
+                    labels=msm_labels,
+                    set_select_mask=set_select_mask,
+                    # labels=input_ids,
+                    # set_select_mask=set_attention_mask,
                     tokenizer=self.tokenizer,
                 )
 
@@ -658,16 +658,16 @@ class BaseWithHeadsTrainer(Trainer):
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
                         t=t,
-                        # set_mask=set_select_mask, # TODO: decide between masked-only or mixed
-                        set_mask=set_attention_mask,
+                        set_mask=set_select_mask,  # TODO: decide between masked-only or mixed
+                        # set_mask=set_attention_mask,
                     )
 
                     msm_loss = criterions["kl_div"](
-                        F.log_softmax(msm_set_logits, dim=-1), target_dist
+                        F.log_softmax(msm_set_logits / 10, dim=-1), target_dist
                     )
                     scaled_msm_loss = trainer_args["l_msm"] * msm_loss
 
-                scaler.scale(scaled_msm_loss).backward()
+                scaler.scale(10 * scaled_msm_loss).backward()
 
                 # --- OPTIMIZER STEP ---
                 scaler.step(optimizer)
@@ -721,12 +721,14 @@ class BaseWithHeadsTrainer(Trainer):
                 mask_probability=trainer_args["msm_probability"],
             )
 
-            target_dist = observed_set_distribution(
-                # labels=msm_labels,
-                # set_select_mask=set_select_mask,
-                labels=input_ids,
-                set_select_mask=set_attention_mask,
-                tokenizer=self.tokenizer,
+            target_dist = (
+                observed_set_distribution(  # TODO: decide between masked-only or mixed
+                    labels=msm_labels,
+                    set_select_mask=set_select_mask,
+                    # labels=input_ids,
+                    # set_select_mask=set_attention_mask,
+                    tokenizer=self.tokenizer,
+                )
             )
 
             with autocast(device_type="cuda", dtype=torch.float16):
@@ -742,15 +744,15 @@ class BaseWithHeadsTrainer(Trainer):
                     attention_mask=attention_mask,
                     set_attention_mask=set_attention_mask,
                     t=t,
-                    # set_mask=set_select_mask, # TODO: decide between masked-only or mixed
-                    set_mask=set_attention_mask,
+                    set_mask=set_select_mask,  # TODO: decide between masked-only or mixed
+                    # set_mask=set_attention_mask,
                 )
                 mlm_loss = criterions["cross_entropy"](
                     mlm_logits.view(-1, mlm_logits.size(-1)),
                     mlm_labels.view(-1),
                 )
                 msm_loss = criterions["kl_div"](
-                    F.log_softmax(msm_set_logits, dim=-1), target_dist
+                    F.log_softmax(msm_set_logits / 0.1, dim=-1), target_dist
                 )
 
                 if trainer_args["eval_last_set"]:
@@ -769,6 +771,7 @@ class BaseWithHeadsTrainer(Trainer):
                     masked_last_set_logits, input_ids, set_select_mask, 10
                 )
                 recall10 = recall_at_k(p_tokens, t_tokens)
+
                 ndcg10 = ndcg_at_k(p_tokens, t_tokens)
             else:
                 p_tokens, t_tokens = pred_and_target_sets(
@@ -811,7 +814,7 @@ class BaseWithHeadsTrainer(Trainer):
             )
 
         valid_metrics = {
-            "callback_metric": val_mlm,
+            "callback_metric": val_ndcg10,
             "logged_metrics": {
                 "val_mlm_loss": val_mlm,
                 "val_msm_loss": val_msm,

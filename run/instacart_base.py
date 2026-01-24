@@ -54,11 +54,11 @@ def main():
         trainer=cfg_dict["trainer"],
         **cfg_dict["model"],
     )
-    model = build_model(cfg, "FMBase", device)
+    model = build_model(cfg, "FMBaseWithHeads", device)
     trainer = build_trainer(cfg, model, tk, device)
 
     if is_distributed:
-        trainer.model = DDP(model, device_ids=[rank])
+        trainer.model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     kwargs = cfg_dict["dataset"]
     kwargs["time_operation"] = lambda x: x["t"]
