@@ -126,7 +126,14 @@ class HiBEHRTTrainer:
         self.use_amp = use_amp and self.device.type == "cuda"
 
         is_multilabel = self.task_config.get("is_multilabel", False)
-        self.metric_for_best_model = "auprc" if not is_multilabel else "auroc"
+        num_classes = model.num_classes
+        # For multi-class tasks, use auroc; for binary tasks, use auprc
+        if num_classes > 2:
+            self.metric_for_best_model = "auroc"
+        elif is_multilabel:
+            self.metric_for_best_model = "auroc"
+        else:
+            self.metric_for_best_model = "auprc"
 
         # Data loaders (use HAT's collate_finetune)
         self.train_loader = DataLoader(
@@ -283,8 +290,21 @@ class HiBEHRTTrainer:
         else:
             all_probs = np.vstack(all_probs)
             try:
-                metrics["auroc"] = roc_auc_score(all_labels, all_probs, multi_class="ovr")
-            except ValueError:
+                # Multi-class AUROC: compute per-class OVR AUROC and average
+                # Only include classes that appear in validation set
+                class_aurocs = []
+                for c in range(num_classes):
+                    binary_labels = (all_labels == c).astype(int)
+                    if binary_labels.sum() > 0 and binary_labels.sum() < len(binary_labels):
+                        # Class c has both positive and negative examples
+                        class_auroc = roc_auc_score(binary_labels, all_probs[:, c])
+                        class_aurocs.append(class_auroc)
+                if class_aurocs:
+                    metrics["auroc"] = np.mean(class_aurocs)
+                else:
+                    metrics["auroc"] = 0.0
+            except ValueError as e:
+                print(f"  Warning: Could not compute AUROC: {e}")
                 metrics["auroc"] = 0.0
             metrics["f1_macro"] = f1_score(all_labels, all_preds, average="macro")
 

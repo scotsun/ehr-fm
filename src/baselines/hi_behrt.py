@@ -759,8 +759,12 @@ class HiBEHRTSimple(nn.Module):
         # Aggregate across segments
         aggregated = self.aggregator(segment_repr, global_attn_mask, encounter=False)
 
-        # Pool first segment for classification
-        pooled = aggregated[:, 0]
+        # Pool LAST valid segment for classification (most recent information)
+        # Find the last valid segment for each sample
+        # global_mask: (batch, num_segments) - 1 for valid, 0 for padding
+        last_valid_idx = (global_mask.cumsum(dim=1) * global_mask).argmax(dim=1)  # (batch,)
+        batch_indices = torch.arange(batch_size, device=input_ids.device)
+        pooled = aggregated[batch_indices, last_valid_idx]  # (batch, d_model)
 
         return pooled, aggregated
 
