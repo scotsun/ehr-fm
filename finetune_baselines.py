@@ -2,8 +2,7 @@
 """
 Baseline Models Fine-tuning Script
 
-Reuses HAT's FinetuneDataset and converts hierarchical format to flat format
-for baseline models (CORE-BEHRT, HEART).
+Uses FlatFinetuneDataset for consistent flat (512,) format with pretrain.
 
 Usage:
     python finetune_baselines.py --model core-behrt --task mortality \
@@ -15,7 +14,6 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
@@ -31,73 +29,19 @@ from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_sco
 
 from tokenizers import Tokenizer
 
-# Reuse HAT's FinetuneDataset
-from src.finetune.data_utils import FinetuneDataset, DownstreamTask, TASK_CONFIGS, collate_finetune
+# Use flat dataset for baselines (consistent with pretrain)
+from src.baselines.data_utils import FlatFinetuneDataset, DownstreamTask, TASK_CONFIGS, collate_flat_finetune
 from src.baselines.core_behrt import BEHRTConfig, BEHRTForSequenceClassification
 from src.baselines.heart import HEARTConfig, HEARTForSequenceClassification
 
 
-def flatten_batch(batch, model_type):
-    """
-    Convert HAT's hierarchical batch format to flat format for baseline models.
-
-    HAT format:
-        input_ids: (B, max_seg, max_seq_len)
-        attention_mask: (B, max_seg, max_seq_len)
-        segment_attention_mask: (B, max_seg)
-        token_time: (B, max_seg, max_seq_len)
-
-    Baseline format:
-        input_ids: (B, max_seg * max_seq_len)
-        attention_mask: (B, max_seg * max_seq_len)
-        t: (B, max_seg * max_seq_len)
-    """
-    B, S, L = batch["input_ids"].shape
-
-    # Flatten input_ids and attention_mask
-    input_ids = batch["input_ids"].view(B, S * L)
-    attention_mask = batch["attention_mask"].view(B, S * L)
-
-    # Flatten token_time to get t
-    if "token_time" in batch and batch["token_time"] is not None:
-        t = batch["token_time"].view(B, S * L)
-    else:
-        # Use segment_time expanded to token level
-        if "segment_time" in batch and batch["segment_time"] is not None:
-            segment_time = batch["segment_time"]  # (B, S)
-            t = segment_time.unsqueeze(-1).expand(B, S, L).reshape(B, S * L)
-        else:
-            t = torch.zeros(B, S * L)
-
-    result = {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "t": t,
-        "label": batch["label"],
-    }
-
-    # HEART needs token_types and visit_ids
-    if model_type == "heart":
-        # Generate token_types from position (simplified)
-        # In real case, this should come from data
-        result["token_types"] = torch.zeros_like(input_ids)
-
-        # Generate visit_ids from segment structure
-        visit_ids = torch.arange(S).unsqueeze(0).unsqueeze(-1).expand(B, S, L)
-        result["visit_ids"] = visit_ids.reshape(B, S * L)
-
-    return result
-
-
-def create_finetune_model(model_type, pretrained_path, num_classes, args):
+def create_finetune_model(model_type, pretrained_path, num_classes, vocab_size, args):
     """Create fine-tune model from pretrained checkpoint."""
 
     checkpoint = torch.load(pretrained_path, map_location="cpu", weights_only=False)
 
-    vocab_size = checkpoint.get("config", {}).get("vocab_size", 20377)
-
-    # Calculate max_seq_len for flattened input
-    max_seq_len = args.max_seg * args.max_seq_len
+    # Use max_seq_len directly (flat format, same as pretrain)
+    max_seq_len = args.max_seq_len
 
     if model_type == "core-behrt":
         config = BEHRTConfig(
@@ -196,17 +140,24 @@ class BaselineFinetuneTrainer:
         self.use_amp = use_amp and self.device.type == "cuda"
 
         is_multilabel = self.task_config.get("is_multilabel", False)
-        self.metric_for_best_model = "auprc" if not is_multilabel else "auroc"
+        num_classes = model.num_classes
+        # For multi-class tasks, use auroc; for binary tasks, use auprc
+        if num_classes > 2:
+            self.metric_for_best_model = "auroc"
+        elif is_multilabel:
+            self.metric_for_best_model = "auroc"
+        else:
+            self.metric_for_best_model = "auprc"
 
-        # Data loaders (use HAT's collate_finetune)
+        # Data loaders (use flat collate function)
         self.train_loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True,
-            collate_fn=collate_finetune, num_workers=num_workers,
+            collate_fn=collate_flat_finetune, num_workers=num_workers,
             pin_memory=(self.device.type == "cuda")
         )
         self.val_loader = DataLoader(
             val_dataset, batch_size=batch_size * 2, shuffle=False,
-            collate_fn=collate_finetune, num_workers=num_workers,
+            collate_fn=collate_flat_finetune, num_workers=num_workers,
             pin_memory=(self.device.type == "cuda")
         )
 
@@ -242,20 +193,17 @@ class BaselineFinetuneTrainer:
         self.patience_counter = 0
 
     def _forward_step(self, batch):
-        """Forward pass with flattened batch."""
-        # Flatten HAT's hierarchical format to baseline's flat format
-        flat_batch = flatten_batch(batch, self.model_type)
-
-        input_ids = flat_batch["input_ids"].to(self.device)
-        attention_mask = flat_batch["attention_mask"].to(self.device)
-        t = flat_batch["t"].to(self.device)
-        labels = flat_batch["label"].to(self.device)
+        """Forward pass with flat batch (already in correct format)."""
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        t = batch["t"].to(self.device)
+        labels = batch["label"].to(self.device)
 
         if self.model_type == "core-behrt":
             output = self.model(input_ids, attention_mask, t, labels=labels)
         else:  # heart
-            token_types = flat_batch["token_types"].to(self.device)
-            visit_ids = flat_batch["visit_ids"].to(self.device)
+            token_types = batch["token_types"].to(self.device)
+            visit_ids = batch["visit_ids"].to(self.device)
             output = self.model(input_ids, attention_mask, token_types, visit_ids, t, labels=labels)
 
         return output, labels
@@ -359,8 +307,21 @@ class BaselineFinetuneTrainer:
         else:
             all_probs = np.vstack(all_probs)
             try:
-                metrics["auroc"] = roc_auc_score(all_labels, all_probs, multi_class="ovr")
-            except ValueError:
+                # Multi-class AUROC: compute per-class OVR AUROC and average
+                # Only include classes that appear in validation set
+                class_aurocs = []
+                for c in range(num_classes):
+                    binary_labels = (all_labels == c).astype(int)
+                    if binary_labels.sum() > 0 and binary_labels.sum() < len(binary_labels):
+                        # Class c has both positive and negative examples
+                        class_auroc = roc_auc_score(binary_labels, all_probs[:, c])
+                        class_aurocs.append(class_auroc)
+                if class_aurocs:
+                    metrics["auroc"] = np.mean(class_aurocs)
+                else:
+                    metrics["auroc"] = 0.0
+            except ValueError as e:
+                print(f"  Warning: Could not compute AUROC: {e}")
                 metrics["auroc"] = 0.0
             metrics["f1_macro"] = f1_score(all_labels, all_preds, average="macro")
 
@@ -434,8 +395,8 @@ def parse_args():
     parser.add_argument("--n_blocks", type=int, default=6)
     parser.add_argument("--n_heads", type=int, default=12)
     parser.add_argument("--d_ff", type=int, default=2048)
-    parser.add_argument("--max_seg", type=int, default=8)
-    parser.add_argument("--max_seq_len", type=int, default=512)
+    parser.add_argument("--max_seq_len", type=int, default=2048,
+                        help="Sequence length (same as pretrain, default 512)")
     parser.add_argument("--dropout", type=float, default=0.1)
 
     parser.add_argument("--freeze_encoder", action="store_true")
@@ -473,37 +434,41 @@ def main():
     print(f"Loading labels from {args.labels_path}")
     labels_df = pd.read_csv(args.labels_path)
 
-    # Create datasets using HAT's FinetuneDataset
-    print("\nCreating datasets (using HAT's FinetuneDataset)...")
-    train_dataset = FinetuneDataset(
+    # Create datasets using FlatFinetuneDataset (consistent with pretrain format)
+    print("\nCreating datasets (using FlatFinetuneDataset)...")
+    is_heart = (args.model == "heart")
+    train_dataset = FlatFinetuneDataset(
         data_path=args.data_path,
         labels_df=labels_df,
         tokenizer=tokenizer,
         task=task,
-        max_seg=args.max_seg,
         max_seq_len=args.max_seq_len,
         split="train",
         seed=args.seed,
+        include_token_types=is_heart,
+        include_visit_ids=is_heart,
     )
-    val_dataset = FinetuneDataset(
+    val_dataset = FlatFinetuneDataset(
         data_path=args.data_path,
         labels_df=labels_df,
         tokenizer=tokenizer,
         task=task,
-        max_seg=args.max_seg,
         max_seq_len=args.max_seq_len,
         split="val",
         seed=args.seed,
+        include_token_types=is_heart,
+        include_visit_ids=is_heart,
     )
-    test_dataset = FinetuneDataset(
+    test_dataset = FlatFinetuneDataset(
         data_path=args.data_path,
         labels_df=labels_df,
         tokenizer=tokenizer,
         task=task,
-        max_seg=args.max_seg,
         max_seq_len=args.max_seq_len,
         split="test",
         seed=args.seed,
+        include_token_types=is_heart,
+        include_visit_ids=is_heart,
     )
 
     num_classes = train_dataset.num_classes
@@ -512,7 +477,8 @@ def main():
 
     # Create model
     print(f"\nLoading pre-trained model from {args.pretrained}")
-    model = create_finetune_model(args.model, args.pretrained, num_classes, args)
+    vocab_size = tokenizer.get_vocab_size()
+    model = create_finetune_model(args.model, args.pretrained, num_classes, vocab_size, args)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {n_params:,}")
@@ -555,7 +521,7 @@ def main():
 
     test_loader = DataLoader(
         test_dataset, batch_size=args.batch_size * 2, shuffle=False,
-        collate_fn=collate_finetune, num_workers=args.num_workers
+        collate_fn=collate_flat_finetune, num_workers=args.num_workers
     )
     test_metrics = trainer.evaluate(test_loader)
 

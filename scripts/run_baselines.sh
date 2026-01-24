@@ -77,10 +77,10 @@ LEARNING_RATE=5e-5
 # Model-specific batch sizes (due to memory differences)
 case "$MODEL" in
     "core-behrt")
-        BATCH_SIZE=32
+        BATCH_SIZE=8  # Reduced for 2048 seq_len
         ;;
     "heart")
-        BATCH_SIZE=16  # Smaller due to edge module memory overhead
+        BATCH_SIZE=4  # Smaller due to edge module memory overhead
         ;;
 esac
 
@@ -98,7 +98,7 @@ echo "  n_heads:        ${N_HEADS}"
 echo "  d_ff:           ${D_FF}"
 echo "  dropout:        ${DROPOUT}"
 echo "  batch_size:     ${BATCH_SIZE}"
-echo "  max_seq_len:    512"
+echo "  max_seq_len:    2048"
 echo "  mask_prob:      ${MASK_PROB}"
 echo "  learning_rate:  ${LEARNING_RATE}"
 echo "  Mixed Precision: AMP enabled"
@@ -117,7 +117,7 @@ python train_baselines.py \
     --n_blocks ${N_BLOCKS} \
     --n_heads ${N_HEADS} \
     --d_ff ${D_FF} \
-    --max_seq_len 512 \
+    --max_seq_len 2048 \
     --mask_prob ${MASK_PROB} \
     --learning_rate ${LEARNING_RATE} \
     --patience 10 \

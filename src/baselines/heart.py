@@ -39,7 +39,7 @@ class HEARTConfig(PretrainedConfig):
         n_blocks: int = 6,
         n_heads: int = 12,
         d_ff: int = 2048,
-        max_seq_len: int = 512,
+        max_seq_len: int = 2048,
         dropout: float = 0.1,
         attention_dropout: float = 0.1,
         pad_token_id: int = 0,
@@ -675,8 +675,15 @@ class HEARTForSequenceClassification(nn.Module):
             input_ids, attention_mask, token_types, visit_ids, time_offsets
         )
 
-        # Use first token ([CLS]) for classification
-        cls_hidden = hidden_states[:, 0, :]
+        # Find the last [CLS] token position for each sample (token_type == 1 is [CLS])
+        # Each visit starts with [CLS], we want the last visit's [CLS] for prediction
+        cls_mask = (token_types == 1) if token_types is not None else (input_ids == 2)  # 2 is [CLS] token id
+        cls_positions = cls_mask.long().cumsum(dim=1) * cls_mask.long()
+        last_cls_idx = cls_positions.argmax(dim=1)
+
+        # Gather last [CLS] hidden states
+        batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)
+        cls_hidden = hidden_states[batch_indices, last_cls_idx, :]
         cls_hidden = self.dropout(cls_hidden)
         logits = self.classifier(cls_hidden)
 
@@ -722,7 +729,14 @@ class HEARTForMultiLabelClassification(nn.Module):
             input_ids, attention_mask, token_types, visit_ids, time_offsets
         )
 
-        cls_hidden = hidden_states[:, 0, :]
+        # Find the last [CLS] token position for each sample (token_type == 1 is [CLS])
+        cls_mask = (token_types == 1) if token_types is not None else (input_ids == 2)
+        cls_positions = cls_mask.long().cumsum(dim=1) * cls_mask.long()
+        last_cls_idx = cls_positions.argmax(dim=1)
+
+        # Gather last [CLS] hidden states
+        batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)
+        cls_hidden = hidden_states[batch_indices, last_cls_idx, :]
         cls_hidden = self.dropout(cls_hidden)
         logits = self.classifier(cls_hidden)
 
@@ -745,7 +759,7 @@ def create_heart_model(
     n_blocks: int = 6,
     n_heads: int = 12,
     d_ff: int = 2048,
-    max_seq_len: int = 512,
+    max_seq_len: int = 2048,
     dropout: float = 0.1,
     n_token_types: int = 8,
     edge_hidden_size: int = 64,

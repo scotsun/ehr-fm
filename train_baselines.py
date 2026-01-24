@@ -75,7 +75,7 @@ def parse_args():
                        help="Number of attention heads")
     parser.add_argument("--d_ff", type=int, default=512,
                        help="Feed-forward dimension")
-    parser.add_argument("--max_seq_len", type=int, default=512,
+    parser.add_argument("--max_seq_len", type=int, default=2048,
                        help="Maximum sequence length")
     parser.add_argument("--dropout", type=float, default=0.1)
 

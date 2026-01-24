@@ -12,7 +12,7 @@ Key differences from HAT:
 
 This implementation aligns with FMBert (ehr-fm/ehr-fm/src/models/bert.py):
 - Uses T2V (Time2Vec) for time encoding
-- Uses set_pos (based on [SEP] token cumsum) for RoPE
+- Uses set_pos (based on [CLS] token cumsum) for RoPE
 """
 
 import torch
@@ -36,12 +36,12 @@ class BEHRTConfig(PretrainedConfig):
         n_blocks: int = 6,
         n_heads: int = 12,
         d_ff: int = 2048,
-        max_seq_len: int = 512,
+        max_seq_len: int = 2048,
         dropout: float = 0.0,
         norm_type: str = "layer",
         ffn_type: str = "swiglu",
         pad_token_id: int = 0,
-        sep_token_id: int = 2,  # [SEP] token id for set_pos calculation
+        cls_token_id: int = 2,  # [CLS] token id for set_pos calculation
         weight_tying: bool = False,
         attn_backend: str = "base",
         t2v_scale: float = 1.0,  # T2V scale factor
@@ -57,7 +57,7 @@ class BEHRTConfig(PretrainedConfig):
         self.dropout = dropout
         self.norm_type = norm_type
         self.ffn_type = ffn_type
-        self.sep_token_id = sep_token_id
+        self.cls_token_id = cls_token_id
         self.weight_tying = weight_tying
         self.attn_backend = attn_backend
         self.t2v_scale = t2v_scale
@@ -154,7 +154,7 @@ class BEHRT(PreTrainedModel):
         t = t.float()
 
         # Compute set position based on [CLS] token (encounter id for RoPE)
-        set_pos = attention_mask * cumsum(input_ids == self.config.sep_token_id, dim=1)
+        set_pos = attention_mask * cumsum(input_ids == self.config.cls_token_id, dim=1)
 
         # Embeddings + T2V time encoding
         h = self.embeddings(input_ids)
@@ -231,8 +231,17 @@ class BEHRTForSequenceClassification(nn.Module):
         # Encode
         hidden_states = self.encoder.encode(input_ids, attention_mask, t)
 
-        # Use [CLS] token (first token) for classification
-        cls_hidden = hidden_states[:, 0, :]  # (batch, d_model)
+        # Find the last [CLS] token position for each sample
+        # Each visit starts with [CLS], we want the last visit's [CLS] for prediction
+        cls_mask = (input_ids == self.config.cls_token_id)  # (batch, seq_len)
+        # Get the last [CLS] position by finding the highest index with [CLS]
+        # Use cumsum to count [CLS] tokens, then find max position
+        cls_positions = cls_mask.long().cumsum(dim=1) * cls_mask.long()  # positions: 1, 2, 3, ...
+        last_cls_idx = cls_positions.argmax(dim=1)  # index of last [CLS]
+
+        # Gather last [CLS] hidden states
+        batch_indices = torch.arange(hidden_states.size(0), device=hidden_states.device)
+        cls_hidden = hidden_states[batch_indices, last_cls_idx, :]  # (batch, d_model)
         cls_hidden = self.dropout(cls_hidden)
 
         # Classify
@@ -280,7 +289,7 @@ def create_behrt_model(
     n_blocks: int = 6,
     n_heads: int = 12,
     d_ff: int = 2048,
-    max_seq_len: int = 512,
+    max_seq_len: int = 2048,
     dropout: float = 0.0,
     t2v_scale: float = 1.0,
     **kwargs,

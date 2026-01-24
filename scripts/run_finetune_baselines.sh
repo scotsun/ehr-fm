@@ -85,22 +85,26 @@ D_FF=2048
 
 # Training hyperparameters
 LEARNING_RATE=1e-5
-BATCH_SIZE=8
 EPOCHS=30
 WARMUP_RATIO=0.1
 PATIENCE=5
-MAX_SEG=8
-MAX_SEQ_LEN=512
+# Must match pretrain format: FlatEHRDataset uses (max_seq_len,) = (2048,)
+MAX_SEQ_LEN=2048
 
-# Select pretrained checkpoint based on model
+# Select pretrained checkpoint and batch size based on model
+# With flat 512-token format (matching pretrain), we can use larger batches
 case "$MODEL" in
     "core-behrt")
         PRETRAINED=$CORE_BEHRT_PRETRAINED
         TOKENIZER_PATH=$CORE_BEHRT_TOKENIZER
+        BATCH_SIZE=8   # Reduced for 2048 seq_len
+        GRAD_ACCUM=4   # Effective batch size = 8 × 4 = 32
         ;;
     "heart")
         PRETRAINED=$HEART_PRETRAINED
         TOKENIZER_PATH=$HEART_TOKENIZER
+        BATCH_SIZE=2   # EdgeModule O(B×L×D²) needs very small batch for L=2048
+        GRAD_ACCUM=16  # Effective batch size = 2 × 16 = 32
         ;;
 esac
 
@@ -119,10 +123,10 @@ echo "  n_blocks:      $N_BLOCKS"
 echo "  n_heads:       $N_HEADS"
 echo "  d_ff:          $D_FF"
 echo "  batch_size:    $BATCH_SIZE"
+echo "  grad_accum:    $GRAD_ACCUM (effective: $((BATCH_SIZE * GRAD_ACCUM)))"
 echo "  learning_rate: $LEARNING_RATE"
 echo "  epochs:        $EPOCHS"
 echo "  patience:      $PATIENCE"
-echo "  max_seg:       $MAX_SEG"
 echo "  max_seq_len:   $MAX_SEQ_LEN"
 echo "=========================================="
 echo ""
@@ -145,8 +149,8 @@ python finetune_baselines.py \
     --learning_rate $LEARNING_RATE \
     --warmup_ratio $WARMUP_RATIO \
     --patience $PATIENCE \
-    --max_seg $MAX_SEG \
     --max_seq_len $MAX_SEQ_LEN \
+    --gradient_accumulation_steps $GRAD_ACCUM \
     --use_amp
 
 echo ""
