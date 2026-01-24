@@ -75,7 +75,6 @@ D_FF=2048
 WINDOW_SIZE=50
 STRIDE=30
 BATCH_SIZE=16  # Smaller due to hierarchical model memory
-DROPOUT=0.0
 LEARNING_RATE=5e-5
 
 # Display GPU info
@@ -95,7 +94,6 @@ echo "  d_ff:           ${D_FF}"
 echo "  window_size:    ${WINDOW_SIZE}"
 echo "  stride:         ${STRIDE}"
 echo "  batch_size:     ${BATCH_SIZE}"
-echo "  dropout:        ${DROPOUT}"
 echo "  learning_rate:  ${LEARNING_RATE}"
 echo "  Mixed Precision: AMP enabled"
 echo "  Output:         ${OUTPUT_DIR}"
@@ -138,7 +136,6 @@ python train_hi_behrt.py \
     --d_ff ${D_FF} \
     --window_size ${WINDOW_SIZE} \
     --stride ${STRIDE} \
-    --dropout ${DROPOUT} \
     --learning_rate ${LEARNING_RATE} \
     --patience 10 \
     --use_amp

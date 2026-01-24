@@ -7,7 +7,7 @@
 #SBATCH --gres=gpu:h200:1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=36G
-#SBATCH --time=24:00:00
+#SBATCH --time=72:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=hg176@duke.edu
 
@@ -87,7 +87,8 @@ BATCH_SIZE=32
 EPOCHS=30
 WARMUP_RATIO=0.1
 PATIENCE=5
-DROPOUT=0.1  # For classifier head
+MAX_SEG=8
+MAX_SEQ_LEN=512
 
 # Select pretrained checkpoint based on model
 case "$MODEL" in
@@ -118,7 +119,8 @@ echo "  batch_size:    $BATCH_SIZE"
 echo "  learning_rate: $LEARNING_RATE"
 echo "  epochs:        $EPOCHS"
 echo "  patience:      $PATIENCE"
-echo "  dropout:       $DROPOUT"
+echo "  max_seg:       $MAX_SEG"
+echo "  max_seq_len:   $MAX_SEQ_LEN"
 echo "=========================================="
 echo ""
 
@@ -140,7 +142,8 @@ python finetune_baselines.py \
     --learning_rate $LEARNING_RATE \
     --warmup_ratio $WARMUP_RATIO \
     --patience $PATIENCE \
-    --dropout $DROPOUT \
+    --max_seg $MAX_SEG \
+    --max_seq_len $MAX_SEQ_LEN \
     --use_amp
 
 echo ""
