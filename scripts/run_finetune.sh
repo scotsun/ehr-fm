@@ -5,8 +5,8 @@
 #SBATCH --partition=h200ea
 #SBATCH --account=h200ea
 #SBATCH --gres=gpu:h200:1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --cpus-per-task=10
+#SBATCH --mem=36G
 #SBATCH --time=72:00:00
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=hg176@duke.edu

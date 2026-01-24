@@ -74,7 +74,7 @@ N_HEADS=12
 D_FF=2048
 WINDOW_SIZE=50
 STRIDE=30
-BATCH_SIZE=16  # Smaller due to hierarchical model memory
+BATCH_SIZE=8
 LEARNING_RATE=5e-5
 
 # Display GPU info

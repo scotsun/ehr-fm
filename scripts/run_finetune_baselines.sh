@@ -83,7 +83,7 @@ D_FF=2048
 
 # Training hyperparameters
 LEARNING_RATE=1e-5
-BATCH_SIZE=32
+BATCH_SIZE=8
 EPOCHS=30
 WARMUP_RATIO=0.1
 PATIENCE=5
@@ -97,7 +97,6 @@ case "$MODEL" in
         ;;
     "heart")
         PRETRAINED=$HEART_PRETRAINED
-        BATCH_SIZE=16  # Smaller due to memory
         ;;
 esac
 
