@@ -456,8 +456,44 @@ def main():
     print(f"  Hi-BEHRT End-to-End Training on {args.task}")
     print("=" * 60)
 
-    # Load tokenizer
-    tokenizer = Tokenizer.from_file(args.tokenizer_path)
+    # Load or train tokenizer
+    tokenizer_path = Path(args.tokenizer_path)
+    if tokenizer_path.exists():
+        print(f"Loading tokenizer from {args.tokenizer_path}")
+        tokenizer = Tokenizer.from_file(args.tokenizer_path)
+    else:
+        print(f"Tokenizer not found at {args.tokenizer_path}, training new tokenizer...")
+        from src.tokenizer import get_tokenizer
+        import pyarrow.parquet as pq
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Sample patients for tokenizer training
+        data_path = Path(args.data_path)
+        patient_dirs = sorted(data_path.glob("subject_id=*"))[:5000]
+
+        def read_patient(d):
+            try:
+                return pq.read_table(d).to_pandas()
+            except Exception:
+                return None
+
+        dfs = []
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [executor.submit(read_patient, d) for d in patient_dirs]
+            for f in tqdm(as_completed(futures), total=len(futures), desc="Loading tokenizer data"):
+                result = f.result()
+                if result is not None:
+                    dfs.append(result)
+
+        df_sample = pd.concat(dfs, ignore_index=True)
+        tokenizer = get_tokenizer([df_sample], {
+            "tokenizer_path": str(output_dir / "tokenizer.json"),
+            "patient_id_col": "subject_id",
+            "token_col": "code",
+            "min_frequency": 5,
+        })
+        print(f"Tokenizer trained and saved to {output_dir / 'tokenizer.json'}")
+
     args.vocab_size = tokenizer.get_vocab_size()
     print(f"Vocab size: {args.vocab_size}")
 
