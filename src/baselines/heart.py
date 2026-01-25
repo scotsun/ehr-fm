@@ -252,9 +252,11 @@ class MultiHeadEdgeAttention(nn.Module):
 
         if mask is not None:
             mask = mask.unsqueeze(1)  # (B, 1, L, L)
-            scores = scores.masked_fill(mask, float('-inf'))
+            # Use -1e4 instead of -inf to avoid FP16 overflow in AMP
+            scores = scores.masked_fill(mask, -1e4)
 
-        attn = self.dropout(F.softmax(scores, dim=-1))
+        # Compute softmax in FP32 for numerical stability
+        attn = self.dropout(F.softmax(scores.float(), dim=-1).to(scores.dtype))
 
         # Aggregate value embeddings
         context = torch.matmul(attn, v)  # (B, H, L, D_k)
@@ -361,9 +363,11 @@ class EncounterLevelAttention(nn.Module):
         # Mask invalid visits
         if visit_mask is not None:
             attn_mask = ~visit_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, V)
-            scores = scores.masked_fill(attn_mask, float('-inf'))
+            # Use -1e4 instead of -inf to avoid FP16 overflow in AMP
+            scores = scores.masked_fill(attn_mask, -1e4)
 
-        attn = self.dropout(F.softmax(scores, dim=-1))
+        # Compute softmax in FP32 for numerical stability
+        attn = self.dropout(F.softmax(scores.float(), dim=-1).to(scores.dtype))
         context = torch.matmul(attn, v)
 
         # Reshape and project
@@ -405,9 +409,11 @@ class TransformerBlock(nn.Module):
 
         scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.d_k)
         if mask is not None:
-            scores = scores.masked_fill(mask.unsqueeze(1), float('-inf'))
+            # Use -1e4 instead of -inf to avoid FP16 overflow in AMP
+            scores = scores.masked_fill(mask.unsqueeze(1), -1e4)
 
-        attn = self.dropout(F.softmax(scores, dim=-1))
+        # Compute softmax in FP32 for numerical stability
+        attn = self.dropout(F.softmax(scores.float(), dim=-1).to(scores.dtype))
         context = torch.matmul(attn, v)
         context = context.transpose(1, 2).contiguous().view(batch_size, -1, self.n_heads * self.d_k)
 

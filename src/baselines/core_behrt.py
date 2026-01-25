@@ -43,7 +43,7 @@ class BEHRTConfig(PretrainedConfig):
         pad_token_id: int = 0,
         cls_token_id: int = 2,  # [CLS] token id for set_pos calculation
         weight_tying: bool = False,
-        attn_backend: str = "base",
+        attn_backend: str = "efficient_attention",
         t2v_scale: float = 1.0,  # T2V scale factor
         **kwargs,
     ):

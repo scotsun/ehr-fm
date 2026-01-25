@@ -24,10 +24,15 @@ class MultiHeadAttentionBlock(nn.Module):
             self.rope_q = RoPE(self.d_k)
             self.rope_k = RoPE(self.d_k)
         match attn_backend:
+            case "efficient_attention":
+                self._attn_func = self.efficient_attention
             case "base":
                 self._attn_func = self.attention
             case "flash_attention":
                 self._attn_func = self.flash_attention
+            case _:
+                raise ValueError(f"Unknown attn_backend: {attn_backend}. "
+                               f"Choose from: efficient_attention, base, flash_attention")
 
     @staticmethod
     def attention(query, key, value, mask):
@@ -63,6 +68,25 @@ class MultiHeadAttentionBlock(nn.Module):
         with sdpa_kernel([SDPBackend.FLASH_ATTENTION]):
             mh_out = F.scaled_dot_product_attention(
                 query, key, value, attn_mask=mask, dropout_p=0.0, is_causal=False
+            )
+        return mh_out
+
+    @staticmethod
+    def efficient_attention(query, key, value, mask):
+        """
+        Memory-efficient attention using xFormers backend.
+        Reference: ehr-fm/src/layers/transformer.py (teammate's implementation)
+        """
+        # Convert mask from (batch, seq_len) with 1=valid, 0=pad
+        # to 2D attention mask for SDPA: (batch, 1, seq_len, seq_len)
+        # SDPA expects: 0 = attend, large negative = don't attend
+        attn_mask = einsum("bq,bk -> bqk", mask, mask)[:, None, :, :]
+        # Convert to additive mask: 1*1=1 -> 0, 0*0=0 -> -1e4
+        attn_mask = (1.0 - attn_mask) * -1e4
+
+        with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
+            mh_out = F.scaled_dot_product_attention(
+                query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False
             )
         return mh_out
 
