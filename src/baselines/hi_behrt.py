@@ -1,5 +1,5 @@
 """
-Hi-BEHRT Baseline Model
+Hi-BEHRT Baseline Model with BYOL Pre-training
 
 Hierarchical BERT for EHR: two-level Transformer architecture for processing long EHR sequences.
 
@@ -7,13 +7,15 @@ Reference: Hi-BEHRT: Hierarchical Transformer-based model for accurate predictio
 events using multimodal longitudinal electronic health records (Li et al., 2021)
 
 Core Architecture:
-1. Embedding Layer: Token + Age + Segment + Position (sinusoidal)
+1. Embedding Layer: Token + Time (T2V) + Segment + Position (sinusoidal)
 2. Local Feature Extractor: Transformer operating on segments within sliding windows
 3. Feature Aggregator: Transformer globally summarizing segment representations
 
-Key differences from HAT:
-- HAT: hierarchical attention with explicit visit/encounter structure
-- Hi-BEHRT: sliding window segmentation with local-to-global two-stage Transformer
+BYOL Pre-training:
+- Bootstrap Your Own Latent (BYOL) self-supervised learning
+- Dual network structure: online network + target network (EMA updated)
+- Projector + Predictor MLP heads
+- Cosine similarity loss between online predictions and target projections
 
 Paper hyperparameters:
 - Hidden size: 150
@@ -26,11 +28,13 @@ Paper hyperparameters:
 """
 
 import math
+import copy
+import random
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -47,10 +51,14 @@ class HiBEHRTConfig:
     dropout: float = 0.2
     attention_dropout: float = 0.3
     pad_token_id: int = 0
-    age_vocab_size: int = 200  # max age in years
+    t2v_dim: int = 64  # Time2Vec output dimension (replaces age embedding)
     seg_vocab_size: int = 2  # alternating 0/1 for segment embedding
     initializer_range: float = 0.02
     hidden_act: str = "gelu"
+    # BYOL specific
+    projector_hidden_size: int = 256
+    projector_output_size: int = 128
+    byol_momentum: float = 0.99  # EMA momentum for target network
 
 
 def get_activation(name: str):
@@ -65,6 +73,53 @@ def get_activation(name: str):
         raise ValueError(f"Unknown activation: {name}")
 
 
+# ============================================================================
+# Time2Vec - Replaces Age Embedding
+# ============================================================================
+
+class Time2Vec(nn.Module):
+    """
+    Time2Vec: Learnable time encoding.
+    From: Time2Vec: Learning Vector Representation of Time (Kazemi et al., 2019)
+
+    Used to encode cumulative time (cumsum of days_since_prior_admission)
+    as a replacement for age embedding in original Hi-BEHRT.
+    """
+
+    def __init__(self, d_out: int):
+        super().__init__()
+        self.d_out = d_out
+        # Linear component
+        self.w0 = nn.Parameter(torch.randn(1) * 0.01)
+        self.b0 = nn.Parameter(torch.zeros(1))
+        # Periodic components
+        self.w = nn.Parameter(torch.randn(d_out - 1) * 0.01)
+        self.b = nn.Parameter(torch.zeros(d_out - 1))
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            t: (..., ) or (..., 1) - time values (continuous, e.g., days)
+        Returns:
+            (..., d_out) - time embeddings
+        """
+        original_shape = t.shape
+        if t.dim() >= 1 and t.shape[-1] != 1:
+            t = t.unsqueeze(-1)  # (..., 1)
+
+        # Linear component: w0 * t + b0
+        v0 = self.w0 * t + self.b0  # (..., 1)
+
+        # Periodic components: sin(w * t + b)
+        v = torch.sin(self.w * t + self.b)  # (..., d_out-1)
+
+        return torch.cat([v0, v], dim=-1)  # (..., d_out)
+
+
+# ============================================================================
+# Position Embedding
+# ============================================================================
+
 class SinusoidalPositionEmbedding(nn.Module):
     """Sinusoidal position embedding (fixed, not learned)."""
 
@@ -77,64 +132,26 @@ class SinusoidalPositionEmbedding(nn.Module):
 
         pe = torch.zeros(max_len, d_model)
         pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+        if d_model % 2 == 0:
+            pe[:, 1::2] = torch.cos(position * div_term)
+        else:
+            pe[:, 1::2] = torch.cos(position * div_term[:-1])
 
         self.register_buffer('pe', pe)
 
     def forward(self, position_ids):
         """
         Args:
-            position_ids: (batch, ..., seq_len) position indices
-
+            position_ids: (..., seq_len) position indices
         Returns:
-            position_embeddings: (batch, ..., seq_len, d_model)
+            position_embeddings: (..., seq_len, d_model)
         """
         return self.pe[position_ids]
 
 
-class HiBEHRTEmbedding(nn.Module):
-    """
-    Hi-BEHRT Embedding Layer.
-
-    Combines: Token + Age + Segment + Position embeddings
-    Position uses sinusoidal encoding (as in original paper).
-    """
-
-    def __init__(self, config: HiBEHRTConfig):
-        super().__init__()
-
-        self.word_embeddings = nn.Embedding(
-            config.vocab_size, config.d_model, padding_idx=config.pad_token_id
-        )
-        self.age_embeddings = nn.Embedding(config.age_vocab_size, config.d_model)
-        self.segment_embeddings = nn.Embedding(config.seg_vocab_size, config.d_model)
-        self.position_embeddings = SinusoidalPositionEmbedding(config.max_seq_len, config.d_model)
-
-        self.layer_norm = nn.LayerNorm(config.d_model, eps=1e-12)
-        self.dropout = nn.Dropout(config.dropout)
-
-    def forward(self, token_ids, age_ids, segment_ids, position_ids):
-        """
-        Args:
-            token_ids: (batch, num_segments, seq_len)
-            age_ids: (batch, num_segments, seq_len)
-            segment_ids: (batch, num_segments, seq_len)
-            position_ids: (batch, num_segments, seq_len)
-
-        Returns:
-            embeddings: (batch, num_segments, seq_len, d_model)
-        """
-        word_emb = self.word_embeddings(token_ids)
-        age_emb = self.age_embeddings(age_ids)
-        seg_emb = self.segment_embeddings(segment_ids)
-        pos_emb = self.position_embeddings(position_ids)
-
-        embeddings = word_emb + age_emb + seg_emb + pos_emb
-        embeddings = self.layer_norm(embeddings)
-        embeddings = self.dropout(embeddings)
-
-        return embeddings
-
+# ============================================================================
+# Attention Components
+# ============================================================================
 
 class HiBEHRTSelfAttention(nn.Module):
     """
@@ -197,8 +214,8 @@ class HiBEHRTSelfAttention(nn.Module):
         scores = scores / math.sqrt(self.head_dim)
         scores = scores + attention_mask
 
-        # Attention probs
-        probs = F.softmax(scores, dim=-1)
+        # Attention probs - compute in FP32 for numerical stability
+        probs = F.softmax(scores.float(), dim=-1).to(scores.dtype)
         probs = self.dropout(probs)
 
         # Context
@@ -343,293 +360,39 @@ class HiBEHRTPooler(nn.Module):
         return pooled
 
 
-class LocalFeatureExtractor(nn.Module):
-    """
-    Local Feature Extractor: Processes segments with sliding window.
+# ============================================================================
+# BYOL Components
+# ============================================================================
 
-    Applies Transformer within each segment and pools to get segment representation.
-    """
+class MLP(nn.Module):
+    """MLP for BYOL Projector and Predictor."""
 
-    def __init__(self, config: HiBEHRTConfig):
+    def __init__(self, input_size: int, hidden_size: int, output_size: int):
         super().__init__()
-        self.encoder = HiBEHRTEncoder(config, config.n_extractor_layers)
-        self.pooler = HiBEHRTPooler(config)
-
-    def forward(self, hidden_states, attention_mask):
-        """
-        Args:
-            hidden_states: (batch, num_segments, seq_len, d_model)
-            attention_mask: (batch, num_segments, seq_len) - 1 for valid, 0 for padding
-
-        Returns:
-            segment_repr: (batch, num_segments, d_model)
-        """
-        # Create attention mask: (batch, num_segments, 1, 1, seq_len)
-        mask = attention_mask.to(dtype=hidden_states.dtype)
-        extended_mask = mask.unsqueeze(2).unsqueeze(3)
-        extended_mask = (1.0 - extended_mask) * -10000.0
-
-        # Encode within each segment
-        encoded = self.encoder(hidden_states, extended_mask, encounter=True)
-
-        # Pool: get segment representation from first token
-        segment_repr = self.pooler(encoded, encounter=True)
-
-        return segment_repr
-
-
-class FeatureAggregator(nn.Module):
-    """
-    Feature Aggregator: Globally summarizes segment representations.
-
-    Applies Transformer across all segment representations.
-    """
-
-    def __init__(self, config: HiBEHRTConfig):
-        super().__init__()
-        self.encoder = HiBEHRTEncoder(config, config.n_aggregator_layers)
-
-    def forward(self, hidden_states, attention_mask):
-        """
-        Args:
-            hidden_states: (batch, num_segments, d_model)
-            attention_mask: (batch, num_segments) - 1 for valid, 0 for padding
-
-        Returns:
-            aggregated: (batch, num_segments, d_model)
-        """
-        # Create attention mask: (batch, 1, 1, num_segments)
-        mask = attention_mask.to(dtype=hidden_states.dtype)
-        extended_mask = mask.unsqueeze(1).unsqueeze(2)
-        extended_mask = (1.0 - extended_mask) * -10000.0
-
-        # Aggregate across segments
-        aggregated = self.encoder(hidden_states, extended_mask, encounter=False)
-
-        return aggregated
-
-
-class HiBEHRT(nn.Module):
-    """
-    Hi-BEHRT: Hierarchical BERT for Electronic Health Records.
-
-    Two-level Transformer architecture:
-    1. Local Feature Extractor: Processes segments (sliding windows)
-    2. Feature Aggregator: Globally summarizes segment representations
-
-    Input shape: (batch, num_segments, seq_len)
-    Output shape: (batch, num_segments, d_model)
-    """
-
-    def __init__(self, config: HiBEHRTConfig):
-        super().__init__()
-        self.config = config
-
-        # Embedding layer
-        self.embedding = HiBEHRTEmbedding(config)
-
-        # Local feature extractor (within segments)
-        self.extractor = LocalFeatureExtractor(config)
-
-        # Feature aggregator (across segments)
-        self.aggregator = FeatureAggregator(config)
-
-        # Final pooler
-        self.pooler = HiBEHRTPooler(config)
-
-        # Initialize weights
-        self.apply(self._init_weights)
-
-    def _init_weights(self, module):
-        """Initialize weights."""
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.bias.data.zero_()
-            module.weight.data.fill_(1.0)
-
-    def forward(
-        self,
-        token_ids,
-        age_ids,
-        segment_ids,
-        position_ids,
-        local_attention_mask,
-        global_attention_mask,
-    ):
-        """
-        Args:
-            token_ids: (batch, num_segments, seq_len) token indices
-            age_ids: (batch, num_segments, seq_len) age indices
-            segment_ids: (batch, num_segments, seq_len) segment indices (alternating 0/1)
-            position_ids: (batch, num_segments, seq_len) position indices within segment
-            local_attention_mask: (batch, num_segments, seq_len) mask for local extractor
-            global_attention_mask: (batch, num_segments) mask for aggregator
-
-        Returns:
-            aggregated_output: (batch, num_segments, d_model)
-        """
-        # Embedding
-        embedded = self.embedding(token_ids, age_ids, segment_ids, position_ids)
-
-        # Local feature extraction (within segments)
-        segment_repr = self.extractor(embedded, local_attention_mask)
-
-        # Global aggregation (across segments)
-        aggregated = self.aggregator(segment_repr, global_attention_mask)
-
-        return aggregated
-
-    def get_pooled_output(
-        self,
-        token_ids,
-        age_ids,
-        segment_ids,
-        position_ids,
-        local_attention_mask,
-        global_attention_mask,
-    ):
-        """
-        Get pooled output for classification.
-
-        Returns:
-            pooled: (batch, d_model)
-        """
-        aggregated = self.forward(
-            token_ids, age_ids, segment_ids, position_ids,
-            local_attention_mask, global_attention_mask
-        )
-        pooled = self.pooler(aggregated, encounter=False)
-        return pooled
-
-
-class HiBEHRTForSequenceClassification(nn.Module):
-    """
-    Hi-BEHRT with classification head for downstream tasks.
-
-    Uses pooled output (first segment) for classification.
-    """
-
-    def __init__(
-        self,
-        config: HiBEHRTConfig,
-        num_classes: int,
-        dropout: float = 0.1,
-        freeze_encoder: bool = False,
-    ):
-        super().__init__()
-        self.config = config
-        self.num_classes = num_classes
-
-        # Hi-BEHRT encoder
-        self.encoder = HiBEHRT(config)
-
-        # Classification head
-        self.dropout = nn.Dropout(dropout)
-        self.classifier = nn.Linear(config.d_model, num_classes)
-
-        if freeze_encoder:
-            self.freeze_encoder()
-
-    def freeze_encoder(self):
-        """Freeze encoder parameters."""
-        for param in self.encoder.parameters():
-            param.requires_grad = False
-
-    def unfreeze_encoder(self):
-        """Unfreeze encoder parameters."""
-        for param in self.encoder.parameters():
-            param.requires_grad = True
-
-    def forward(
-        self,
-        token_ids,
-        age_ids,
-        segment_ids,
-        position_ids,
-        local_attention_mask,
-        global_attention_mask,
-        labels=None,
-    ):
-        """
-        Args:
-            token_ids: (batch, num_segments, seq_len)
-            age_ids: (batch, num_segments, seq_len)
-            segment_ids: (batch, num_segments, seq_len)
-            position_ids: (batch, num_segments, seq_len)
-            local_attention_mask: (batch, num_segments, seq_len)
-            global_attention_mask: (batch, num_segments)
-            labels: (batch,) optional
-
-        Returns:
-            dict with 'logits' and optionally 'loss'
-        """
-        # Get pooled output
-        pooled = self.encoder.get_pooled_output(
-            token_ids, age_ids, segment_ids, position_ids,
-            local_attention_mask, global_attention_mask
+        self.net = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
+            nn.LayerNorm(hidden_size, eps=1e-12),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_size, output_size),
         )
 
-        # Classify
-        pooled = self.dropout(pooled)
-        logits = self.classifier(pooled)
-
-        output = {"logits": logits, "pooled_output": pooled}
-
-        if labels is not None:
-            if self.num_classes == 1:
-                # Binary classification
-                loss = F.binary_cross_entropy_with_logits(logits.squeeze(-1), labels.float())
-            else:
-                # Multi-class classification
-                loss = F.cross_entropy(logits, labels)
-            output["loss"] = loss
-
-        return output
-
-    def load_pretrained(self, checkpoint_path: str, strict: bool = True):
-        """Load pre-trained Hi-BEHRT weights."""
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-
-        if 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-        elif 'state_dict' in checkpoint:
-            state_dict = checkpoint['state_dict']
-        else:
-            state_dict = checkpoint
-
-        # Load encoder weights
-        encoder_state_dict = {}
-        for k, v in state_dict.items():
-            if k.startswith('encoder.'):
-                encoder_state_dict[k] = v
-            else:
-                encoder_state_dict[f'encoder.{k}'] = v
-
-        missing, unexpected = self.load_state_dict(encoder_state_dict, strict=False)
-        missing = [k for k in missing if not k.startswith('classifier.')]
-
-        if missing and strict:
-            raise RuntimeError(f"Missing keys: {missing}")
-
-        return missing, unexpected
+    def forward(self, x):
+        return self.net(x)
 
 
-class HiBEHRTSimple(nn.Module):
+# ============================================================================
+# Hi-BEHRT Encoder (shared by BYOL and Classification)
+# ============================================================================
+
+class HiBEHRTEncoder_Full(nn.Module):
     """
-    Simplified Hi-BEHRT that works with flat input format.
+    Full Hi-BEHRT encoder with sliding window segmentation.
 
-    This version internally handles the segmentation using sliding window,
-    making it easier to use with existing data pipelines.
+    This is the SHARED encoder used by both:
+    - HiBEHRTForBYOL (pretraining)
+    - HiBEHRTForClassification (finetuning)
 
-    Input: flat sequence (batch, total_seq_len)
-    Internally: segments using sliding window, then applies hierarchical processing
+    This ensures weights can be correctly loaded from BYOL to classification.
     """
 
     def __init__(self, config: HiBEHRTConfig, window_size: int = 50, stride: int = 30):
@@ -638,13 +401,21 @@ class HiBEHRTSimple(nn.Module):
         self.window_size = window_size
         self.stride = stride
 
-        # Core Hi-BEHRT components
+        # Embeddings
         self.word_embeddings = nn.Embedding(
             config.vocab_size, config.d_model, padding_idx=config.pad_token_id
         )
         self.position_embeddings = SinusoidalPositionEmbedding(window_size, config.d_model)
-        self.layer_norm = nn.LayerNorm(config.d_model, eps=1e-12)
-        self.dropout = nn.Dropout(config.dropout)
+
+        # Time2Vec for time encoding (replaces age embedding)
+        self.time2vec = Time2Vec(config.t2v_dim)
+        self.time_proj = nn.Linear(config.t2v_dim, config.d_model)
+
+        # Segment embedding (alternating 0/1)
+        self.segment_embeddings = nn.Embedding(config.seg_vocab_size, config.d_model)
+
+        self.embed_layer_norm = nn.LayerNorm(config.d_model, eps=1e-12)
+        self.embed_dropout = nn.Dropout(config.dropout)
 
         # Local feature extractor
         self.extractor = HiBEHRTEncoder(config, config.n_extractor_layers)
@@ -653,36 +424,20 @@ class HiBEHRTSimple(nn.Module):
         # Feature aggregator
         self.aggregator = HiBEHRTEncoder(config, config.n_aggregator_layers)
 
-        # Initialize weights
-        self._init_weights()
-
-    def _init_weights(self):
-        """Initialize weights."""
-        for module in self.modules():
-            if isinstance(module, nn.Linear):
-                module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-                if module.bias is not None:
-                    module.bias.data.zero_()
-            elif isinstance(module, nn.Embedding):
-                module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
-                if module.padding_idx is not None:
-                    module.weight.data[module.padding_idx].zero_()
-            elif isinstance(module, nn.LayerNorm):
-                module.bias.data.zero_()
-                module.weight.data.fill_(1.0)
-
-    def segment_sequence(self, input_ids, attention_mask):
+    def segment_sequence(self, input_ids, attention_mask, time_values=None):
         """
         Segment flat sequence using sliding window.
 
         Args:
             input_ids: (batch, total_seq_len)
             attention_mask: (batch, total_seq_len)
+            time_values: (batch, total_seq_len) optional time values
 
         Returns:
             segmented_ids: (batch, num_segments, window_size)
             segmented_mask: (batch, num_segments, window_size)
             segment_mask: (batch, num_segments) - which segments are valid
+            segmented_time: (batch, num_segments, window_size) if time_values provided
         """
         batch_size, total_len = input_ids.shape
         device = input_ids.device
@@ -703,6 +458,11 @@ class HiBEHRTSimple(nn.Module):
         segmented_mask = torch.zeros(batch_size, num_segments, self.window_size, dtype=torch.long, device=device)
         segment_mask = torch.zeros(batch_size, num_segments, dtype=torch.long, device=device)
 
+        if time_values is not None:
+            segmented_time = torch.zeros(batch_size, num_segments, self.window_size, dtype=torch.float, device=device)
+        else:
+            segmented_time = None
+
         for i in range(num_segments):
             start = i * self.stride
             end = min(start + self.window_size, total_len)
@@ -711,34 +471,52 @@ class HiBEHRTSimple(nn.Module):
             segmented_ids[:, i, :length] = input_ids[:, start:end]
             segmented_mask[:, i, :length] = attention_mask[:, start:end]
 
+            if time_values is not None:
+                segmented_time[:, i, :length] = time_values[:, start:end]
+
             # Mark segment as valid if any token is non-padding
             segment_mask[:, i] = (segmented_mask[:, i].sum(dim=-1) > 0).long()
 
-        return segmented_ids, segmented_mask, segment_mask
+        return segmented_ids, segmented_mask, segment_mask, segmented_time
 
-    def forward(self, input_ids, attention_mask):
+    def forward(self, input_ids, attention_mask, time_values=None):
         """
         Args:
             input_ids: (batch, total_seq_len) flat token indices
             attention_mask: (batch, total_seq_len) attention mask
+            time_values: (batch, total_seq_len) optional cumulative time values
 
         Returns:
-            pooled_output: (batch, d_model)
-            aggregated: (batch, num_segments, d_model)
+            aggregated: (batch, num_segments, d_model) - aggregated segment representations
+            global_mask: (batch, num_segments) - valid segment mask
         """
         # Segment the sequence
-        segmented_ids, local_mask, global_mask = self.segment_sequence(input_ids, attention_mask)
+        segmented_ids, local_mask, global_mask, segmented_time = self.segment_sequence(
+            input_ids, attention_mask, time_values
+        )
         batch_size, num_segments, seq_len = segmented_ids.shape
 
         # Create position ids (0 to window_size-1 for each segment)
         position_ids = torch.arange(seq_len, device=input_ids.device).unsqueeze(0).unsqueeze(0)
         position_ids = position_ids.expand(batch_size, num_segments, -1)
 
+        # Create segment ids (alternating 0/1)
+        segment_ids = torch.zeros_like(segmented_ids)
+        segment_ids[:, 1::2, :] = 1  # Odd segments get 1
+
         # Embedding
         embedded = self.word_embeddings(segmented_ids)
         embedded = embedded + self.position_embeddings(position_ids)
-        embedded = self.layer_norm(embedded)
-        embedded = self.dropout(embedded)
+        embedded = embedded + self.segment_embeddings(segment_ids)
+
+        # Add time embedding if available
+        if segmented_time is not None:
+            time_emb = self.time2vec(segmented_time.float())
+            time_emb = self.time_proj(time_emb)
+            embedded = embedded + time_emb
+
+        embedded = self.embed_layer_norm(embedded)
+        embedded = self.embed_dropout(embedded)
 
         # Local extraction: create attention mask for local extractor
         local_attn_mask = local_mask.to(dtype=embedded.dtype)
@@ -759,21 +537,190 @@ class HiBEHRTSimple(nn.Module):
         # Aggregate across segments
         aggregated = self.aggregator(segment_repr, global_attn_mask, encounter=False)
 
-        # Pool LAST valid segment for classification (most recent information)
-        # Find the last valid segment for each sample
-        # global_mask: (batch, num_segments) - 1 for valid, 0 for padding
-        last_valid_idx = (global_mask.cumsum(dim=1) * global_mask).argmax(dim=1)  # (batch,)
-        batch_indices = torch.arange(batch_size, device=input_ids.device)
-        pooled = aggregated[batch_indices, last_valid_idx]  # (batch, d_model)
-
-        return pooled, aggregated
+        return aggregated, global_mask
 
 
-class HiBEHRTSimpleForClassification(nn.Module):
+# ============================================================================
+# Hi-BEHRT for BYOL Pre-training
+# ============================================================================
+
+class HiBEHRTForBYOL(nn.Module):
     """
-    Simplified Hi-BEHRT with classification head.
+    Hi-BEHRT with BYOL pre-training support.
 
-    Works with flat input format, internally handles segmentation.
+    BYOL (Bootstrap Your Own Latent) self-supervised learning:
+    - Online network: encoder + projector + predictor
+    - Target network: encoder + projector (EMA updated)
+    - Loss: cosine similarity between online predictions and target projections
+    """
+
+    def __init__(self, config: HiBEHRTConfig, window_size: int = 50, stride: int = 30):
+        super().__init__()
+        self.config = config
+
+        # Online network
+        self.encoder = HiBEHRTEncoder_Full(config, window_size, stride)
+        self.projector = MLP(
+            config.d_model,
+            config.projector_hidden_size,
+            config.projector_output_size,
+        )
+        self.predictor = MLP(
+            config.projector_output_size,
+            config.projector_hidden_size,
+            config.projector_output_size,
+        )
+
+        # Target network (EMA of online encoder + projector)
+        self.target_encoder = copy.deepcopy(self.encoder)
+        self.target_projector = copy.deepcopy(self.projector)
+
+        # Freeze target network
+        for param in self.target_encoder.parameters():
+            param.requires_grad = False
+        for param in self.target_projector.parameters():
+            param.requires_grad = False
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+            elif isinstance(module, nn.Embedding):
+                module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+                if module.padding_idx is not None:
+                    module.weight.data[module.padding_idx].zero_()
+            elif isinstance(module, nn.LayerNorm):
+                module.bias.data.zero_()
+                module.weight.data.fill_(1.0)
+
+    @torch.no_grad()
+    def update_target_network(self, momentum: float = None):
+        """Update target network with EMA of online network."""
+        if momentum is None:
+            momentum = self.config.byol_momentum
+
+        for online_params, target_params in zip(
+            self.encoder.parameters(), self.target_encoder.parameters()
+        ):
+            target_params.data = momentum * target_params.data + (1 - momentum) * online_params.data
+
+        for online_params, target_params in zip(
+            self.projector.parameters(), self.target_projector.parameters()
+        ):
+            target_params.data = momentum * target_params.data + (1 - momentum) * online_params.data
+
+    def forward(
+        self,
+        input_ids,
+        attention_mask,
+        time_values=None,
+        bernoulli_mask=None,
+        apply_mask=False,
+    ):
+        """
+        Forward pass for BYOL training.
+
+        Args:
+            input_ids: (batch, total_seq_len)
+            attention_mask: (batch, total_seq_len)
+            time_values: (batch, total_seq_len)
+            bernoulli_mask: (batch, num_segments) - mask for BYOL augmentation
+            apply_mask: whether to apply masking (for online view)
+
+        Returns:
+            y: (batch, num_segments, d_model) - encoder output
+            z: (batch, num_segments, projector_output_size) - projected
+            h: (batch, num_segments, projector_output_size) - predicted (online only)
+            global_mask: (batch, num_segments) - valid segment mask
+        """
+        # Encode
+        y, global_mask = self.encoder(input_ids, attention_mask, time_values)
+
+        # Apply BYOL masking augmentation
+        if apply_mask and bernoulli_mask is not None:
+            prob = random.random()
+            if prob < 0.85:
+                # 85% of time: mask segment representations to 0
+                mask = bernoulli_mask.unsqueeze(-1).to(y.dtype)  # (batch, num_seg, 1)
+                y = y * mask
+            else:
+                # 15% of time: add random noise to masked segments
+                noise_mask = torch.randn_like(y) * (1 - bernoulli_mask.unsqueeze(-1).to(y.dtype))
+                y = y + noise_mask
+
+        # Project
+        z = self.projector(y)
+
+        # Predict (online network only)
+        h = self.predictor(z)
+
+        return y, z, h, global_mask
+
+    @torch.no_grad()
+    def forward_target(self, input_ids, attention_mask, time_values=None):
+        """Forward pass through target network (no gradient)."""
+        y, global_mask = self.target_encoder(input_ids, attention_mask, time_values)
+        z = self.target_projector(y)
+        return y, z, global_mask
+
+    def byol_loss(self, h_online, z_target, global_attention_mask, bernoulli_mask):
+        """
+        Compute BYOL loss (cosine similarity).
+
+        Args:
+            h_online: (batch, num_segments, d) - online predictions
+            z_target: (batch, num_segments, d) - target projections
+            global_attention_mask: (batch, num_segments) - valid segment mask
+            bernoulli_mask: (batch, num_segments) - which segments were masked
+
+        Returns:
+            loss: scalar
+        """
+        # Normalize
+        h_online = F.normalize(h_online, dim=-1)
+        z_target = F.normalize(z_target, dim=-1)
+
+        # Cosine similarity -> loss
+        sim = (h_online * z_target).sum(dim=-1)  # (batch, num_segments)
+        loss = 2 - 2 * sim
+
+        # Mask padding
+        loss = loss * global_attention_mask.to(loss.dtype)
+
+        # Only compute loss on masked segments (BYOL augmentation)
+        # bernoulli_mask: 1 = keep, 0 = masked -> we want loss on masked (inverted)
+        loss = loss * (1 - bernoulli_mask.to(loss.dtype))
+
+        # Average over valid positions
+        num_masked = ((1 - bernoulli_mask) * global_attention_mask).sum()
+        if num_masked > 0:
+            loss = loss.sum() / num_masked
+        else:
+            loss = loss.sum() * 0  # No loss if nothing masked
+
+        return loss
+
+    def get_encoder_state_dict(self):
+        """Get encoder state dict for loading into classification model."""
+        return self.encoder.state_dict()
+
+
+# ============================================================================
+# Hi-BEHRT for Classification (with BYOL pretrained weights)
+# ============================================================================
+
+class HiBEHRTForClassification(nn.Module):
+    """
+    Hi-BEHRT with classification head.
+
+    Uses the SAME encoder architecture as HiBEHRTForBYOL,
+    ensuring BYOL pretrained weights can be correctly loaded.
     """
 
     def __init__(
@@ -788,8 +735,8 @@ class HiBEHRTSimpleForClassification(nn.Module):
         self.config = config
         self.num_classes = num_classes
 
-        # Hi-BEHRT encoder
-        self.encoder = HiBEHRTSimple(config, window_size, stride)
+        # Use the same encoder as BYOL
+        self.encoder = HiBEHRTEncoder_Full(config, window_size, stride)
 
         # Classification head
         self.dropout = nn.Dropout(dropout)
@@ -800,17 +747,38 @@ class HiBEHRTSimpleForClassification(nn.Module):
             nn.Linear(config.d_model, num_classes),
         )
 
-    def forward(self, input_ids, attention_mask, labels=None):
+        # Initialize classifier (encoder will be loaded from pretrained)
+        self._init_classifier()
+
+    def _init_classifier(self):
+        """Initialize classifier weights."""
+        for module in self.classifier.modules():
+            if isinstance(module, nn.Linear):
+                module.weight.data.normal_(mean=0.0, std=self.config.initializer_range)
+                if module.bias is not None:
+                    module.bias.data.zero_()
+
+    def forward(self, input_ids, attention_mask, time_values=None, labels=None):
         """
         Args:
             input_ids: (batch, total_seq_len) flat token indices
             attention_mask: (batch, total_seq_len)
+            time_values: (batch, total_seq_len) optional cumulative time values
             labels: (batch,) optional
 
         Returns:
             dict with 'logits' and optionally 'loss'
         """
-        pooled, _ = self.encoder(input_ids, attention_mask)
+        # Encode
+        aggregated, global_mask = self.encoder(input_ids, attention_mask, time_values)
+
+        # Pool: take LAST valid segment (most recent information)
+        batch_size = aggregated.shape[0]
+        last_valid_idx = (global_mask.cumsum(dim=1) * global_mask).argmax(dim=1)  # (batch,)
+        batch_indices = torch.arange(batch_size, device=input_ids.device)
+        pooled = aggregated[batch_indices, last_valid_idx]  # (batch, d_model)
+
+        # Classify
         pooled = self.dropout(pooled)
         logits = self.classifier(pooled)
 
@@ -825,21 +793,72 @@ class HiBEHRTSimpleForClassification(nn.Module):
 
         return output
 
+    def load_byol_pretrained(self, checkpoint_path: str):
+        """Load BYOL pretrained encoder weights."""
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
-def create_hi_behrt_model(
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        elif 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        elif 'encoder_state_dict' in checkpoint:
+            # Direct encoder state dict
+            state_dict = {'encoder.' + k: v for k, v in checkpoint['encoder_state_dict'].items()}
+        else:
+            state_dict = checkpoint
+
+        # Extract encoder weights from BYOL model
+        encoder_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith('encoder.'):
+                encoder_state_dict[k] = v
+
+        # Load encoder weights
+        missing, unexpected = self.load_state_dict(encoder_state_dict, strict=False)
+
+        # Filter out classifier keys from missing (they're expected to be missing)
+        missing = [k for k in missing if not k.startswith('classifier.') and not k.startswith('dropout.')]
+
+        print(f"Loaded BYOL pretrained weights from {checkpoint_path}")
+        if missing:
+            print(f"  Missing encoder keys: {len(missing)}")
+            for k in missing[:5]:
+                print(f"    - {k}")
+            if len(missing) > 5:
+                print(f"    ... and {len(missing) - 5} more")
+        if unexpected:
+            print(f"  Unexpected keys (ignored): {len(unexpected)}")
+
+        return missing, unexpected
+
+
+# ============================================================================
+# Backward Compatibility Aliases
+# ============================================================================
+
+# Keep old names for backward compatibility
+HiBEHRTSimple = HiBEHRTEncoder_Full
+HiBEHRTSimpleForClassification = HiBEHRTForClassification
+
+
+# ============================================================================
+# Factory Functions
+# ============================================================================
+
+def create_hi_behrt_config(
     vocab_size: int = 15000,
-    d_model: int = 150,
+    d_model: int = 768,
     n_extractor_layers: int = 4,
     n_aggregator_layers: int = 4,
-    n_heads: int = 6,
-    d_ff: int = 108,
+    n_heads: int = 12,
+    d_ff: int = 2048,
     max_seq_len: int = 50,
     max_segments: int = 40,
-    dropout: float = 0.2,
+    dropout: float = 0.1,
     **kwargs,
-) -> HiBEHRT:
-    """Create a Hi-BEHRT model with given configuration."""
-    config = HiBEHRTConfig(
+) -> HiBEHRTConfig:
+    """Create HiBEHRTConfig with given parameters."""
+    return HiBEHRTConfig(
         vocab_size=vocab_size,
         d_model=d_model,
         n_extractor_layers=n_extractor_layers,
@@ -851,4 +870,29 @@ def create_hi_behrt_model(
         dropout=dropout,
         **kwargs,
     )
-    return HiBEHRT(config)
+
+
+def create_hi_behrt_for_byol(
+    config: HiBEHRTConfig,
+    window_size: int = 50,
+    stride: int = 30,
+) -> HiBEHRTForBYOL:
+    """Create Hi-BEHRT model for BYOL pretraining."""
+    return HiBEHRTForBYOL(config, window_size, stride)
+
+
+def create_hi_behrt_for_classification(
+    config: HiBEHRTConfig,
+    num_classes: int,
+    window_size: int = 50,
+    stride: int = 30,
+    dropout: float = 0.1,
+) -> HiBEHRTForClassification:
+    """Create Hi-BEHRT model for classification."""
+    return HiBEHRTForClassification(
+        config=config,
+        num_classes=num_classes,
+        window_size=window_size,
+        stride=stride,
+        dropout=dropout,
+    )

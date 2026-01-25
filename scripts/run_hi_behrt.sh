@@ -13,35 +13,33 @@
 #SBATCH --signal=B:TERM@120  # Send SIGTERM 120 seconds before timeout for graceful checkpoint save
 
 # ============================================================================
-# Hi-BEHRT End-to-End Training - MIMIC-IV on H200 GPU
+# Hi-BEHRT Training with BYOL Pre-training
 #
-# Hi-BEHRT does NOT support MLM pre-training (by design).
-# It is trained end-to-end directly on downstream tasks.
+# Hi-BEHRT uses BYOL (Bootstrap Your Own Latent) for self-supervised pre-training.
+# This is the CORE of Hi-BEHRT - without BYOL pretraining, it's not true Hi-BEHRT!
 #
 # Reference: Hi-BEHRT: Hierarchical Transformer-based model for accurate
 #            prediction of clinical events (Li et al., 2021)
 #
-# Downstream Tasks:
-#   - mortality:   In-hospital mortality prediction
-#   - readmission: 30-day readmission prediction
-#   - los:         Length of stay > 7 days prediction
+# Workflow:
+#   1. BYOL Pre-training: Self-supervised learning on all patient data
+#   2. Fine-tuning: Task-specific training using pretrained weights
 #
 # Usage:
-#   sbatch run_hi_behrt.sh mortality      # Train on mortality prediction
-#   sbatch run_hi_behrt.sh readmission    # Train on readmission prediction
-#   sbatch run_hi_behrt.sh los            # Train on length-of-stay prediction
+#   sbatch run_hi_behrt.sh pretrain              # Step 1: BYOL pretraining
+#   sbatch run_hi_behrt.sh finetune mortality    # Step 2: Finetune on mortality
+#   sbatch run_hi_behrt.sh finetune readmission  # Step 2: Finetune on readmission
+#   sbatch run_hi_behrt.sh finetune los          # Step 2: Finetune on LOS
+#   sbatch run_hi_behrt.sh finetune icd_chapter  # Step 2: Finetune on ICD chapter
 # ============================================================================
 
-# Check task argument
-TASK=${1:-mortality}
-
-if [[ ! "$TASK" =~ ^(mortality|readmission|los|icd_chapter)$ ]]; then
-    echo "Error: Invalid task '$TASK'. Use 'mortality', 'readmission', 'los', or 'icd_chapter'."
-    exit 1
-fi
+# Check arguments
+MODE=${1:-pretrain}
+TASK=${2:-mortality}
 
 echo "=========================================="
-echo "Hi-BEHRT End-to-End Training: ${TASK^^}"
+echo "Hi-BEHRT Training with BYOL"
+echo "Mode: ${MODE}"
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURM_NODELIST"
 echo "Start: $(date)"
@@ -63,19 +61,29 @@ mkdir -p checkpoints logs
 
 # ==================== Configuration ====================
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
-OUTPUT_DIR="checkpoints/hi-behrt_${TASK}_${TIMESTAMP}"
 
 # Unified model configuration for fair comparison with HAT
-# All baselines use the same architecture hyperparameters
 D_MODEL=768
-N_EXTRACTOR_LAYERS=6
-N_AGGREGATOR_LAYERS=6
+N_EXTRACTOR_LAYERS=4  # Paper uses 4+4
+N_AGGREGATOR_LAYERS=4
 N_HEADS=12
 D_FF=2048
 WINDOW_SIZE=50
 STRIDE=30
-BATCH_SIZE=8
-LEARNING_RATE=5e-5
+T2V_DIM=64  # Time2Vec dimension
+
+# Data sequence length configuration (unified to 2048 for consistency)
+MAX_TOTAL_LEN=2048      # For pretrain (flat sequence)
+MAX_SEG=8               # For finetune (hierarchical: max_seg * max_seq_len = 2048)
+MAX_SEQ_LEN=256         # Tokens per segment
+
+# Data paths
+DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
+LABELS_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/downstream_labels.csv"
+TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/tokenizer.json"
+
+# BYOL pretrained checkpoint path (set after pretraining)
+BYOL_CHECKPOINT_DIR="checkpoints/hi-behrt-byol"
 
 # Display GPU info
 echo ""
@@ -83,62 +91,160 @@ echo "GPU Information:"
 nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 echo ""
 
-echo "Training Configuration:"
-echo "  Model:          Hi-BEHRT"
-echo "  Task:           ${TASK}"
-echo "  d_model:        ${D_MODEL}"
-echo "  extractor:      ${N_EXTRACTOR_LAYERS} layers"
-echo "  aggregator:     ${N_AGGREGATOR_LAYERS} layers"
-echo "  n_heads:        ${N_HEADS}"
-echo "  d_ff:           ${D_FF}"
-echo "  window_size:    ${WINDOW_SIZE}"
-echo "  stride:         ${STRIDE}"
-echo "  batch_size:     ${BATCH_SIZE}"
-echo "  learning_rate:  ${LEARNING_RATE}"
-echo "  Mixed Precision: AMP enabled"
-echo "  Output:         ${OUTPUT_DIR}"
-echo ""
+# ==================== BYOL Pretraining ====================
+if [ "$MODE" = "pretrain" ]; then
+    echo "=========================================="
+    echo "Stage 1: BYOL Self-Supervised Pre-training"
+    echo "=========================================="
+    echo ""
+    echo "BYOL is the CORE of Hi-BEHRT!"
+    echo "  - Online network + Target network (EMA updated)"
+    echo "  - Segment-level masking augmentation"
+    echo "  - Cosine similarity loss"
+    echo ""
 
-# Map task names to match train_hi_behrt.py expectations
-case "$TASK" in
-    "mortality")
-        TASK_ARG="mortality"
-        ;;
-    "readmission")
-        TASK_ARG="readmission_30d"
-        ;;
-    "los")
-        TASK_ARG="prolonged_los"
-        ;;
-    "icd_chapter")
-        TASK_ARG="icd_chapter"
-        ;;
-esac
+    OUTPUT_DIR="${BYOL_CHECKPOINT_DIR}/${TIMESTAMP}"
 
-# Data paths
-DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
-LABELS_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/downstream_labels.csv"
-TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/tokenizer.json"
+    echo "Training Configuration:"
+    echo "  Model:          Hi-BEHRT BYOL"
+    echo "  d_model:        ${D_MODEL}"
+    echo "  extractor:      ${N_EXTRACTOR_LAYERS} layers"
+    echo "  aggregator:     ${N_AGGREGATOR_LAYERS} layers"
+    echo "  window_size:    ${WINDOW_SIZE}, stride: ${STRIDE}"
+    echo "  max_total_len:  ${MAX_TOTAL_LEN}"
+    echo "  t2v_dim:        ${T2V_DIM}"
+    echo "  Output:         ${OUTPUT_DIR}"
+    echo ""
 
-# Run end-to-end training
-python train_hi_behrt.py \
-    --task "${TASK_ARG}" \
-    --data_path "${DATA_PATH}" \
-    --labels_path "${LABELS_PATH}" \
-    --tokenizer_path "${TOKENIZER_PATH}" \
-    --output_dir "${OUTPUT_DIR}" \
-    --batch_size ${BATCH_SIZE} \
-    --num_epochs 30 \
-    --d_model ${D_MODEL} \
-    --n_extractor_layers ${N_EXTRACTOR_LAYERS} \
-    --n_aggregator_layers ${N_AGGREGATOR_LAYERS} \
-    --n_heads ${N_HEADS} \
-    --d_ff ${D_FF} \
-    --window_size ${WINDOW_SIZE} \
-    --stride ${STRIDE} \
-    --learning_rate ${LEARNING_RATE} \
-    --patience 10 \
-    --use_amp
+    python train_hi_behrt_byol.py \
+        --data_path "${DATA_PATH}" \
+        --tokenizer_path "${TOKENIZER_PATH}" \
+        --output_dir "${OUTPUT_DIR}" \
+        --batch_size 32 \
+        --num_epochs 100 \
+        --d_model ${D_MODEL} \
+        --n_extractor_layers ${N_EXTRACTOR_LAYERS} \
+        --n_aggregator_layers ${N_AGGREGATOR_LAYERS} \
+        --n_heads ${N_HEADS} \
+        --d_ff ${D_FF} \
+        --window_size ${WINDOW_SIZE} \
+        --stride ${STRIDE} \
+        --max_total_len ${MAX_TOTAL_LEN} \
+        --t2v_dim ${T2V_DIM} \
+        --byol_momentum 0.996 \
+        --mask_probability 0.5 \
+        --learning_rate 1e-4 \
+        --use_amp
+
+    echo ""
+    echo "BYOL pretraining complete!"
+    echo "Checkpoint saved to: ${OUTPUT_DIR}"
+    echo ""
+    echo "Next step: Run finetuning with:"
+    echo "  sbatch run_hi_behrt.sh finetune mortality --pretrained_path ${OUTPUT_DIR}/best_model.pt"
+
+# ==================== Fine-tuning ====================
+elif [ "$MODE" = "finetune" ]; then
+    # Validate task argument
+    if [[ ! "$TASK" =~ ^(mortality|readmission|los|icd_chapter)$ ]]; then
+        echo "Error: Invalid task '$TASK'. Use 'mortality', 'readmission', 'los', or 'icd_chapter'."
+        exit 1
+    fi
+
+    echo "=========================================="
+    echo "Stage 2: Fine-tuning on ${TASK^^}"
+    echo "=========================================="
+
+    # Map task names
+    case "$TASK" in
+        "mortality")
+            TASK_ARG="mortality"
+            ;;
+        "readmission")
+            TASK_ARG="readmission_30d"
+            ;;
+        "los")
+            TASK_ARG="prolonged_los"
+            ;;
+        "icd_chapter")
+            TASK_ARG="icd_chapter"
+            ;;
+    esac
+
+    OUTPUT_DIR="checkpoints/hi-behrt_${TASK}_${TIMESTAMP}"
+
+    # Find latest BYOL checkpoint if not specified
+    PRETRAINED_PATH=${3:-""}
+    if [ -z "$PRETRAINED_PATH" ]; then
+        # Find most recent BYOL checkpoint
+        LATEST_BYOL=$(ls -td ${BYOL_CHECKPOINT_DIR}/*/best_model.pt 2>/dev/null | head -1)
+        if [ -n "$LATEST_BYOL" ]; then
+            PRETRAINED_PATH="$LATEST_BYOL"
+            echo "Using latest BYOL checkpoint: ${PRETRAINED_PATH}"
+        else
+            echo "WARNING: No BYOL pretrained checkpoint found!"
+            echo "Training from scratch (not recommended for Hi-BEHRT)"
+            echo ""
+            echo "To run BYOL pretraining first:"
+            echo "  sbatch run_hi_behrt.sh pretrain"
+            echo ""
+        fi
+    fi
+
+    echo ""
+    echo "Training Configuration:"
+    echo "  Model:          Hi-BEHRT"
+    echo "  Task:           ${TASK_ARG}"
+    echo "  d_model:        ${D_MODEL}"
+    echo "  extractor:      ${N_EXTRACTOR_LAYERS} layers"
+    echo "  aggregator:     ${N_AGGREGATOR_LAYERS} layers"
+    echo "  window_size:    ${WINDOW_SIZE}, stride: ${STRIDE}"
+    echo "  max_seg:        ${MAX_SEG}, max_seq_len: ${MAX_SEQ_LEN} (total: $((MAX_SEG * MAX_SEQ_LEN)))"
+    echo "  t2v_dim:        ${T2V_DIM}"
+    echo "  Pretrained:     ${PRETRAINED_PATH:-None (training from scratch)}"
+    echo "  Output:         ${OUTPUT_DIR}"
+    echo ""
+
+    # Build command
+    CMD="python train_hi_behrt.py \
+        --task ${TASK_ARG} \
+        --data_path ${DATA_PATH} \
+        --labels_path ${LABELS_PATH} \
+        --tokenizer_path ${TOKENIZER_PATH} \
+        --output_dir ${OUTPUT_DIR} \
+        --batch_size 8 \
+        --num_epochs 30 \
+        --d_model ${D_MODEL} \
+        --n_extractor_layers ${N_EXTRACTOR_LAYERS} \
+        --n_aggregator_layers ${N_AGGREGATOR_LAYERS} \
+        --n_heads ${N_HEADS} \
+        --d_ff ${D_FF} \
+        --window_size ${WINDOW_SIZE} \
+        --stride ${STRIDE} \
+        --max_seg ${MAX_SEG} \
+        --max_seq_len ${MAX_SEQ_LEN} \
+        --t2v_dim ${T2V_DIM} \
+        --learning_rate 5e-5 \
+        --patience 10 \
+        --use_amp"
+
+    # Add pretrained path if available
+    if [ -n "$PRETRAINED_PATH" ]; then
+        CMD="$CMD --pretrained_path ${PRETRAINED_PATH}"
+    fi
+
+    eval $CMD
+
+else
+    echo "Error: Invalid mode '$MODE'. Use 'pretrain' or 'finetune'."
+    echo ""
+    echo "Usage:"
+    echo "  sbatch run_hi_behrt.sh pretrain              # BYOL pretraining"
+    echo "  sbatch run_hi_behrt.sh finetune <task>       # Finetuning"
+    echo ""
+    echo "Tasks: mortality, readmission, los, icd_chapter"
+    exit 1
+fi
 
 echo ""
 echo "=========================================="

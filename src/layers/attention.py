@@ -1,4 +1,5 @@
 import math
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import einsum
@@ -13,6 +14,7 @@ class MultiHeadAttentionBlock(nn.Module):
         self.d_model = d_model
         self.h = h
         self.with_rope = with_rope
+        self.attn_backend = attn_backend
 
         assert d_model % h == 0, "d_model must be divisible by h"
         self.d_k = d_model // h  # dimension of each head
@@ -23,13 +25,17 @@ class MultiHeadAttentionBlock(nn.Module):
         if self.with_rope:
             self.rope_q = RoPE(self.d_k)
             self.rope_k = RoPE(self.d_k)
+
+        # Set attention function based on backend
+        # Note: efficient_attention and flash_attention require CUDA
+        # We'll handle the fallback at runtime in forward()
         match attn_backend:
             case "efficient_attention":
-                self._attn_func = self.efficient_attention
+                self._attn_func = self._efficient_attention_with_fallback
             case "base":
                 self._attn_func = self.attention
             case "flash_attention":
-                self._attn_func = self.flash_attention
+                self._attn_func = self._flash_attention_with_fallback
             case _:
                 raise ValueError(f"Unknown attn_backend: {attn_backend}. "
                                f"Choose from: efficient_attention, base, flash_attention")
@@ -80,7 +86,9 @@ class MultiHeadAttentionBlock(nn.Module):
         # Convert mask from (batch, seq_len) with 1=valid, 0=pad
         # to 2D attention mask for SDPA: (batch, 1, seq_len, seq_len)
         # SDPA expects: 0 = attend, large negative = don't attend
-        attn_mask = einsum("bq,bk -> bqk", mask, mask)[:, None, :, :]
+        # Convert to float first to avoid bool tensor subtraction error
+        mask_float = mask.float()
+        attn_mask = einsum("bq,bk -> bqk", mask_float, mask_float)[:, None, :, :]
         # Convert to additive mask: 1*1=1 -> 0, 0*0=0 -> -1e4
         attn_mask = (1.0 - attn_mask) * -1e4
 
@@ -89,6 +97,22 @@ class MultiHeadAttentionBlock(nn.Module):
                 query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False
             )
         return mh_out
+
+    def _efficient_attention_with_fallback(self, query, key, value, mask):
+        """Efficient attention with automatic fallback to base attention on CPU."""
+        if query.device.type == "cuda":
+            return self.efficient_attention(query, key, value, mask)
+        else:
+            # Fallback to base attention on CPU
+            return self.attention(query, key, value, mask)
+
+    def _flash_attention_with_fallback(self, query, key, value, mask):
+        """Flash attention with automatic fallback to base attention on CPU."""
+        if query.device.type == "cuda":
+            return self.flash_attention(query, key, value, mask)
+        else:
+            # Fallback to base attention on CPU
+            return self.attention(query, key, value, mask)
 
     def forward(self, q, k, v, mask, time):
         query = self.w_q(q)  # (batch, seq_len, d_model)

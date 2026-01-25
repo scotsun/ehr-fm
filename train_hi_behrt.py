@@ -1,14 +1,22 @@
 #!/usr/bin/env python3
 """
-Hi-BEHRT End-to-End Training Script
+Hi-BEHRT Training Script with BYOL Pre-trained Weights
 
-Hi-BEHRT is trained directly on downstream tasks (no MLM pre-training).
-This script reuses HAT's FinetuneDataset and converts the hierarchical format
-to the format expected by Hi-BEHRT.
+Hi-BEHRT uses BYOL (Bootstrap Your Own Latent) for self-supervised pre-training.
+This script supports:
+1. Training from scratch (no pre-training)
+2. Fine-tuning from BYOL pre-trained weights
+
+Time Encoding:
+- Uses Time2Vec to encode cumulative time (cumsum of days_since_prior_admission)
+- This replaces the original age embedding from the Hi-BEHRT paper
 
 Usage:
+    # Train from scratch
     python train_hi_behrt.py --task mortality
-    python train_hi_behrt.py --task readmission_30d --batch_size 16
+
+    # Fine-tune from BYOL pre-trained weights
+    python train_hi_behrt.py --task mortality --pretrained_path checkpoints/hi-behrt-byol/best_model.pt
 """
 
 import sys
@@ -44,10 +52,12 @@ def flatten_batch_for_hibehrt(batch):
     HAT format:
         input_ids: (B, max_seg, max_seq_len)
         attention_mask: (B, max_seg, max_seq_len)
+        segment_time: (B, max_seg) - optional, cumsum time per segment
 
     Hi-BEHRT format:
         input_ids: (B, max_seg * max_seq_len)
         attention_mask: (B, max_seg * max_seq_len)
+        time_values: (B, max_seg * max_seq_len) - cumsum time expanded to tokens
     """
     B, S, L = batch["input_ids"].shape
 
@@ -55,16 +65,30 @@ def flatten_batch_for_hibehrt(batch):
     input_ids = batch["input_ids"].view(B, S * L)
     attention_mask = batch["attention_mask"].view(B, S * L)
 
+    # Expand segment_time to token level if available
+    time_values = None
+    if "segment_time" in batch and batch["segment_time"] is not None:
+        # segment_time: (B, S) -> expand to (B, S, L) -> flatten to (B, S*L)
+        segment_time = batch["segment_time"]  # (B, S)
+        time_values = segment_time.unsqueeze(-1).expand(B, S, L).reshape(B, S * L)
+
     return {
         "input_ids": input_ids,
         "attention_mask": attention_mask,
+        "time_values": time_values,
         "label": batch["label"],
     }
 
 
-def create_hi_behrt_model(num_classes, args):
-    """Create Hi-BEHRT model for end-to-end training (no pretrained weights)."""
+def create_hi_behrt_model(num_classes, args, pretrained_path=None):
+    """
+    Create Hi-BEHRT model for downstream tasks.
 
+    Args:
+        num_classes: Number of output classes
+        args: Training arguments
+        pretrained_path: Path to BYOL pretrained checkpoint (optional)
+    """
     config = HiBEHRTConfig(
         vocab_size=args.vocab_size,
         d_model=args.d_model,
@@ -76,6 +100,7 @@ def create_hi_behrt_model(num_classes, args):
         max_segments=args.max_segments,
         dropout=args.dropout,
         attention_dropout=args.attention_dropout,
+        t2v_dim=args.t2v_dim,  # Time2Vec dimension
     )
 
     model = HiBEHRTSimpleForClassification(
@@ -85,6 +110,11 @@ def create_hi_behrt_model(num_classes, args):
         stride=args.stride,
         dropout=args.classifier_dropout,
     )
+
+    # Load BYOL pretrained weights if provided
+    if pretrained_path is not None:
+        print(f"\nLoading BYOL pretrained weights from {pretrained_path}")
+        model.load_byol_pretrained(pretrained_path)
 
     return model
 
@@ -187,7 +217,12 @@ class HiBEHRTTrainer:
         attention_mask = flat_batch["attention_mask"].to(self.device)
         labels = flat_batch["label"].to(self.device)
 
-        output = self.model(input_ids, attention_mask, labels=labels)
+        # Pass time_values if available (for Time2Vec encoding)
+        time_values = flat_batch.get("time_values")
+        if time_values is not None:
+            time_values = time_values.to(self.device)
+
+        output = self.model(input_ids, attention_mask, time_values=time_values, labels=labels)
 
         return output, labels
 
@@ -361,6 +396,8 @@ def parse_args():
                        default="dataset/mimic4/data/downstream_labels.csv")
     parser.add_argument("--tokenizer_path", type=str, default="tokenizer.json")
     parser.add_argument("--output_dir", type=str, default="checkpoints/hi-behrt")
+    parser.add_argument("--pretrained_path", type=str, default=None,
+                       help="Path to BYOL pretrained checkpoint (optional)")
 
     # Training hyperparameters
     parser.add_argument("--batch_size", type=int, default=16)
@@ -385,6 +422,8 @@ def parse_args():
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--attention_dropout", type=float, default=0.1)
     parser.add_argument("--classifier_dropout", type=float, default=0.1)
+    parser.add_argument("--t2v_dim", type=int, default=64,
+                       help="Time2Vec output dimension")
 
     # Dataset config (matching HAT's FinetuneDataset)
     parser.add_argument("--max_seg", type=int, default=8)
@@ -463,9 +502,12 @@ def main():
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
     print(f"  Num classes: {num_classes}")
 
-    # Create model (from scratch, no pre-training)
-    print("\nCreating Hi-BEHRT model (end-to-end, no pre-training)...")
-    model = create_hi_behrt_model(num_classes, args)
+    # Create model
+    if args.pretrained_path:
+        print(f"\nCreating Hi-BEHRT model (with BYOL pretrained weights)...")
+    else:
+        print("\nCreating Hi-BEHRT model (training from scratch)...")
+    model = create_hi_behrt_model(num_classes, args, pretrained_path=args.pretrained_path)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {n_params:,}")
@@ -473,6 +515,7 @@ def main():
     print(f"  n_extractor_layers: {args.n_extractor_layers}")
     print(f"  n_aggregator_layers: {args.n_aggregator_layers}")
     print(f"  window_size: {args.window_size}, stride: {args.stride}")
+    print(f"  t2v_dim: {args.t2v_dim}")
 
     # Save config
     with open(output_dir / "config.json", "w") as f:
