@@ -122,7 +122,7 @@ python train_baselines.py \
     --max_seq_len ${MAX_SEQ_LEN} \
     --mask_prob ${MASK_PROB} \
     --learning_rate ${LEARNING_RATE} \
-    --patience 10 \
+    --patience 5 \
     --gradient_accumulation_steps 2 \
     --max_grad_norm 5.0 \
     --dropout ${DROPOUT} \

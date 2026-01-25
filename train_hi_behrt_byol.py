@@ -243,8 +243,10 @@ class BYOLPretrainer:
         device: str = "cuda",
         num_workers: int = 4,
         save_every: int = 5,
+        patience: int = 5,
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
+        self.patience = patience
         self.model = model.to(self.device)
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -496,9 +498,12 @@ class BYOLPretrainer:
         print(f"  Epochs: {self.num_epochs}")
         print(f"  BYOL momentum: {self.byol_momentum}")
         print(f"  Mask probability: {self.mask_probability}")
+        print(f"  Patience: {self.patience}")
         print(f"{'='*60}\n")
 
         best_val_loss = float('inf')
+        best_train_loss = float('inf')
+        epochs_without_improvement = 0
 
         for epoch in range(self.num_epochs):
             train_loss = self.train_epoch(epoch)
@@ -506,20 +511,38 @@ class BYOLPretrainer:
 
             print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
             print(f"  Train Loss: {train_loss:.4f}")
+
+            # Track improvement (use val_loss if available, otherwise train_loss)
+            current_loss = val_loss if val_loss is not None else train_loss
+            best_loss = best_val_loss if val_loss is not None else best_train_loss
+
             if val_loss is not None:
                 print(f"  Val Loss:   {val_loss:.4f}")
 
-                if val_loss < best_val_loss:
+            if current_loss < best_loss:
+                if val_loss is not None:
                     best_val_loss = val_loss
-                    torch.save({
-                        'epoch': epoch,
-                        'model_state_dict': self.model.state_dict(),
-                        'config': self.model.config,
-                        'val_loss': val_loss,
-                    }, self.output_dir / "best_model.pt")
-                    print(f"  -> Saved best model (val_loss: {val_loss:.4f})")
+                else:
+                    best_train_loss = train_loss
+                epochs_without_improvement = 0
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'config': self.model.config,
+                    'val_loss': val_loss,
+                    'train_loss': train_loss,
+                }, self.output_dir / "best_model.pt")
+                print(f"  -> Saved best model (loss: {current_loss:.4f})")
+            else:
+                epochs_without_improvement += 1
+                print(f"  No improvement for {epochs_without_improvement} epoch(s)")
 
             self.save_checkpoint(epoch, val_loss)
+
+            # Early stopping check
+            if epochs_without_improvement >= self.patience:
+                print(f"\nEarly stopping triggered after {epoch + 1} epochs (patience={self.patience})")
+                break
 
         # Save final encoder for downstream tasks
         torch.save({
@@ -586,6 +609,8 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--save_every", type=int, default=10,
                        help="Save checkpoint every N epochs")
+    parser.add_argument("--patience", type=int, default=5,
+                       help="Early stopping patience (epochs without improvement)")
 
     return parser.parse_args()
 
@@ -692,6 +717,7 @@ def main():
         device=args.device,
         num_workers=args.num_workers,
         save_every=args.save_every,
+        patience=args.patience,
     )
 
     # Train

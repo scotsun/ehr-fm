@@ -134,6 +134,7 @@ if [ "$MODE" = "pretrain" ]; then
         --byol_momentum 0.996 \
         --mask_probability 0.5 \
         --learning_rate 1e-4 \
+        --patience 5 \
         --use_amp
 
     echo ""
@@ -225,7 +226,7 @@ elif [ "$MODE" = "finetune" ]; then
         --max_seq_len ${MAX_SEQ_LEN} \
         --t2v_dim ${T2V_DIM} \
         --learning_rate 5e-5 \
-        --patience 10 \
+        --patience 2 \
         --use_amp"
 
     # Add pretrained path if available

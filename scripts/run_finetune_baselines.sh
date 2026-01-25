@@ -87,7 +87,7 @@ D_FF=2048
 LEARNING_RATE=1e-5
 EPOCHS=30
 WARMUP_RATIO=0.1
-PATIENCE=5
+PATIENCE=2
 # Must match pretrain format: FlatEHRDataset uses (max_seq_len,) = (2048,)
 MAX_SEQ_LEN=2048
 
