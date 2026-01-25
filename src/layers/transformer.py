@@ -157,7 +157,7 @@ class HierarchicalTransformerBlock(nn.Module):
         self.cs_pe = cs_pe
         # segment-wise encoder
         self.swe = TransformerBlock(
-            d_model, d_ff, h, True, dropout, norm_type, ffn_type, attn_backend
+            d_model, d_ff, h, False, dropout, norm_type, ffn_type, attn_backend
         )
         # cross-segment encoder
         self.cse = TransformerBlock(
