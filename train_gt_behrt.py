@@ -222,14 +222,87 @@ class GTBEHRTTrainer:
         return graph_data_masked, masked_indices.nonzero(as_tuple=True)[0], labels
 
     def _create_mnp_vtp_inputs(self, batch):
-        """Create inputs for MNP and VTP pre-training."""
+        """Create inputs for MNP and VTP pre-training.
+
+        MNP (Missing Node Prediction):
+        - Select an actual medical code from each patient's graph
+        - Use the token ID as the label for prediction
+        - The model uses CLS token to predict this "missing" code
+
+        VTP (Visit Type Prediction):
+        - Mask some visit types and predict them
+        """
         graph_data = batch['graph_data']
         visit_types = batch['visit_types']
 
-        # MNP: For simplicity, we'll use a random code from the vocabulary as "removed"
-        # In practice, you'd actually remove a node from each visit graph
+        node_ids = graph_data['node_ids']  # (total_nodes,)
+        vst_indices = graph_data['vst_indices']  # (total_visits,)
+        batch_visit_counts = graph_data['batch_visit_counts']  # (batch_size,)
+
         batch_size = visit_types.size(0)
-        mnp_labels = torch.randint(0, self.vocab_size, (batch_size,), device=self.device)
+
+        # MNP: Select an actual code from each patient's graph
+        mnp_labels = []
+
+        # Create a mask for VST nodes (these should not be selected for MNP)
+        vst_mask = torch.zeros(node_ids.size(0), dtype=torch.bool, device=self.device)
+        vst_mask[vst_indices] = True
+
+        # Also exclude PAD tokens (token_id == 0)
+        non_pad_mask = node_ids != self.pad_id
+
+        # Valid nodes for MNP: not VST and not PAD
+        valid_for_mnp = (~vst_mask) & non_pad_mask
+
+        # Track node boundaries per patient
+        node_offset = 0
+        visit_offset = 0
+
+        for i in range(batch_size):
+            n_visits = batch_visit_counts[i].item()
+
+            # Find nodes belonging to this patient
+            # Each visit has 1 VST + some code nodes
+            # We need to find where this patient's nodes start and end
+            patient_vst_indices = vst_indices[visit_offset:visit_offset + n_visits]
+
+            if len(patient_vst_indices) > 0:
+                # Patient's nodes span from first VST to before next patient's first VST
+                patient_start = patient_vst_indices[0].item()
+
+                # Find end: either next patient's start or end of all nodes
+                if i + 1 < batch_size:
+                    next_visit_offset = visit_offset + n_visits
+                    if next_visit_offset < len(vst_indices):
+                        patient_end = vst_indices[next_visit_offset].item()
+                    else:
+                        patient_end = node_ids.size(0)
+                else:
+                    patient_end = node_ids.size(0)
+
+                # Get valid (non-VST, non-PAD) nodes for this patient
+                patient_valid_mask = valid_for_mnp[patient_start:patient_end]
+                patient_node_ids = node_ids[patient_start:patient_end]
+
+                valid_indices = patient_valid_mask.nonzero(as_tuple=True)[0]
+
+                if len(valid_indices) > 0:
+                    # Randomly select one code node
+                    rand_idx = torch.randint(0, len(valid_indices), (1,), device=self.device)
+                    selected_local_idx = valid_indices[rand_idx[0]]
+                    selected_token_id = patient_node_ids[selected_local_idx]
+                    mnp_labels.append(selected_token_id)
+                else:
+                    # Fallback: use a random valid token from vocabulary
+                    # This shouldn't happen often if data is correct
+                    mnp_labels.append(torch.tensor(1, device=self.device))  # Use [CLS] as fallback
+            else:
+                # No visits for this patient (shouldn't happen)
+                mnp_labels.append(torch.tensor(1, device=self.device))
+
+            visit_offset += n_visits
+
+        mnp_labels = torch.stack(mnp_labels)
 
         # VTP: Mask visit types
         vtp_labels = visit_types.clone()
