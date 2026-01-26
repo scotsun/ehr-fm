@@ -103,8 +103,8 @@ case "$MODEL" in
     "heart")
         PRETRAINED=$HEART_PRETRAINED
         TOKENIZER_PATH=$HEART_TOKENIZER
-        BATCH_SIZE=2   # EdgeModule O(B×L×D²) needs very small batch for L=2048
-        GRAD_ACCUM=16  # Effective batch size = 2 × 16 = 32
+        BATCH_SIZE=10
+        GRAD_ACCUM=4   # Effective batch size = 10 × 4 = 40
         ;;
 esac
 

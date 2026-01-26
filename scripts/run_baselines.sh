@@ -82,7 +82,7 @@ case "$MODEL" in
         MAX_SEQ_LEN=2048  # O(L) memory with efficient attention
         ;;
     "heart")
-        BATCH_SIZE=12
+        BATCH_SIZE=10
         MAX_SEQ_LEN=768  # O(L²) edge embeddings; balance between coverage and memory
         # AMP enabled (default) - FP32 fixes in EdgeModule should prevent overflow
         ;;
