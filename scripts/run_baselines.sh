@@ -81,7 +81,7 @@ case "$MODEL" in
         MAX_SEQ_LEN=2048  # O(L) memory with efficient attention
         ;;
     "heart")
-        BATCH_SIZE=6  # Smaller due to edge module memory overhead
+        BATCH_SIZE=8  # Increased after FP32 stability fixes
         MAX_SEQ_LEN=1024  # O(L²) edge embeddings require smaller sequence length
         ;;
 esac

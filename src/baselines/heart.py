@@ -76,17 +76,20 @@ class Time2Vec(nn.Module):
     """
     Time2Vec: Learnable time encoding.
     From: Time2Vec: Learning Vector Representation of Time (Kazemi et al., 2019)
+
+    Note: All computations forced to FP32 for numerical stability with AMP.
+    Large time values (thousands of hours) can overflow FP16.
     """
 
     def __init__(self, d_out: int):
         super().__init__()
         self.d_out = d_out
-        # Linear component
-        self.w0 = nn.Parameter(torch.randn(1))
-        self.b0 = nn.Parameter(torch.randn(1))
-        # Periodic components
-        self.w = nn.Parameter(torch.randn(d_out - 1))
-        self.b = nn.Parameter(torch.randn(d_out - 1))
+        # Linear component - use smaller init for stability
+        self.w0 = nn.Parameter(torch.randn(1) * 0.01)
+        self.b0 = nn.Parameter(torch.zeros(1))
+        # Periodic components - use smaller init for stability
+        self.w = nn.Parameter(torch.randn(d_out - 1) * 0.01)
+        self.b = nn.Parameter(torch.zeros(d_out - 1))
 
     def forward(self, t: Tensor) -> Tensor:
         """
@@ -95,16 +98,28 @@ class Time2Vec(nn.Module):
         Returns:
             (batch, seq_len, d_out) - time embeddings
         """
+        # CRITICAL: Force FP32 for numerical stability
+        # Large time values (thousands of hours) overflow FP16
+        original_dtype = t.dtype
+        t = t.float()
+
         if t.dim() == 2:
             t = t.unsqueeze(-1)  # (B, L, 1)
 
+        # Normalize time to reasonable range to prevent overflow
+        # Log-scale transformation for large time values
+        t_normalized = torch.sign(t) * torch.log1p(torch.abs(t))
+
         # Linear component: w0 * t + b0
-        v0 = self.w0 * t + self.b0  # (B, L, 1)
+        v0 = self.w0.float() * t_normalized + self.b0.float()  # (B, L, 1)
 
         # Periodic components: sin(w * t + b)
-        v = torch.sin(self.w * t + self.b)  # (B, L, d_out-1)
+        v = torch.sin(self.w.float() * t_normalized + self.b.float())  # (B, L, d_out-1)
 
-        return torch.cat([v0, v], dim=-1)  # (B, L, d_out)
+        result = torch.cat([v0, v], dim=-1)  # (B, L, d_out)
+
+        # Convert back to original dtype if needed
+        return result.to(original_dtype)
 
 
 # ============================================================================
@@ -144,6 +159,9 @@ class EdgeModule(nn.Module):
 
     This captures heterogeneous relations: how a diagnosis relates to a medication
     is different from how two diagnoses relate to each other.
+
+    Note: Uses FP32 for einsum operations to prevent overflow with AMP.
+    The einsum sums d_model (768) terms which can overflow FP16 range.
     """
 
     def __init__(self, d_model: int, edge_hidden_size: int, n_token_types: int = 8):
@@ -152,6 +170,7 @@ class EdgeModule(nn.Module):
         self.d_model = d_model
 
         # Type-specific transformations (Paper Eq. 5)
+        # Use smaller init scale for numerical stability
         self.left_transform = nn.Parameter(torch.zeros(n_token_types, d_model, d_model))
         self.right_transform = nn.Parameter(torch.zeros(n_token_types, d_model, d_model))
         # Combine embeddings (Paper Eq. 6)
@@ -160,8 +179,12 @@ class EdgeModule(nn.Module):
         self._init_parameters()
 
     def _init_parameters(self):
-        nn.init.xavier_uniform_(self.left_transform)
-        nn.init.xavier_uniform_(self.right_transform)
+        # Use smaller scale for numerical stability
+        # Standard xavier would give std = sqrt(2 / (d_model + d_model))
+        # We use 0.1x that for safety with large d_model
+        std = 0.1 * math.sqrt(2.0 / (self.d_model + self.d_model))
+        nn.init.normal_(self.left_transform, std=std)
+        nn.init.normal_(self.right_transform, std=std)
 
     def forward(self, token_embs: Tensor, token_types: Tensor) -> Tensor:
         """
@@ -173,21 +196,29 @@ class EdgeModule(nn.Module):
             edge_embs: (batch, seq_len, seq_len, edge_hidden_size)
         """
         batch_size, seq_len, _ = token_embs.size()
+        original_dtype = token_embs.dtype
+
+        # CRITICAL: Force FP32 for einsum to prevent overflow
+        # The einsum sums d_model (768) terms which can overflow FP16 (max ~65504)
+        token_embs_fp32 = token_embs.float()
 
         # Get type-specific transformations
-        left_trans = self.left_transform[token_types]  # (B, L, D, D)
-        right_trans = self.right_transform[token_types]  # (B, L, D, D)
+        left_trans = self.left_transform[token_types].float()  # (B, L, D, D)
+        right_trans = self.right_transform[token_types].float()  # (B, L, D, D)
 
         # Apply transformations: r_n = Linear_τ(v_n)
         # einsum: 'bld,blmd->blm' means output[b,l,m] = sum_d(input[b,l,d] * weight[b,l,m,d])
-        left_embs = torch.einsum('bld,blmd->blm', token_embs, left_trans)  # (B, L, D)
-        right_embs = torch.einsum('bld,blmd->blm', token_embs, right_trans)  # (B, L, D)
+        left_embs = torch.einsum('bld,blmd->blm', token_embs_fp32, left_trans)  # (B, L, D)
+        right_embs = torch.einsum('bld,blmd->blm', token_embs_fp32, right_trans)  # (B, L, D)
 
         # Create pairwise edge embeddings: r_{n←m} = Linear(r_n || r_m)
         left_expanded = left_embs.unsqueeze(2).expand(-1, -1, seq_len, -1)  # (B, L, L, D)
         right_expanded = right_embs.unsqueeze(1).expand(-1, seq_len, -1, -1)  # (B, L, L, D)
 
         edge_embs = torch.cat([left_expanded, right_expanded], dim=-1)  # (B, L, L, 2D)
+
+        # Convert back and apply output projection
+        edge_embs = edge_embs.to(original_dtype)
         return self.output(edge_embs)  # (B, L, L, edge_hidden_size)
 
 
@@ -206,6 +237,8 @@ class MultiHeadEdgeAttention(nn.Module):
     Paper Equation (8):
     v'_n = Linear(LN(Σ a_nm * v_m^val || Σ a_nm * r_{n←m})) + v_n
     Aggregates both value embeddings and relation embeddings.
+
+    Note: Uses FP32 for attention computation to prevent overflow with AMP.
     """
 
     def __init__(self, d_model: int, n_heads: int, edge_hidden_size: int, dropout: float = 0.1):
@@ -213,6 +246,7 @@ class MultiHeadEdgeAttention(nn.Module):
         self.d_k = d_model // n_heads
         self.d_edge = edge_hidden_size
         self.n_heads = n_heads
+        self.d_model = d_model
 
         self.W_Q = nn.Linear(d_model, d_model)
         self.W_K = nn.Linear(d_model, d_model)
@@ -235,6 +269,7 @@ class MultiHeadEdgeAttention(nn.Module):
             edge_embs: (batch, seq_len, seq_len, edge_hidden_size)
         """
         batch_size, n_tokens = Q.size(0), Q.size(1)
+        original_dtype = Q.dtype
 
         # Standard QKV projections
         q = self.W_Q(Q).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
@@ -244,26 +279,37 @@ class MultiHeadEdgeAttention(nn.Module):
         # Edge attention bias: b_nm = Linear(edge_embs)
         k_edge = self.W_K_edge(edge_embs)  # (B, L, L, edge_hidden_size)
         edge_bias = self.W_edge_bias(edge_embs).view(batch_size, 1, n_tokens, n_tokens)
-        edge_bias = edge_bias * (2 ** -0.5)
+
+        # CRITICAL: Compute attention scores in FP32 for stability
+        q_fp32 = q.float()
+        k_fp32 = k.float()
+        edge_bias_fp32 = edge_bias.float()
 
         # Compute attention with edge bias (Paper Eq. 7)
-        scores = torch.matmul(q, k.transpose(-1, -2)) * ((2 * self.d_k) ** -0.5)
-        scores = scores + edge_bias
+        # Use standard scaling 1/sqrt(d_k) instead of 1/sqrt(2*d_k)
+        scores = torch.matmul(q_fp32, k_fp32.transpose(-1, -2)) / math.sqrt(self.d_k)
+        scores = scores + edge_bias_fp32 * 0.1  # Scale down edge bias for stability
 
         if mask is not None:
             mask = mask.unsqueeze(1)  # (B, 1, L, L)
             # Use -1e4 instead of -inf to avoid FP16 overflow in AMP
             scores = scores.masked_fill(mask, -1e4)
 
-        # Compute softmax in FP32 for numerical stability
-        attn = self.dropout(F.softmax(scores.float(), dim=-1).to(scores.dtype))
+        # Softmax already in FP32
+        attn = self.dropout(F.softmax(scores, dim=-1))
 
-        # Aggregate value embeddings
-        context = torch.matmul(attn, v)  # (B, H, L, D_k)
+        # Aggregate value embeddings (stay in FP32)
+        v_fp32 = v.float()
+        context = torch.matmul(attn, v_fp32)  # (B, H, L, D_k)
 
         # Aggregate relation embeddings (Paper Eq. 8)
         # einsum: 'bhnm,bnmd->bhnd' means weighted sum of edge embeddings
-        edge_context = torch.einsum('bhnm,bnmd->bhnd', attn, k_edge)  # (B, H, L, edge_hidden_size)
+        k_edge_fp32 = k_edge.float()
+        edge_context = torch.einsum('bhnm,bnmd->bhnd', attn, k_edge_fp32)  # (B, H, L, edge_hidden_size)
+
+        # Convert back to original dtype
+        context = context.to(original_dtype)
+        edge_context = edge_context.to(original_dtype)
 
         # Combine contexts
         context = context.transpose(1, 2).contiguous().view(batch_size, -1, self.n_heads * self.d_k)
@@ -344,6 +390,7 @@ class EncounterLevelAttention(nn.Module):
             Updated [CLS] tokens: (batch, n_visits, d_model)
         """
         batch_size, n_visits, _ = cls_tokens.size()
+        original_dtype = cls_tokens.dtype
 
         # Add visit position encoding (Paper Eq. 9)
         pos_enc = self.visit_pos_encoding(visit_indices)
@@ -357,8 +404,13 @@ class EncounterLevelAttention(nn.Module):
         k = self.W_K(x).view(batch_size, n_visits, self.n_heads, self.d_k).transpose(1, 2)
         v = self.W_V(cls_tokens).view(batch_size, n_visits, self.n_heads, self.d_k).transpose(1, 2)
 
+        # CRITICAL: Compute attention in FP32 for numerical stability
+        q_fp32 = q.float()
+        k_fp32 = k.float()
+        v_fp32 = v.float()
+
         # Attention scores
-        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.d_k)
+        scores = torch.matmul(q_fp32, k_fp32.transpose(-1, -2)) / math.sqrt(self.d_k)
 
         # Mask invalid visits
         if visit_mask is not None:
@@ -366,9 +418,12 @@ class EncounterLevelAttention(nn.Module):
             # Use -1e4 instead of -inf to avoid FP16 overflow in AMP
             scores = scores.masked_fill(attn_mask, -1e4)
 
-        # Compute softmax in FP32 for numerical stability
-        attn = self.dropout(F.softmax(scores.float(), dim=-1).to(scores.dtype))
-        context = torch.matmul(attn, v)
+        # Softmax already in FP32
+        attn = self.dropout(F.softmax(scores, dim=-1))
+        context = torch.matmul(attn, v_fp32)
+
+        # Convert back to original dtype
+        context = context.to(original_dtype)
 
         # Reshape and project
         context = context.transpose(1, 2).contiguous().view(batch_size, n_visits, -1)
@@ -401,20 +456,29 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x: Tensor, mask: Tensor = None) -> Tensor:
         batch_size = x.size(0)
+        original_dtype = x.dtype
         norm_x = self.norm_attn(x)
 
         q = self.W_Q(norm_x).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
         k = self.W_K(norm_x).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
         v = self.W_V(norm_x).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
 
-        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.d_k)
+        # CRITICAL: Compute attention in FP32 for numerical stability
+        q_fp32 = q.float()
+        k_fp32 = k.float()
+        v_fp32 = v.float()
+
+        scores = torch.matmul(q_fp32, k_fp32.transpose(-1, -2)) / math.sqrt(self.d_k)
         if mask is not None:
             # Use -1e4 instead of -inf to avoid FP16 overflow in AMP
             scores = scores.masked_fill(mask.unsqueeze(1), -1e4)
 
-        # Compute softmax in FP32 for numerical stability
-        attn = self.dropout(F.softmax(scores.float(), dim=-1).to(scores.dtype))
-        context = torch.matmul(attn, v)
+        # Softmax already in FP32
+        attn = self.dropout(F.softmax(scores, dim=-1))
+        context = torch.matmul(attn, v_fp32)
+
+        # Convert back to original dtype
+        context = context.to(original_dtype)
         context = context.transpose(1, 2).contiguous().view(batch_size, -1, self.n_heads * self.d_k)
 
         x = x + self.dropout(self.W_O(context))

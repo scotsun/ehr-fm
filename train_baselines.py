@@ -203,6 +203,7 @@ class BaselineTrainer:
         self.model.train()
         total_loss = 0
         num_batches = 0
+        nan_count = 0
 
         self.optimizer.zero_grad()
 
@@ -215,11 +216,26 @@ class BaselineTrainer:
                         continue
                     loss = loss / self.gradient_accumulation_steps
 
+                # Check for NaN loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    nan_count += 1
+                    if nan_count <= 3:
+                        print(f"\nWarning: NaN/Inf loss detected at step {step}. Skipping batch.")
+                    self.optimizer.zero_grad()
+                    continue
+
                 self.scaler.scale(loss).backward()
 
                 if (step + 1) % self.gradient_accumulation_steps == 0:
                     self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    # Check for NaN gradients
+                    grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                    if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                        nan_count += 1
+                        if nan_count <= 3:
+                            print(f"\nWarning: NaN/Inf gradient at step {step}. Skipping update.")
+                        self.optimizer.zero_grad()
+                        continue
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
                     self.optimizer.zero_grad()
@@ -228,6 +244,15 @@ class BaselineTrainer:
                 if loss is None:
                     continue
                 loss = loss / self.gradient_accumulation_steps
+
+                # Check for NaN loss
+                if torch.isnan(loss) or torch.isinf(loss):
+                    nan_count += 1
+                    if nan_count <= 3:
+                        print(f"\nWarning: NaN/Inf loss detected at step {step}. Skipping batch.")
+                    self.optimizer.zero_grad()
+                    continue
+
                 loss.backward()
 
                 if (step + 1) % self.gradient_accumulation_steps == 0:
@@ -238,6 +263,9 @@ class BaselineTrainer:
             total_loss += loss.item() * self.gradient_accumulation_steps
             num_batches += 1
             pbar.set_postfix({"loss": total_loss / num_batches})
+
+        if nan_count > 0:
+            print(f"\nEpoch {epoch_id}: {nan_count} NaN/Inf batches skipped")
 
         return total_loss / max(num_batches, 1)
 
