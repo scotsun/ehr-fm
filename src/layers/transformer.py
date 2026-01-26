@@ -54,7 +54,7 @@ class MultiHeadAttentionBlock(nn.Module):
             mask = mask[:, None, None, :]
             attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
         attention_scores = attention_scores.softmax(dim=-1)
-        attention_scores = torch.dropout(attention_scores, p=dropout, train=True)
+        attention_scores = torch.dropout(attention_scores, p=dropout)
         # matmul
         mh_out = einsum("bhqk, bhkd->bhqd", attention_scores, value)
         return mh_out
@@ -86,7 +86,8 @@ class MultiHeadAttentionBlock(nn.Module):
         if self.with_rope:
             query, key = self.rope_q(query, t), self.rope_k(key, t)
 
-        mh_out = self._attn_func(query, key, value, mask, self.dropout)
+        effective_dropout = self.dropout if self.training else 0.0
+        mh_out = self._attn_func(query, key, value, mask, effective_dropout)
         # (-1, h, seq_len, d_k) -> (-1, seq_len, h, d_k) -> (-1, seq_len, d_model)
         mh_out = (
             mh_out.transpose(1, 2).contiguous().view(mh_out.shape[0], -1, self.d_model)
@@ -141,9 +142,9 @@ class TransformerBlock(nn.Module):
             d_model, h, with_rope, attn_backend
         )
         self.ffn_block = (
-            FFNSwiGLUBlock(d_model, d_ff)
+            FFNSwiGLUBlock(d_model, d_ff, dropout=dropout)
             if ffn_type == "swiglu"
-            else FFNLUBlock(d_model, d_ff, ffn_type)
+            else FFNLUBlock(d_model, d_ff, ffn_type, dropout=dropout)
         )
         self.residual_connection0 = ResidualConnection(d_model, dropout, norm_type)
         self.residual_connection1 = ResidualConnection(d_model, dropout, norm_type)

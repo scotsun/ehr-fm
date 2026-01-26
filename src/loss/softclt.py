@@ -8,13 +8,30 @@ NEG_INF = -1e9
 class SoftCLT(nn.Module):
     """adapted from softclt github repo"""
 
-    def __init__(self, model, temperature):
+    def __init__(self, tau_temp, tau_inst, lambda_, alpha):
         super().__init__()
-        self.temperature = temperature
+        self.tau_temp = tau_temp
+        self.tau_inst = tau_inst
+        self.lambda_ = lambda_
+        self.alpha = alpha
 
-    def forward(self, z1, z2, mask1, mask2):
-        #
-        # the mask is the set_attention_mask
+    def forward(self, z1, z2, mask, x):
+        dist_mat = self.soft_dtw_mat(x, mask)  # (B, B)
+        soft_label = 2 * self.alpha * F.sigmoid(dist_mat / self.tau_inst)  # (B, B)
+        out = self.hier_CL_soft(
+            z1=z1,
+            z2=z2,
+            mask1=mask,
+            mask2=mask,
+            soft_label=soft_label,
+            tau_temp=self.tau_temp,
+            lambda_=self.lambda_,
+        )
+        return out
+
+    def soft_dtw_mat(self, x, mask):
+        # h: (batch, max_seq, max_set_size, hidden_size)
+        # mask: (batch, max_seq)
         pass
 
     def masked_max_pool1d(self, z, set_attention_mask, kernel_size):
@@ -83,9 +100,6 @@ class SoftCLT(nn.Module):
         # Compute negative log-softmax
         logits = -F.log_softmax(logits, dim=-1)
 
-        # TODO: If soft labels are provided, ensure they are on same device
-        soft_labels_L = soft_labels_L.to(z1.device)
-        soft_labels_R = soft_labels_R.to(z1.device)
         # Apply mask to soft labels so invalid targets get weight 0
         left_mask = mask_squeezed[:, :B, :]  # T x B x (2B-1)
         right_mask = mask_squeezed[:, B:, :]  # T x B x (2B-1)
@@ -151,9 +165,6 @@ class SoftCLT(nn.Module):
         # Negative log-softmax
         logits = -F.log_softmax(logits, dim=-1)
 
-        # TODO: Ensure timelag tensors are on same device
-        timelag_L = timelag_L.to(z1.device)
-        timelag_R = timelag_R.to(z1.device)
         # Apply mask to timelag weights so invalid targets contribute zero
         left_mask = mask_squeezed[:, :T, :]  # B x T x (2T-1)
         right_mask = mask_squeezed[:, T:, :]  # B x T x (2T-1)
@@ -174,23 +185,23 @@ class SoftCLT(nn.Module):
         self,
         z1,
         z2,
+        mask1,
+        mask2,
         soft_labels,
         tau_temp=2,
         lambda_=0.5,
         temporal_unit=0,
         temporal_hierarchy=True,
-        mask1=None,
-        mask2=None,
     ):
         """
         Hierarchical soft contrastive loss with optional masks for padded timesteps.
 
         Args:
         z1, z2: (B, T, C)
-        soft_labels: soft label structure expected by dup_matrix (None or array/tensor)
+        mask1, mask2: (B, T) boolean masks (True=valid)
+        soft_labels (B, B): soft label structure expected by dup_matrix (None or array/tensor)
         tau_temp, lambda_, temporal_unit, soft_temporal, soft_instance, temporal_hierarchy:
             same meaning as original function
-        mask1, mask2: (B, T) boolean masks (True=valid). If None, no masking applied.
 
         Returns:
         scalar loss (torch.tensor)
@@ -290,12 +301,6 @@ def timelag_sigmoid(T, sigma=1):
     matrix = 2 / (1 + torch.exp(dist.float() * sigma))
     matrix = torch.where(matrix < 1e-6, 0, matrix)  # set very small values to 0
     return matrix
-
-
-def densify(x, tau, alpha=0.5):
-    return ((2 * alpha) / (1 + torch.exp(-tau * x))) + (1 - alpha) * torch.eye(
-        x.shape[0]
-    )
 
 
 if __name__ == "__main__":
