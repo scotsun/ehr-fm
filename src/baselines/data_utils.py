@@ -236,13 +236,18 @@ class DownstreamTask(Enum):
     READMISSION_30D = "readmission_30d"
     PROLONGED_LOS = "prolonged_los"
     ICD_CHAPTER = "icd_chapter"
+    ICD_CATEGORY_MULTILABEL = "icd_category_multilabel"
+    NEXT_VISIT = "next_visit"
 
 
+# max_hours: time window for target admission; exclude_target_dx: prevent data leakage
 TASK_CONFIGS = {
     DownstreamTask.MORTALITY: {"prediction_time": "admission_24h", "max_hours": 24, "exclude_target_dx": True},
     DownstreamTask.PROLONGED_LOS: {"prediction_time": "admission_48h", "max_hours": 48, "exclude_target_dx": True},
     DownstreamTask.READMISSION_30D: {"prediction_time": "discharge", "max_hours": None, "exclude_target_dx": False},
     DownstreamTask.ICD_CHAPTER: {"prediction_time": "discharge", "max_hours": None, "exclude_target_dx": True},
+    DownstreamTask.ICD_CATEGORY_MULTILABEL: {"prediction_time": "discharge", "max_hours": None, "exclude_target_dx": True, "is_multilabel": True},
+    DownstreamTask.NEXT_VISIT: {"prediction_time": "discharge", "include_target": False, "is_set_prediction": True},
 }
 
 
@@ -294,16 +299,35 @@ class FlatFinetuneDataset(Dataset):
         self.include_visit_ids = include_visit_ids
 
         # Setup label handling
-        self.label_col = task.value
-        valid_labels = labels_df[labels_df[self.label_col] >= 0].copy()
+        self.is_multilabel = self.task_config.get("is_multilabel", False)
 
-        if task == DownstreamTask.ICD_CHAPTER:
-            self.num_classes = valid_labels[self.label_col].nunique()
-            unique_labels = sorted(valid_labels[self.label_col].unique())
-            self.label_mapping = {old: new for new, old in enumerate(unique_labels)}
-        else:
-            self.num_classes = 2
+        if task == DownstreamTask.ICD_CATEGORY_MULTILABEL:
+            # Multilabel ICD category prediction
+            self.label_col = "icd_categories"
+            valid_labels = labels_df[labels_df['icd_categories'].notna() & (labels_df['icd_categories'] != '')].copy()
+            # Parse icd_categories to find all unique category IDs
+            all_categories = set()
+            self.hadm_to_categories = {}
+            for _, row in valid_labels.iterrows():
+                cats = [int(x) for x in str(row['icd_categories']).split(',')]
+                self.hadm_to_categories[row[enc_id_col]] = cats
+                all_categories.update(cats)
+            self.num_classes = max(all_categories) + 1  # Category IDs are 0-indexed
             self.label_mapping = None
+        elif task == DownstreamTask.NEXT_VISIT:
+            # Next visit prediction - handled separately
+            raise NotImplementedError("NEXT_VISIT task requires NextVisitFlatDataset")
+        else:
+            self.label_col = task.value
+            valid_labels = labels_df[labels_df[self.label_col] >= 0].copy()
+
+            if task == DownstreamTask.ICD_CHAPTER:
+                self.num_classes = valid_labels[self.label_col].nunique()
+                unique_labels = sorted(valid_labels[self.label_col].unique())
+                self.label_mapping = {old: new for new, old in enumerate(unique_labels)}
+            else:
+                self.num_classes = 2
+                self.label_mapping = None
 
         # Patient-level split (same as HAT)
         all_patients = valid_labels[patient_id_col].unique()
@@ -328,14 +352,22 @@ class FlatFinetuneDataset(Dataset):
         self.label_dict = {}
         pid_idx = self.labels.columns.get_loc(patient_id_col)
         enc_idx = self.labels.columns.get_loc(enc_id_col)
-        label_idx = self.labels.columns.get_loc(self.label_col)
 
-        for row in self.labels.itertuples(index=False):
-            key = (row[pid_idx], row[enc_idx])
-            label = row[label_idx]
-            if self.label_mapping:
-                label = self.label_mapping[label]
-            self.label_dict[key] = label
+        if self.is_multilabel:
+            # For multilabel tasks, use hadm_to_categories mapping
+            for row in self.labels.itertuples(index=False):
+                key = (row[pid_idx], row[enc_idx])
+                hadm_id = row[enc_idx]
+                if hadm_id in self.hadm_to_categories:
+                    self.label_dict[key] = self.hadm_to_categories[hadm_id]
+        else:
+            label_idx = self.labels.columns.get_loc(self.label_col)
+            for row in self.labels.itertuples(index=False):
+                key = (row[pid_idx], row[enc_idx])
+                label = row[label_idx]
+                if self.label_mapping:
+                    label = self.label_mapping[label]
+                self.label_dict[key] = label
 
         self.samples = list(self.label_dict.keys())
 
@@ -494,8 +526,16 @@ class FlatFinetuneDataset(Dataset):
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask, dtype=torch.bool),
             "t": torch.tensor(all_times, dtype=torch.float32),
-            "label": torch.tensor(label, dtype=torch.long),
         }
+
+        # Handle label differently for multilabel vs single-label tasks
+        if self.is_multilabel:
+            multi_hot = torch.zeros(self.num_classes, dtype=torch.float)
+            for idx in label:
+                multi_hot[idx] = 1.0
+            result["label"] = multi_hot
+        else:
+            result["label"] = torch.tensor(label, dtype=torch.long)
 
         if self.include_token_types:
             result["token_types"] = torch.tensor(all_token_types, dtype=torch.long)
@@ -513,6 +553,243 @@ def collate_flat_finetune(batch):
         "t": torch.stack([x["t"] for x in batch]),
         "label": torch.stack([x["label"] for x in batch]),
         # Optional fields for HEART
+        "token_types": torch.stack([x["token_types"] for x in batch]) if "token_types" in batch[0] else None,
+        "visit_ids": torch.stack([x["visit_ids"] for x in batch]) if "visit_ids" in batch[0] else None,
+    }
+
+
+class NextVisitFlatDataset(Dataset):
+    """
+    Next Visit Prediction Dataset for flat baseline models (CORE-BEHRT, HEART).
+
+    Key differences from FlatFinetuneDataset:
+    - Input: historical admissions (NOT including target)
+    - Label: multi-hot vector of token IDs from the target admission
+    - Only includes samples where there IS a next admission (needs ≥2 admissions)
+    """
+
+    def __init__(
+        self,
+        data_path: str | Path,
+        labels_df: pd.DataFrame,
+        tokenizer: Tokenizer,
+        max_seq_len: int = 2048,
+        split: str = "train",
+        split_ratios: tuple = (0.7, 0.15, 0.15),
+        seed: int = 42,
+        patient_id_col: str = "subject_id",
+        enc_id_col: str = "hadm_id",
+        token_col: str = "code",
+        code_type_col: str = "code_type",
+        sort_col: str = "admittime",
+        token_time_col: str = "time_offset_hours",
+        visit_time_col: str = "days_since_prior_admission",
+        include_token_types: bool = False,  # for HEART
+        include_visit_ids: bool = False,  # for HEART
+    ):
+        self.data_path = Path(data_path)
+        self.tokenizer = tokenizer
+        self.max_seq_len = max_seq_len
+        self.patient_id_col = patient_id_col
+        self.enc_id_col = enc_id_col
+        self.token_col = token_col
+        self.code_type_col = code_type_col
+        self.sort_col = sort_col
+        self.token_time_col = token_time_col
+        self.visit_time_col = visit_time_col
+        self.include_token_types = include_token_types
+        self.include_visit_ids = include_visit_ids
+
+        self.vocab_size = tokenizer.get_vocab_size()
+
+        # Patient-level split
+        all_patients = labels_df[patient_id_col].unique()
+        rng = np.random.default_rng(seed)
+        all_patients = rng.permutation(all_patients)
+
+        n_train = int(len(all_patients) * split_ratios[0])
+        n_val = int(len(all_patients) * split_ratios[1])
+
+        if split == "train":
+            split_patients = set(all_patients[:n_train])
+        elif split == "val":
+            split_patients = set(all_patients[n_train:n_train + n_val])
+        else:
+            split_patients = set(all_patients[n_train + n_val:])
+
+        labels = labels_df[labels_df[patient_id_col].isin(split_patients)].reset_index(drop=True)
+
+        # Build patient_admissions: {patient_id: [sorted list of hadm_ids]}
+        self.patient_admissions = {}
+        for pid in labels[patient_id_col].unique():
+            patient_data = labels[labels[patient_id_col] == pid]
+            sorted_hadms = patient_data.sort_values(sort_col)[enc_id_col].tolist()
+            if len(sorted_hadms) >= 2:  # Need at least 2 admissions for next visit prediction
+                self.patient_admissions[pid] = sorted_hadms
+
+        # Build samples: (patient_id, target_hadm_id) where target is NOT the first admission
+        self.samples = []
+        for pid, hadms in self.patient_admissions.items():
+            for i in range(1, len(hadms)):
+                self.samples.append((pid, hadms[i]))
+
+        print(f"NextVisitFlatDataset [{split}]: {len(self.samples)} samples from {len(self.patient_admissions)} patients")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        subject_id, target_hadm_id = self.samples[index]
+
+        all_hadms = self.patient_admissions[subject_id]
+        target_idx = all_hadms.index(target_hadm_id)
+
+        # Input: all admissions BEFORE target (not including target)
+        history_hadms = list(all_hadms[:target_idx])
+
+        # Read data
+        subject_dir = self.data_path / f"{self.patient_id_col}={subject_id}"
+
+        # Read history data
+        try:
+            history_table = pq.read_table(subject_dir, filters=[(self.enc_id_col, 'in', history_hadms)])
+            history_data = history_table.to_pandas()
+        except Exception:
+            history_table = pq.read_table(subject_dir)
+            history_data = history_table.to_pandas()
+            history_data = history_data[history_data[self.enc_id_col].isin(history_hadms)]
+
+        # Read target data for labels
+        try:
+            target_table = pq.read_table(subject_dir, filters=[(self.enc_id_col, '==', target_hadm_id)])
+            target_data = target_table.to_pandas()
+        except Exception:
+            target_table = pq.read_table(subject_dir)
+            target_data = target_table.to_pandas()
+            target_data = target_data[target_data[self.enc_id_col] == target_hadm_id]
+
+        # Build encounter data from history
+        grouped = history_data.groupby(self.enc_id_col, sort=False)
+        encounter_data = []
+
+        for enc_id, group in grouped:
+            tokens = group[self.token_col].tolist()
+            if len(tokens) == 0:
+                continue
+
+            visit_time = group[self.visit_time_col].iloc[0] if self.visit_time_col in group.columns else 0.0
+            visit_time = 0.0 if pd.isna(visit_time) else float(visit_time)
+            sort_val = group[self.sort_col].iloc[0] if self.sort_col in group.columns else None
+            token_times = group[self.token_time_col].fillna(0.0).tolist() if self.token_time_col in group.columns else None
+            code_types = group[self.code_type_col].tolist() if self.code_type_col in group.columns else None
+
+            encounter_data.append({
+                'enc_id': enc_id,
+                'tokens': tokens,
+                'visit_time': visit_time,
+                'sort_key': sort_val,
+                'token_times': token_times,
+                'code_types': code_types,
+            })
+
+        encounter_data.sort(key=lambda x: x['sort_key'] if x['sort_key'] is not None else 0)
+
+        # Compute cumulative visit times
+        visit_rel_times = [enc['visit_time'] for enc in encounter_data]
+        visit_abs_times = np.cumsum(visit_rel_times).tolist() if visit_rel_times else []
+
+        # Build flat sequences
+        all_tokens = []
+        all_times = []
+        all_token_types = []
+        all_visit_ids = []
+
+        for visit_idx, enc in enumerate(encounter_data):
+            visit_abs_time = visit_abs_times[visit_idx] if visit_idx < len(visit_abs_times) else 0.0
+            tokens = enc['tokens']
+
+            all_tokens.append("[CLS]")
+            all_tokens.extend(tokens)
+
+            all_times.append(visit_abs_time)
+            if enc['token_times']:
+                token_abs_times = [visit_abs_time + (h / 24.0) for h in enc['token_times']]
+                all_times.extend(token_abs_times)
+            else:
+                all_times.extend([visit_abs_time] * len(tokens))
+
+            if self.include_token_types:
+                all_token_types.append(1)
+                if enc['code_types']:
+                    type_ids = [CODE_TYPE_TO_TOKEN_TYPE.get(ct, 0) for ct in enc['code_types']]
+                    all_token_types.extend(type_ids)
+                else:
+                    all_token_types.extend([0] * len(tokens))
+
+            if self.include_visit_ids:
+                all_visit_ids.append(visit_idx)
+                all_visit_ids.extend([visit_idx] * len(tokens))
+
+        # Truncate and pad
+        all_tokens = all_tokens[:self.max_seq_len]
+        all_times = all_times[:self.max_seq_len]
+        if self.include_token_types:
+            all_token_types = all_token_types[:self.max_seq_len]
+        if self.include_visit_ids:
+            all_visit_ids = all_visit_ids[:self.max_seq_len]
+
+        # Encode tokens
+        encoding = self.tokenizer.encode(all_tokens, is_pretokenized=True)
+        input_ids = encoding.ids[:self.max_seq_len]
+
+        seq_len = len(input_ids)
+        pad_len = self.max_seq_len - seq_len
+        if pad_len > 0:
+            input_ids = input_ids + [0] * pad_len
+            all_times = all_times + [0.0] * pad_len
+            if self.include_token_types:
+                all_token_types = all_token_types + [0] * pad_len
+            if self.include_visit_ids:
+                all_visit_ids = all_visit_ids + [0] * pad_len
+
+        attention_mask = [1] * seq_len + [0] * pad_len
+
+        # Label: multi-hot vector of target admission's token IDs
+        target_tokens = target_data[self.token_col].tolist()
+        target_token_ids = set()
+        for token in target_tokens:
+            token_id = self.tokenizer.token_to_id(str(token))
+            if token_id is not None and token_id >= 4:  # Skip special tokens
+                target_token_ids.add(token_id)
+
+        multi_hot = torch.zeros(self.vocab_size, dtype=torch.float)
+        for token_id in target_token_ids:
+            multi_hot[token_id] = 1.0
+
+        result = {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.bool),
+            "t": torch.tensor(all_times, dtype=torch.float32),
+            "label": multi_hot,
+            "target_token_ids": list(target_token_ids),  # For evaluation
+        }
+
+        if self.include_token_types:
+            result["token_types"] = torch.tensor(all_token_types, dtype=torch.long)
+        if self.include_visit_ids:
+            result["visit_ids"] = torch.tensor(all_visit_ids, dtype=torch.long)
+
+        return result
+
+
+def collate_next_visit_flat(batch):
+    """Collate function for NextVisitFlatDataset."""
+    return {
+        "input_ids": torch.stack([x["input_ids"] for x in batch]),
+        "attention_mask": torch.stack([x["attention_mask"] for x in batch]),
+        "t": torch.stack([x["t"] for x in batch]),
+        "label": torch.stack([x["label"] for x in batch]),
+        "target_token_ids": [x["target_token_ids"] for x in batch],
         "token_types": torch.stack([x["token_types"] for x in batch]) if "token_types" in batch[0] else None,
         "visit_ids": torch.stack([x["visit_ids"] for x in batch]) if "visit_ids" in batch[0] else None,
     }
@@ -916,16 +1193,35 @@ class GTBEHRTFinetuneDataset(Dataset):
         self.vst_token_id = tokenizer.token_to_id("[PAD]")
 
         # Setup label handling
-        self.label_col = task.value
-        valid_labels = labels_df[labels_df[self.label_col] >= 0].copy()
+        self.is_multilabel = self.task_config.get("is_multilabel", False)
 
-        if task == DownstreamTask.ICD_CHAPTER:
-            self.num_classes = valid_labels[self.label_col].nunique()
-            unique_labels = sorted(valid_labels[self.label_col].unique())
-            self.label_mapping = {old: new for new, old in enumerate(unique_labels)}
-        else:
-            self.num_classes = 2
+        if task == DownstreamTask.ICD_CATEGORY_MULTILABEL:
+            # Multilabel ICD category prediction
+            self.label_col = "icd_categories"
+            valid_labels = labels_df[labels_df['icd_categories'].notna() & (labels_df['icd_categories'] != '')].copy()
+            # Parse icd_categories to find all unique category IDs
+            all_categories = set()
+            self.hadm_to_categories = {}
+            for _, row in valid_labels.iterrows():
+                cats = [int(x) for x in str(row['icd_categories']).split(',')]
+                self.hadm_to_categories[row[enc_id_col]] = cats
+                all_categories.update(cats)
+            self.num_classes = max(all_categories) + 1  # Category IDs are 0-indexed
             self.label_mapping = None
+        elif task == DownstreamTask.NEXT_VISIT:
+            # Next visit prediction - handled separately
+            raise NotImplementedError("NEXT_VISIT task requires NextVisitGTBEHRTDataset")
+        else:
+            self.label_col = task.value
+            valid_labels = labels_df[labels_df[self.label_col] >= 0].copy()
+
+            if task == DownstreamTask.ICD_CHAPTER:
+                self.num_classes = valid_labels[self.label_col].nunique()
+                unique_labels = sorted(valid_labels[self.label_col].unique())
+                self.label_mapping = {old: new for new, old in enumerate(unique_labels)}
+            else:
+                self.num_classes = 2
+                self.label_mapping = None
 
         # Patient-level split
         all_patients = valid_labels[patient_id_col].unique()
@@ -950,14 +1246,22 @@ class GTBEHRTFinetuneDataset(Dataset):
         self.label_dict = {}
         pid_idx = self.labels.columns.get_loc(patient_id_col)
         enc_idx = self.labels.columns.get_loc(enc_id_col)
-        label_idx = self.labels.columns.get_loc(self.label_col)
 
-        for row in self.labels.itertuples(index=False):
-            key = (row[pid_idx], row[enc_idx])
-            label = row[label_idx]
-            if self.label_mapping:
-                label = self.label_mapping[label]
-            self.label_dict[key] = label
+        if self.is_multilabel:
+            # For multilabel tasks, use hadm_to_categories mapping
+            for row in self.labels.itertuples(index=False):
+                key = (row[pid_idx], row[enc_idx])
+                hadm_id = row[enc_idx]
+                if hadm_id in self.hadm_to_categories:
+                    self.label_dict[key] = self.hadm_to_categories[hadm_id]
+        else:
+            label_idx = self.labels.columns.get_loc(self.label_col)
+            for row in self.labels.itertuples(index=False):
+                key = (row[pid_idx], row[enc_idx])
+                label = row[label_idx]
+                if self.label_mapping:
+                    label = self.label_mapping[label]
+                self.label_dict[key] = label
 
         self.samples = list(self.label_dict.keys())
 
@@ -1140,8 +1444,16 @@ class GTBEHRTFinetuneDataset(Dataset):
             "ages": torch.tensor(ages[:self.max_visits], dtype=torch.long),
             "days": torch.tensor(days[:self.max_visits], dtype=torch.long),
             "attention_mask": torch.tensor(attention_mask[:self.max_visits], dtype=torch.bool),
-            "label": torch.tensor(label, dtype=torch.long),
         }
+
+        # Handle label differently for multilabel vs single-label tasks
+        if self.is_multilabel:
+            multi_hot = torch.zeros(self.num_classes, dtype=torch.float)
+            for idx in label:
+                multi_hot[idx] = 1.0
+            result["label"] = multi_hot
+        else:
+            result["label"] = torch.tensor(label, dtype=torch.long)
 
         return result
 
@@ -1151,3 +1463,318 @@ def collate_gtbehrt_finetune(batch):
     base_collate = collate_gtbehrt(batch)
     base_collate['label'] = torch.stack([x['label'] for x in batch])
     return base_collate
+
+
+class NextVisitGTBEHRTDataset(Dataset):
+    """
+    Next Visit Prediction Dataset for GT-BEHRT.
+
+    Key differences from GTBEHRTFinetuneDataset:
+    - Input: historical admissions (NOT including target) as graph data
+    - Label: multi-hot vector of token IDs from the target admission
+    - Only includes samples where there IS a next admission (needs ≥2 admissions)
+    """
+
+    def __init__(
+        self,
+        data_path: str | Path,
+        labels_df: pd.DataFrame,
+        tokenizer,
+        max_visits: int = 50,
+        max_codes_per_visit: int = 100,
+        split: str = "train",
+        split_ratios: tuple = (0.7, 0.15, 0.15),
+        seed: int = 42,
+        patient_id_col: str = "subject_id",
+        enc_id_col: str = "hadm_id",
+        token_col: str = "code",
+        code_type_col: str = "code_type",
+        sort_col: str = "admittime",
+        visit_time_col: str = "days_since_prior_admission",
+        age_col: str = "anchor_age",
+    ):
+        self.data_path = Path(data_path)
+        self.tokenizer = tokenizer
+        self.max_visits = max_visits
+        self.max_codes_per_visit = max_codes_per_visit
+        self.patient_id_col = patient_id_col
+        self.enc_id_col = enc_id_col
+        self.token_col = token_col
+        self.code_type_col = code_type_col
+        self.sort_col = sort_col
+        self.visit_time_col = visit_time_col
+        self.age_col = age_col
+
+        self.vst_token_id = tokenizer.token_to_id("[PAD]")
+        self.vocab_size = tokenizer.get_vocab_size()
+
+        # Patient-level split
+        all_patients = labels_df[patient_id_col].unique()
+        rng = np.random.default_rng(seed)
+        all_patients = rng.permutation(all_patients)
+
+        n_train = int(len(all_patients) * split_ratios[0])
+        n_val = int(len(all_patients) * split_ratios[1])
+
+        if split == "train":
+            split_patients = set(all_patients[:n_train])
+        elif split == "val":
+            split_patients = set(all_patients[n_train:n_train + n_val])
+        else:
+            split_patients = set(all_patients[n_train + n_val:])
+
+        labels = labels_df[labels_df[patient_id_col].isin(split_patients)].reset_index(drop=True)
+
+        # Build patient_admissions: {patient_id: [sorted list of hadm_ids]}
+        self.patient_admissions = {}
+        for pid in labels[patient_id_col].unique():
+            patient_data = labels[labels[patient_id_col] == pid]
+            sorted_hadms = patient_data.sort_values(sort_col)[enc_id_col].tolist()
+            if len(sorted_hadms) >= 2:  # Need at least 2 admissions for next visit prediction
+                self.patient_admissions[pid] = sorted_hadms
+
+        # Build samples: (patient_id, target_hadm_id) where target is NOT the first admission
+        self.samples = []
+        for pid, hadms in self.patient_admissions.items():
+            for i in range(1, len(hadms)):
+                self.samples.append((pid, hadms[i]))
+
+        print(f"NextVisitGTBEHRTDataset [{split}]: {len(self.samples)} samples from {len(self.patient_admissions)} patients")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        subject_id, target_hadm_id = self.samples[index]
+
+        all_hadms = self.patient_admissions[subject_id]
+        target_idx = all_hadms.index(target_hadm_id)
+
+        # Input: all admissions BEFORE target (not including target)
+        history_hadms = list(all_hadms[:target_idx])
+
+        # Read data
+        subject_dir = self.data_path / f"{self.patient_id_col}={subject_id}"
+
+        # Read history data
+        try:
+            history_table = pq.read_table(subject_dir, filters=[(self.enc_id_col, 'in', history_hadms)])
+            history_data = history_table.to_pandas()
+        except Exception:
+            history_table = pq.read_table(subject_dir)
+            history_data = history_table.to_pandas()
+            history_data = history_data[history_data[self.enc_id_col].isin(history_hadms)]
+
+        # Read target data for labels
+        try:
+            target_table = pq.read_table(subject_dir, filters=[(self.enc_id_col, '==', target_hadm_id)])
+            target_data = target_table.to_pandas()
+        except Exception:
+            target_table = pq.read_table(subject_dir)
+            target_data = target_table.to_pandas()
+            target_data = target_data[target_data[self.enc_id_col] == target_hadm_id]
+
+        # Build visit data from history
+        grouped = history_data.groupby(self.enc_id_col, sort=False)
+        visits = []
+
+        for enc_id, group in grouped:
+            tokens = group[self.token_col].tolist()[:self.max_codes_per_visit]
+            if len(tokens) == 0:
+                continue
+
+            code_types = (
+                group[self.code_type_col].tolist()[:self.max_codes_per_visit]
+                if self.code_type_col in group.columns
+                else ["diagnosis"] * len(tokens)
+            )
+
+            # Visit-level features
+            visit_type = 1  # Default: first visit
+            if self.visit_time_col in group.columns:
+                days_val = group[self.visit_time_col].iloc[0]
+                if pd.notna(days_val):
+                    days_val = float(days_val)
+                    if days_val < 30:
+                        visit_type = 2
+                    elif days_val < 90:
+                        visit_type = 3
+                    else:
+                        visit_type = 4
+
+            age = 50
+            if self.age_col in group.columns:
+                a = group[self.age_col].iloc[0]
+                age = int(a) if pd.notna(a) else 50
+                age = min(max(age, 0), 102)
+
+            day = 1
+            if self.visit_time_col in group.columns:
+                t = group[self.visit_time_col].iloc[0]
+                day = int(abs(t) % 366) + 1 if pd.notna(t) else 1
+
+            sort_val = group[self.sort_col].iloc[0] if self.sort_col in group.columns else None
+
+            visits.append({
+                'tokens': tokens,
+                'code_types': code_types,
+                'visit_type': visit_type,
+                'age': age,
+                'day': day,
+                'sort_key': sort_val,
+            })
+
+        # Sort visits by admission time
+        visits.sort(key=lambda x: x['sort_key'] if x['sort_key'] is not None else 0)
+        visits = visits[:self.max_visits]
+
+        # Build graph data
+        all_node_ids = []
+        all_edges_src = []
+        all_edges_dst = []
+        all_edge_types = []
+        vst_indices = []
+
+        node_offset = 0
+        for visit in visits:
+            tokens = visit['tokens']
+            code_types = visit['code_types']
+            n_codes = len(tokens)
+
+            # Add VST node
+            vst_idx = node_offset
+            vst_indices.append(vst_idx)
+            all_node_ids.append(self.vst_token_id)
+
+            # Add code nodes
+            for token, ctype in zip(tokens, code_types):
+                encoding = self.tokenizer.encode(token, add_special_tokens=False)
+                token_id = encoding.ids[0] if encoding.ids else 0
+                all_node_ids.append(token_id)
+
+            # Build fully-connected graph
+            visit_nodes = list(range(node_offset, node_offset + n_codes + 1))
+
+            for i, src_node in enumerate(visit_nodes):
+                for j, dst_node in enumerate(visit_nodes):
+                    if i != j:
+                        all_edges_src.append(src_node)
+                        all_edges_dst.append(dst_node)
+
+                        if i == 0 or j == 0:
+                            edge_type = VST_EDGE_TYPE
+                        else:
+                            src_type = code_types[i - 1] if i > 0 else "vst"
+                            dst_type = code_types[j - 1] if j > 0 else "vst"
+                            edge_type = EDGE_TYPE_MAP.get(
+                                (src_type, dst_type), DEFAULT_EDGE_TYPE
+                            )
+                        all_edge_types.append(edge_type)
+
+            node_offset += n_codes + 1
+
+        # Pad temporal features
+        n_visits = len(visits)
+        visit_types = [v['visit_type'] for v in visits]
+        ages = [v['age'] for v in visits]
+        days = [v['day'] for v in visits]
+        positions = list(range(n_visits))
+
+        if n_visits < self.max_visits:
+            pad_len = self.max_visits - n_visits
+            visit_types += [0] * pad_len
+            ages += [0] * pad_len
+            days += [0] * pad_len
+            positions += list(range(n_visits, self.max_visits))
+
+        attention_mask = [1] * n_visits + [0] * (self.max_visits - n_visits)
+
+        # Label: multi-hot vector of target admission's token IDs
+        target_tokens = target_data[self.token_col].tolist()
+        target_token_ids = set()
+        for token in target_tokens:
+            token_id = self.tokenizer.token_to_id(str(token))
+            if token_id is not None and token_id >= 4:  # Skip special tokens
+                target_token_ids.add(token_id)
+
+        multi_hot = torch.zeros(self.vocab_size, dtype=torch.float)
+        for token_id in target_token_ids:
+            multi_hot[token_id] = 1.0
+
+        result = {
+            "node_ids": torch.tensor(all_node_ids, dtype=torch.long) if all_node_ids else torch.zeros(1, dtype=torch.long),
+            "edge_index": torch.tensor([all_edges_src, all_edges_dst], dtype=torch.long)
+            if all_edges_src else torch.zeros((2, 0), dtype=torch.long),
+            "edge_type": torch.tensor(all_edge_types, dtype=torch.long)
+            if all_edge_types else torch.zeros(0, dtype=torch.long),
+            "vst_indices": torch.tensor(vst_indices, dtype=torch.long) if vst_indices else torch.zeros(1, dtype=torch.long),
+            "n_visits": max(n_visits, 1),  # Ensure at least 1 visit for batching
+            "visit_types": torch.tensor(visit_types[:self.max_visits], dtype=torch.long),
+            "positions": torch.tensor(positions[:self.max_visits], dtype=torch.long),
+            "ages": torch.tensor(ages[:self.max_visits], dtype=torch.long),
+            "days": torch.tensor(days[:self.max_visits], dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask[:self.max_visits], dtype=torch.bool),
+            "label": multi_hot,
+            "target_token_ids": list(target_token_ids),  # For evaluation
+        }
+
+        return result
+
+
+def collate_next_visit_gtbehrt(batch):
+    """Collate function for NextVisitGTBEHRTDataset."""
+    # Batch graph data
+    all_node_ids = []
+    all_edges_src = []
+    all_edges_dst = []
+    all_edge_types = []
+    all_vst_indices = []
+    batch_visit_counts = []
+
+    node_offset = 0
+
+    for sample in batch:
+        n_nodes = sample['node_ids'].size(0)
+        n_edges = sample['edge_index'].size(1)
+        n_visits = sample['n_visits']
+
+        # Add node IDs
+        all_node_ids.append(sample['node_ids'])
+
+        # Add edges with offset
+        if n_edges > 0:
+            all_edges_src.append(sample['edge_index'][0] + node_offset)
+            all_edges_dst.append(sample['edge_index'][1] + node_offset)
+            all_edge_types.append(sample['edge_type'])
+
+        # Add VST indices with offset
+        all_vst_indices.append(sample['vst_indices'] + node_offset)
+
+        batch_visit_counts.append(n_visits)
+        node_offset += n_nodes
+
+    # Concatenate graph data
+    graph_data = {
+        'node_ids': torch.cat(all_node_ids) if all_node_ids else torch.zeros(0, dtype=torch.long),
+        'edge_index': torch.cat([
+            torch.cat(all_edges_src).unsqueeze(0),
+            torch.cat(all_edges_dst).unsqueeze(0),
+        ], dim=0) if all_edges_src else torch.zeros((2, 0), dtype=torch.long),
+        'edge_type': torch.cat(all_edge_types) if all_edge_types else torch.zeros(0, dtype=torch.long),
+        'vst_indices': torch.cat(all_vst_indices) if all_vst_indices else torch.zeros(0, dtype=torch.long),
+        'batch_visit_counts': torch.tensor(batch_visit_counts, dtype=torch.long),
+    }
+
+    # Stack temporal features and labels
+    result = {
+        'graph_data': graph_data,
+        'visit_types': torch.stack([x['visit_types'] for x in batch]),
+        'positions': torch.stack([x['positions'] for x in batch]),
+        'ages': torch.stack([x['ages'] for x in batch]),
+        'days': torch.stack([x['days'] for x in batch]),
+        'attention_mask': torch.stack([x['attention_mask'] for x in batch]),
+        'label': torch.stack([x['label'] for x in batch]),
+        'target_token_ids': [x['target_token_ids'] for x in batch],
+    }
+
+    return result
