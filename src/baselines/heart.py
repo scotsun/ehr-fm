@@ -45,7 +45,7 @@ class HEARTConfig(PretrainedConfig):
         pad_token_id: int = 0,
         # Token types: 0=PAD, 1=CLS, 2=SEP, 3=MASK, 4=DX, 5=PR, 6=LAB, 7=MED
         n_token_types: int = 8,
-        edge_hidden_size: int = 64,
+        edge_hidden_size: int = 32,  # Original HEART paper default
         max_visits: int = 50,
         # Time encoding
         use_time_encoding: bool = True,

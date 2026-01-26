@@ -73,6 +73,7 @@ D_FF=2048
 DROPOUT=0.0
 MASK_PROB=0.20  # Aligned with HAT token_mask_prob
 LEARNING_RATE=5e-5
+USE_AMP=true  # Default: enable AMP for faster training
 
 # Model-specific settings (due to memory differences)
 case "$MODEL" in
@@ -81,8 +82,9 @@ case "$MODEL" in
         MAX_SEQ_LEN=2048  # O(L) memory with efficient attention
         ;;
     "heart")
-        BATCH_SIZE=8  # Increased after FP32 stability fixes
-        MAX_SEQ_LEN=1024  # O(L²) edge embeddings require smaller sequence length
+        BATCH_SIZE=12
+        MAX_SEQ_LEN=768  # O(L²) edge embeddings; balance between coverage and memory
+        # AMP enabled (default) - FP32 fixes in EdgeModule should prevent overflow
         ;;
 esac
 
@@ -103,9 +105,15 @@ echo "  batch_size:     ${BATCH_SIZE}"
 echo "  max_seq_len:    ${MAX_SEQ_LEN}"
 echo "  mask_prob:      ${MASK_PROB}"
 echo "  learning_rate:  ${LEARNING_RATE}"
-echo "  Mixed Precision: AMP enabled"
+echo "  Mixed Precision: ${USE_AMP}"
 echo "  Output:         ${OUTPUT_DIR}"
 echo ""
+
+# Build AMP flag
+AMP_FLAG=""
+if [ "$USE_AMP" = true ]; then
+    AMP_FLAG="--use_amp"
+fi
 
 # Start training
 python train_baselines.py \
@@ -127,7 +135,7 @@ python train_baselines.py \
     --max_grad_norm 5.0 \
     --dropout ${DROPOUT} \
     --save_every 5 \
-    --use_amp
+    ${AMP_FLAG}
 
 echo ""
 echo "=========================================="
