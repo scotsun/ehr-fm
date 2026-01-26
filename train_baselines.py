@@ -235,6 +235,7 @@ class BaselineTrainer:
                         if nan_count <= 3:
                             print(f"\nWarning: NaN/Inf gradient at step {step}. Skipping update.")
                         self.optimizer.zero_grad()
+                        self.scaler.update()  # Must call update after unscale_
                         continue
                     self.scaler.step(self.optimizer)
                     self.scaler.update()
