@@ -651,6 +651,8 @@ class BaseWithHeadsTrainer(Trainer):
 
                 scaler.scale(scaled_mlm_loss).backward()
 
+                del mlm_logits, scaled_mlm_loss
+
                 # --- PASS 2: MSM ---
                 with autocast(device_type="cuda", dtype=torch.float16):
                     _, msm_set_logits, _ = model(

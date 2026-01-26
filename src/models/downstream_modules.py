@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from torch.nn.utils.rnn import pad_sequence
+
 from src.layers.ffn import FFNSwiGLUBlock
 
 
@@ -91,14 +93,24 @@ class Downstream(nn.Module):
         x = x * mask.unsqueeze(-1)
         return x.sum(dim=-2) / mask.sum(dim=-1, keepdim=True).clamp(min=1)
 
+    def _cls_pool_1d(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        # x.shape: (batch, context, d_model)
+        # mask.shape: (batch, context) <- the mask for cls token
+        cls_emb_list = [_emb[_mask] for _emb, _mask in zip(x, mask)]
+        x = pad_sequence(cls_emb_list, batch_first=True)
+        set_mask = ~(x == 0).all(dim=-1)  # set_mask.shape: (batch, max_batch_seq_len)
+        return x, set_mask
+
     def forward(
-        self, x: torch.Tensor, mask: torch.Tensor, set_mask: torch.Tensor
+        self, x: torch.Tensor, mask: torch.Tensor, set_mask: torch.Tensor | None
     ) -> torch.Tensor:
         match self.set_pool:
             case "mean":
                 x = self._masked_avg_pool(x, mask)
             case "cls":
                 x = x.select(dim=-2, index=0)
+            case "cls-1d":
+                x, set_mask = self._cls_pool_1d(x, mask)
             case _:
                 raise ValueError(f"Unknown set_pool: {self.set_pool}")
 
