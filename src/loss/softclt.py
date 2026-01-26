@@ -13,6 +13,7 @@ class SoftCLT(nn.Module):
         self.temperature = temperature
 
     def forward(self, z1, z2, mask1, mask2):
+        #
         # the mask is the set_attention_mask
         pass
 
@@ -295,3 +296,8 @@ def densify(x, tau, alpha=0.5):
     return ((2 * alpha) / (1 + torch.exp(-tau * x))) + (1 - alpha) * torch.eye(
         x.shape[0]
     )
+
+
+if __name__ == "__main__":
+    a = torch.eye(3)
+    print(dup_matrix(a)[0].shape)

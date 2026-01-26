@@ -663,11 +663,11 @@ class BaseWithHeadsTrainer(Trainer):
                     )
 
                     msm_loss = criterions["kl_div"](
-                        F.log_softmax(msm_set_logits / 10, dim=-1), target_dist
+                        F.log_softmax(msm_set_logits, dim=-1), target_dist
                     )
                     scaled_msm_loss = trainer_args["l_msm"] * msm_loss
 
-                scaler.scale(10 * scaled_msm_loss).backward()
+                scaler.scale(scaled_msm_loss).backward()
 
                 # --- OPTIMIZER STEP ---
                 scaler.step(optimizer)
@@ -752,7 +752,7 @@ class BaseWithHeadsTrainer(Trainer):
                     mlm_labels.view(-1),
                 )
                 msm_loss = criterions["kl_div"](
-                    F.log_softmax(msm_set_logits / 0.1, dim=-1), target_dist
+                    F.log_softmax(msm_set_logits, dim=-1), target_dist
                 )
 
                 if trainer_args["eval_last_set"]:

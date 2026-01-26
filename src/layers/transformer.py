@@ -1,4 +1,5 @@
 import math
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import einsum
@@ -9,11 +10,19 @@ from .ffn import FFNSwiGLUBlock, FFNLUBlock
 
 
 class MultiHeadAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, h: int, with_rope: bool, attn_backend: str):
+    def __init__(
+        self,
+        d_model: int,
+        h: int,
+        with_rope: bool,
+        attn_backend: str,
+        dropout: float = 0.0,
+    ):
         super().__init__()
         self.d_model = d_model
         self.h = h
         self.with_rope = with_rope
+        self.dropout = dropout
 
         assert d_model % h == 0, f"d_model {d_model} must be divisible by h {h}"
         self.d_k = d_model // h  # dimension of each head
@@ -35,7 +44,7 @@ class MultiHeadAttentionBlock(nn.Module):
                 )
 
     @staticmethod
-    def attention(query, key, value, mask):
+    def attention(query, key, value, mask, dropout=0.0):
         # this can be replaced
         d_k = query.shape[-1]
         # transpose matmul
@@ -45,16 +54,22 @@ class MultiHeadAttentionBlock(nn.Module):
             mask = mask[:, None, None, :]
             attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
         attention_scores = attention_scores.softmax(dim=-1)
+        attention_scores = torch.dropout(attention_scores, p=dropout, train=True)
         # matmul
         mh_out = einsum("bhqk, bhkd->bhqd", attention_scores, value)
         return mh_out
 
     @staticmethod
-    def efficient_attention(query, key, value, attn_mask):
+    def efficient_attention(query, key, value, attn_mask, dropout=0.0):
         attn_mask = einsum("bq,bk -> bqk", attn_mask, attn_mask)[:, None, :, :]
         with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
             mh_out = F.scaled_dot_product_attention(
-                query, key, value, attn_mask=attn_mask, dropout_p=0.0, is_causal=False
+                query,
+                key,
+                value,
+                attn_mask=attn_mask,
+                dropout_p=dropout,
+                is_causal=False,
             )
         return mh_out
 
@@ -71,7 +86,7 @@ class MultiHeadAttentionBlock(nn.Module):
         if self.with_rope:
             query, key = self.rope_q(query, t), self.rope_k(key, t)
 
-        mh_out = self._attn_func(query, key, value, mask)
+        mh_out = self._attn_func(query, key, value, mask, self.dropout)
         # (-1, h, seq_len, d_k) -> (-1, seq_len, h, d_k) -> (-1, seq_len, d_model)
         mh_out = (
             mh_out.transpose(1, 2).contiguous().view(mh_out.shape[0], -1, self.d_model)

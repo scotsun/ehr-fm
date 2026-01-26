@@ -12,19 +12,23 @@ class FMBase(PreTrainedModel):
     def __init__(self, config: FMConfig):
         super().__init__(config)
         self.embeddings = FMEmbeddings(config)
-        self.t2v = T2V(config.d_model, config.t2v_scale)
+        if config.dropout > 0.0:
+            _half_n = config.n_blocks // 2
+            dropout_ps = [0.0] * _half_n + [config.dropout] * _half_n
+        else:
+            dropout_ps = [0.0] * config.n_blocks
         self.blocks = nn.ModuleList(
             [
                 HierarchicalTransformerBlock(
                     d_model=config.d_model,
                     d_ff=config.d_ff,
                     h=config.n_heads,
-                    dropout=config.dropout,
+                    dropout=dropout_ps[i],
                     norm_type=config.norm_type,
                     ffn_type=config.ffn_type,
                     attn_backend=config.attn_backend,
                 )
-                for _ in range(config.n_blocks)
+                for i in range(config.n_blocks)
             ]
         )
         match config.norm_type:
@@ -47,7 +51,7 @@ class FMBase(PreTrainedModel):
     def encode(self, input_ids, attention_mask, set_attention_mask, t):
         h = self.embeddings(input_ids)
         h = h + self.t2v(t)
-        for block in self.blocks:
+        for block in self.blocks:  # TODO: get mid representation
             h = block(h, attention_mask, set_attention_mask, t)
         h = self.last_norm(h)
         # (batch, max_seq, max_set_size, d_model)
