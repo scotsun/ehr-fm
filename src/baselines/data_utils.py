@@ -516,3 +516,615 @@ def collate_flat_finetune(batch):
         "token_types": torch.stack([x["token_types"] for x in batch]) if "token_types" in batch[0] else None,
         "visit_ids": torch.stack([x["visit_ids"] for x in batch]) if "visit_ids" in batch[0] else None,
     }
+
+
+# ============================================================================
+# GT-BEHRT Data Utilities
+# ============================================================================
+
+# Edge type mapping for GT-BEHRT
+# Edge types based on code type pairs (symmetric)
+EDGE_TYPE_MAP = {
+    ("diagnosis", "diagnosis"): 0,
+    ("diagnosis", "procedure"): 1,
+    ("procedure", "diagnosis"): 1,
+    ("diagnosis", "medication"): 2,
+    ("medication", "diagnosis"): 2,
+    ("diagnosis", "lab"): 3,
+    ("lab", "diagnosis"): 3,
+    ("procedure", "procedure"): 4,
+    ("procedure", "medication"): 5,
+    ("medication", "procedure"): 5,
+    ("procedure", "lab"): 6,
+    ("lab", "procedure"): 6,
+    ("medication", "medication"): 7,
+    ("medication", "lab"): 8,
+    ("lab", "medication"): 8,
+    ("lab", "lab"): 9,
+}
+# Default edge type for unknown pairs
+DEFAULT_EDGE_TYPE = 0
+# Edge type for VST node connections
+VST_EDGE_TYPE = 0  # Same as diagnosis-diagnosis
+
+
+class GTBEHRTDataset(Dataset):
+    """
+    GT-BEHRT Dataset for graph-based EHR processing.
+
+    Converts parquet data into graph format:
+    - Each visit becomes a fully-connected graph of medical codes
+    - A virtual <VST> node is added to each visit for graph-level readout
+    - Edge types are determined by code type pairs
+    - Temporal features (visit type, age, day-of-year) are extracted
+
+    Input: Hive-partitioned parquet directory
+    Output: Graph data + temporal features per patient
+    """
+
+    def __init__(
+        self,
+        data_path: str | Path,
+        tokenizer,
+        supervised_task_cohort=None,
+        max_visits: int = 50,
+        max_codes_per_visit: int = 100,
+        patient_id_col: str = "subject_id",
+        enc_id_col: str = "hadm_id",
+        token_col: str = "code",
+        code_type_col: str = "code_type",
+        sort_col: str = "visit_seq",
+        visit_time_col: str = "days_since_prior_admission",
+        # GT-BEHRT specific columns (optional, use defaults if not available)
+        visit_type_col: str = "admission_type",  # Visit type (ER, inpatient, etc.)
+        age_col: str = "anchor_age",  # Patient age at visit
+        los_col: str = "los",  # Length of stay
+    ):
+        self.data_path = Path(data_path)
+        self.tokenizer = tokenizer
+        self.max_visits = max_visits
+        self.max_codes_per_visit = max_codes_per_visit
+        self.patient_id_col = patient_id_col
+        self.enc_id_col = enc_id_col
+        self.token_col = token_col
+        self.code_type_col = code_type_col
+        self.sort_col = sort_col
+        self.visit_time_col = visit_time_col
+        self.visit_type_col = visit_type_col
+        self.age_col = age_col
+        self.los_col = los_col
+
+        # Get special token IDs
+        self.vst_token_id = tokenizer.token_to_id("[PAD]")  # Use PAD as VST placeholder
+
+        # Scan patient directories
+        self.subject_dirs = sorted(self.data_path.glob(f"{patient_id_col}=*"))
+        if not self.subject_dirs:
+            self.subject_dirs = sorted(self.data_path.glob("subject_id=*"))
+
+        self.patient_ids = [d.name.split('=')[1] for d in self.subject_dirs]
+
+        # Filter by cohort if provided
+        if supervised_task_cohort is not None:
+            cohort_ids = set(supervised_task_cohort[patient_id_col].astype(str).tolist())
+            filtered = [(d, pid) for d, pid in zip(self.subject_dirs, self.patient_ids) if pid in cohort_ids]
+            self.subject_dirs = [d for d, _ in filtered]
+            self.patient_ids = [pid for _, pid in filtered]
+
+    def __len__(self):
+        return len(self.patient_ids)
+
+    def __getitem__(self, index):
+        """
+        Get a patient's EHR as graph data.
+
+        Returns:
+            dict with:
+                - node_ids: (n_nodes,) token IDs including VST nodes
+                - edge_index: (2, n_edges) graph edges
+                - edge_type: (n_edges,) edge type IDs
+                - vst_indices: (n_visits,) indices of VST nodes
+                - code_types: (n_nodes,) code type for each node
+                - visit_types: (n_visits,) visit type IDs
+                - positions: (n_visits,) visit positions (0, 1, 2, ...)
+                - ages: (n_visits,) patient age at each visit
+                - days: (n_visits,) day of year for each visit
+                - attention_mask: (n_visits,) valid visit mask
+        """
+        subject_dir = self.subject_dirs[index]
+
+        # Read needed columns
+        needed_cols = [self.enc_id_col, self.token_col]
+        if self.sort_col:
+            needed_cols.append(self.sort_col)
+        if self.code_type_col:
+            needed_cols.append(self.code_type_col)
+        if self.visit_time_col:
+            needed_cols.append(self.visit_time_col)
+
+        # Add optional columns if they might exist
+        optional_cols = [self.visit_type_col, self.age_col, self.los_col]
+        for col in optional_cols:
+            if col:
+                needed_cols.append(col)
+
+        # Read and deduplicate columns
+        needed_cols = list(set(needed_cols))
+
+        try:
+            table = pq.read_table(subject_dir, columns=needed_cols)
+            df = table.to_pandas()
+        except Exception:
+            # Fallback: read all and select
+            table = pq.read_table(subject_dir)
+            df = table.to_pandas()
+            df = df[[c for c in needed_cols if c in df.columns]]
+
+        # Sort by visit
+        if self.sort_col and self.sort_col in df.columns:
+            df = df.sort_values(by=self.sort_col)
+
+        # Group by encounter
+        grouped = df.groupby(self.enc_id_col, sort=False)
+
+        # Collect visit data
+        visits = []
+        for enc_id, group in grouped:
+            tokens = group[self.token_col].tolist()[:self.max_codes_per_visit]
+            if len(tokens) == 0:
+                continue
+
+            code_types = (
+                group[self.code_type_col].tolist()[:self.max_codes_per_visit]
+                if self.code_type_col and self.code_type_col in group.columns
+                else ["diagnosis"] * len(tokens)
+            )
+
+            # Get visit-level features
+            visit_type = 0  # Default
+            if self.visit_type_col and self.visit_type_col in group.columns:
+                vt = group[self.visit_type_col].iloc[0]
+                # Map visit type to ID (simple hash for now)
+                visit_type = hash(str(vt)) % 10 + 1 if pd.notna(vt) else 0
+
+            age = 50  # Default
+            if self.age_col and self.age_col in group.columns:
+                a = group[self.age_col].iloc[0]
+                age = int(a) if pd.notna(a) else 50
+                age = min(max(age, 0), 102)  # Clip to valid range
+
+            # Day of year (use visit order as proxy if not available)
+            day = 1
+            if self.visit_time_col and self.visit_time_col in group.columns:
+                t = group[self.visit_time_col].iloc[0]
+                day = int(abs(t) % 366) + 1 if pd.notna(t) else 1
+
+            visits.append({
+                'tokens': tokens,
+                'code_types': code_types,
+                'visit_type': visit_type,
+                'age': age,
+                'day': day,
+            })
+
+        # Limit to max_visits
+        visits = visits[:self.max_visits]
+
+        # Build graph data
+        all_node_ids = []
+        all_code_types = []
+        all_edges_src = []
+        all_edges_dst = []
+        all_edge_types = []
+        vst_indices = []
+
+        node_offset = 0
+        for visit in visits:
+            tokens = visit['tokens']
+            code_types = visit['code_types']
+            n_codes = len(tokens)
+
+            # Add VST node first
+            vst_idx = node_offset
+            vst_indices.append(vst_idx)
+            all_node_ids.append(self.vst_token_id)  # VST uses PAD token ID
+            all_code_types.append("vst")
+
+            # Add code nodes
+            for token, ctype in zip(tokens, code_types):
+                encoding = self.tokenizer.encode(token, add_special_tokens=False)
+                token_id = encoding.ids[0] if encoding.ids else 0
+                all_node_ids.append(token_id)
+                all_code_types.append(ctype)
+
+            # Build fully-connected graph within this visit
+            visit_nodes = list(range(node_offset, node_offset + n_codes + 1))  # +1 for VST
+
+            for i, src_node in enumerate(visit_nodes):
+                for j, dst_node in enumerate(visit_nodes):
+                    if i != j:  # No self-loops
+                        all_edges_src.append(src_node)
+                        all_edges_dst.append(dst_node)
+
+                        # Determine edge type
+                        if i == 0 or j == 0:  # VST node connection
+                            edge_type = VST_EDGE_TYPE
+                        else:
+                            src_type = code_types[i - 1] if i > 0 else "vst"
+                            dst_type = code_types[j - 1] if j > 0 else "vst"
+                            edge_type = EDGE_TYPE_MAP.get(
+                                (src_type, dst_type), DEFAULT_EDGE_TYPE
+                            )
+                        all_edge_types.append(edge_type)
+
+            node_offset += n_codes + 1  # +1 for VST
+
+        # Pad visits to max_visits
+        n_visits = len(visits)
+        visit_types = [v['visit_type'] for v in visits]
+        ages = [v['age'] for v in visits]
+        days = [v['day'] for v in visits]
+        positions = list(range(n_visits))
+
+        # Pad temporal features
+        if n_visits < self.max_visits:
+            pad_len = self.max_visits - n_visits
+            visit_types += [0] * pad_len
+            ages += [0] * pad_len
+            days += [0] * pad_len
+            positions += list(range(n_visits, self.max_visits))
+
+        # Create attention mask
+        attention_mask = [1] * n_visits + [0] * (self.max_visits - n_visits)
+
+        # Convert to tensors
+        result = {
+            "node_ids": torch.tensor(all_node_ids, dtype=torch.long),
+            "edge_index": torch.tensor([all_edges_src, all_edges_dst], dtype=torch.long)
+            if all_edges_src else torch.zeros((2, 0), dtype=torch.long),
+            "edge_type": torch.tensor(all_edge_types, dtype=torch.long)
+            if all_edge_types else torch.zeros(0, dtype=torch.long),
+            "vst_indices": torch.tensor(vst_indices, dtype=torch.long),
+            "n_visits": n_visits,
+            "visit_types": torch.tensor(visit_types[:self.max_visits], dtype=torch.long),
+            "positions": torch.tensor(positions[:self.max_visits], dtype=torch.long),
+            "ages": torch.tensor(ages[:self.max_visits], dtype=torch.long),
+            "days": torch.tensor(days[:self.max_visits], dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask[:self.max_visits], dtype=torch.bool),
+        }
+
+        return result
+
+
+def collate_gtbehrt(batch):
+    """
+    Collate function for GT-BEHRT dataset.
+
+    Combines multiple patient graphs into a single batched graph.
+    """
+    # Batch graph data
+    all_node_ids = []
+    all_edges_src = []
+    all_edges_dst = []
+    all_edge_types = []
+    all_vst_indices = []
+    batch_visit_counts = []
+
+    node_offset = 0
+    vst_offset = 0
+
+    for sample in batch:
+        n_nodes = sample['node_ids'].size(0)
+        n_edges = sample['edge_index'].size(1)
+        n_visits = sample['n_visits']
+
+        # Add node IDs
+        all_node_ids.append(sample['node_ids'])
+
+        # Add edges with offset
+        if n_edges > 0:
+            all_edges_src.append(sample['edge_index'][0] + node_offset)
+            all_edges_dst.append(sample['edge_index'][1] + node_offset)
+            all_edge_types.append(sample['edge_type'])
+
+        # Add VST indices with offset
+        all_vst_indices.append(sample['vst_indices'] + node_offset)
+
+        batch_visit_counts.append(n_visits)
+        node_offset += n_nodes
+
+    # Concatenate graph data
+    graph_data = {
+        'node_ids': torch.cat(all_node_ids) if all_node_ids else torch.zeros(0, dtype=torch.long),
+        'edge_index': torch.cat([
+            torch.cat(all_edges_src).unsqueeze(0),
+            torch.cat(all_edges_dst).unsqueeze(0),
+        ], dim=0) if all_edges_src else torch.zeros((2, 0), dtype=torch.long),
+        'edge_type': torch.cat(all_edge_types) if all_edge_types else torch.zeros(0, dtype=torch.long),
+        'vst_indices': torch.cat(all_vst_indices) if all_vst_indices else torch.zeros(0, dtype=torch.long),
+        'batch_visit_counts': torch.tensor(batch_visit_counts, dtype=torch.long),
+    }
+
+    # Stack temporal features
+    result = {
+        'graph_data': graph_data,
+        'visit_types': torch.stack([x['visit_types'] for x in batch]),
+        'positions': torch.stack([x['positions'] for x in batch]),
+        'ages': torch.stack([x['ages'] for x in batch]),
+        'days': torch.stack([x['days'] for x in batch]),
+        'attention_mask': torch.stack([x['attention_mask'] for x in batch]),
+    }
+
+    return result
+
+
+class GTBEHRTFinetuneDataset(Dataset):
+    """
+    GT-BEHRT Dataset for fine-tuning on downstream tasks.
+
+    Similar to GTBEHRTDataset but with task-specific labels and filtering.
+    """
+
+    def __init__(
+        self,
+        data_path: str | Path,
+        labels_df: pd.DataFrame,
+        tokenizer,
+        task: DownstreamTask,
+        max_visits: int = 50,
+        max_codes_per_visit: int = 100,
+        split: str = "train",
+        split_ratios: tuple = (0.7, 0.15, 0.15),
+        seed: int = 42,
+        patient_id_col: str = "subject_id",
+        enc_id_col: str = "hadm_id",
+        token_col: str = "code",
+        code_type_col: str = "code_type",
+        sort_col: str = "admittime",
+        visit_time_col: str = "days_since_prior_admission",
+        visit_type_col: str = "admission_type",
+        age_col: str = "anchor_age",
+        token_time_col: str = "time_offset_hours",
+    ):
+        self.data_path = Path(data_path)
+        self.tokenizer = tokenizer
+        self.task = task
+        self.task_config = TASK_CONFIGS[task]
+        self.max_visits = max_visits
+        self.max_codes_per_visit = max_codes_per_visit
+        self.patient_id_col = patient_id_col
+        self.enc_id_col = enc_id_col
+        self.token_col = token_col
+        self.code_type_col = code_type_col
+        self.sort_col = sort_col
+        self.visit_time_col = visit_time_col
+        self.visit_type_col = visit_type_col
+        self.age_col = age_col
+        self.token_time_col = token_time_col
+
+        self.vst_token_id = tokenizer.token_to_id("[PAD]")
+
+        # Setup label handling
+        self.label_col = task.value
+        valid_labels = labels_df[labels_df[self.label_col] >= 0].copy()
+
+        if task == DownstreamTask.ICD_CHAPTER:
+            self.num_classes = valid_labels[self.label_col].nunique()
+            unique_labels = sorted(valid_labels[self.label_col].unique())
+            self.label_mapping = {old: new for new, old in enumerate(unique_labels)}
+        else:
+            self.num_classes = 2
+            self.label_mapping = None
+
+        # Patient-level split
+        all_patients = valid_labels[patient_id_col].unique()
+        rng = np.random.default_rng(seed)
+        all_patients = rng.permutation(all_patients)
+
+        n_train = int(len(all_patients) * split_ratios[0])
+        n_val = int(len(all_patients) * split_ratios[1])
+
+        if split == "train":
+            split_patients = set(all_patients[:n_train])
+        elif split == "val":
+            split_patients = set(all_patients[n_train:n_train + n_val])
+        else:
+            split_patients = set(all_patients[n_train + n_val:])
+
+        self.labels = valid_labels[
+            valid_labels[patient_id_col].isin(split_patients)
+        ].reset_index(drop=True)
+
+        # Build label dict and patient admissions
+        self.label_dict = {}
+        pid_idx = self.labels.columns.get_loc(patient_id_col)
+        enc_idx = self.labels.columns.get_loc(enc_id_col)
+        label_idx = self.labels.columns.get_loc(self.label_col)
+
+        for row in self.labels.itertuples(index=False):
+            key = (row[pid_idx], row[enc_idx])
+            label = row[label_idx]
+            if self.label_mapping:
+                label = self.label_mapping[label]
+            self.label_dict[key] = label
+
+        self.samples = list(self.label_dict.keys())
+
+        # Build patient admission order
+        self.patient_admissions = {}
+        for (pid, hadm_id) in self.samples:
+            if pid not in self.patient_admissions:
+                self.patient_admissions[pid] = []
+            self.patient_admissions[pid].append(hadm_id)
+
+        for pid in self.patient_admissions:
+            patient_labels = self.labels[self.labels[patient_id_col] == pid]
+            sorted_hadms = patient_labels.sort_values(sort_col)[enc_id_col].tolist()
+            self.patient_admissions[pid] = sorted_hadms
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        """Get a patient's EHR as graph data with label."""
+        subject_id, target_hadm_id = self.samples[index]
+        label = self.label_dict[(subject_id, target_hadm_id)]
+
+        # Get history up to and including target admission
+        all_hadms = self.patient_admissions[subject_id]
+        target_idx = all_hadms.index(target_hadm_id)
+        history_hadms = list(all_hadms[:target_idx + 1])
+
+        # Read data
+        subject_dir = self.data_path / f"{self.patient_id_col}={subject_id}"
+        try:
+            table = pq.read_table(subject_dir, filters=[(self.enc_id_col, 'in', history_hadms)])
+            history_data = table.to_pandas()
+        except Exception:
+            table = pq.read_table(subject_dir)
+            history_data = table.to_pandas()
+            history_data = history_data[history_data[self.enc_id_col].isin(history_hadms)]
+
+        # Group by encounter
+        grouped = history_data.groupby(self.enc_id_col, sort=False)
+        max_hours = self.task_config.get("max_hours")
+        exclude_target_dx = self.task_config.get("exclude_target_dx", False)
+
+        # Build visit data with task-specific filtering
+        visits = []
+        for enc_id, group in grouped:
+            # Apply task-specific filtering for target admission
+            if enc_id == target_hadm_id:
+                if exclude_target_dx:
+                    group = group[~group[self.token_col].str.startswith('DX:', na=False)]
+                if max_hours is not None and self.token_time_col in group.columns:
+                    group = group[group[self.token_time_col] <= max_hours]
+
+            tokens = group[self.token_col].tolist()[:self.max_codes_per_visit]
+            if len(tokens) == 0:
+                continue
+
+            code_types = (
+                group[self.code_type_col].tolist()[:self.max_codes_per_visit]
+                if self.code_type_col in group.columns
+                else ["diagnosis"] * len(tokens)
+            )
+
+            # Visit-level features
+            visit_type = 0
+            if self.visit_type_col in group.columns:
+                vt = group[self.visit_type_col].iloc[0]
+                visit_type = hash(str(vt)) % 10 + 1 if pd.notna(vt) else 0
+
+            age = 50
+            if self.age_col in group.columns:
+                a = group[self.age_col].iloc[0]
+                age = int(a) if pd.notna(a) else 50
+                age = min(max(age, 0), 102)
+
+            day = 1
+            if self.visit_time_col in group.columns:
+                t = group[self.visit_time_col].iloc[0]
+                day = int(abs(t) % 366) + 1 if pd.notna(t) else 1
+
+            # Sort key for ordering
+            sort_val = group[self.sort_col].iloc[0] if self.sort_col in group.columns else None
+
+            visits.append({
+                'tokens': tokens,
+                'code_types': code_types,
+                'visit_type': visit_type,
+                'age': age,
+                'day': day,
+                'sort_key': sort_val,
+            })
+
+        # Sort visits by admission time
+        visits.sort(key=lambda x: x['sort_key'] if x['sort_key'] is not None else 0)
+        visits = visits[:self.max_visits]
+
+        # Build graph data (same as GTBEHRTDataset)
+        all_node_ids = []
+        all_edges_src = []
+        all_edges_dst = []
+        all_edge_types = []
+        vst_indices = []
+
+        node_offset = 0
+        for visit in visits:
+            tokens = visit['tokens']
+            code_types = visit['code_types']
+            n_codes = len(tokens)
+
+            # Add VST node
+            vst_idx = node_offset
+            vst_indices.append(vst_idx)
+            all_node_ids.append(self.vst_token_id)
+
+            # Add code nodes
+            for token, ctype in zip(tokens, code_types):
+                encoding = self.tokenizer.encode(token, add_special_tokens=False)
+                token_id = encoding.ids[0] if encoding.ids else 0
+                all_node_ids.append(token_id)
+
+            # Build fully-connected graph
+            visit_nodes = list(range(node_offset, node_offset + n_codes + 1))
+
+            for i, src_node in enumerate(visit_nodes):
+                for j, dst_node in enumerate(visit_nodes):
+                    if i != j:
+                        all_edges_src.append(src_node)
+                        all_edges_dst.append(dst_node)
+
+                        if i == 0 or j == 0:
+                            edge_type = VST_EDGE_TYPE
+                        else:
+                            src_type = code_types[i - 1] if i > 0 else "vst"
+                            dst_type = code_types[j - 1] if j > 0 else "vst"
+                            edge_type = EDGE_TYPE_MAP.get(
+                                (src_type, dst_type), DEFAULT_EDGE_TYPE
+                            )
+                        all_edge_types.append(edge_type)
+
+            node_offset += n_codes + 1
+
+        # Pad temporal features
+        n_visits = len(visits)
+        visit_types = [v['visit_type'] for v in visits]
+        ages = [v['age'] for v in visits]
+        days = [v['day'] for v in visits]
+        positions = list(range(n_visits))
+
+        if n_visits < self.max_visits:
+            pad_len = self.max_visits - n_visits
+            visit_types += [0] * pad_len
+            ages += [0] * pad_len
+            days += [0] * pad_len
+            positions += list(range(n_visits, self.max_visits))
+
+        attention_mask = [1] * n_visits + [0] * (self.max_visits - n_visits)
+
+        result = {
+            "node_ids": torch.tensor(all_node_ids, dtype=torch.long),
+            "edge_index": torch.tensor([all_edges_src, all_edges_dst], dtype=torch.long)
+            if all_edges_src else torch.zeros((2, 0), dtype=torch.long),
+            "edge_type": torch.tensor(all_edge_types, dtype=torch.long)
+            if all_edge_types else torch.zeros(0, dtype=torch.long),
+            "vst_indices": torch.tensor(vst_indices, dtype=torch.long),
+            "n_visits": n_visits,
+            "visit_types": torch.tensor(visit_types[:self.max_visits], dtype=torch.long),
+            "positions": torch.tensor(positions[:self.max_visits], dtype=torch.long),
+            "ages": torch.tensor(ages[:self.max_visits], dtype=torch.long),
+            "days": torch.tensor(days[:self.max_visits], dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask[:self.max_visits], dtype=torch.bool),
+            "label": torch.tensor(label, dtype=torch.long),
+        }
+
+        return result
+
+
+def collate_gtbehrt_finetune(batch):
+    """Collate function for GT-BEHRT fine-tuning dataset."""
+    base_collate = collate_gtbehrt(batch)
+    base_collate['label'] = torch.stack([x['label'] for x in batch])
+    return base_collate
