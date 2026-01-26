@@ -50,6 +50,8 @@ class HEARTConfig(PretrainedConfig):
         # Time encoding
         use_time_encoding: bool = True,
         t2v_dim: int = 64,
+        # Debug options
+        disable_encounter_attention: bool = False,
         **kwargs,
     ):
         super().__init__(pad_token_id=pad_token_id, **kwargs)
@@ -66,6 +68,7 @@ class HEARTConfig(PretrainedConfig):
         self.max_visits = max_visits
         self.use_time_encoding = use_time_encoding
         self.t2v_dim = t2v_dim
+        self.disable_encounter_attention = disable_encounter_attention
 
 
 # ============================================================================
@@ -127,8 +130,12 @@ class Time2Vec(nn.Module):
 # ============================================================================
 
 def gelu(x):
-    """Gaussian Error Linear Unit activation."""
-    return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
+    """Gaussian Error Linear Unit activation.
+
+    Note: Use PyTorch's built-in F.gelu for numerical stability.
+    The custom implementation with x^3 can overflow in FP16.
+    """
+    return F.gelu(x)
 
 
 class FeedForward(nn.Module):
@@ -202,9 +209,12 @@ class EdgeModule(nn.Module):
         # The einsum sums d_model (768) terms which can overflow FP16 (max ~65504)
         token_embs_fp32 = token_embs.float()
 
+        # Clamp token_types to valid range to prevent index out of bounds
+        token_types_safe = token_types.clamp(0, self.n_types - 1)
+
         # Get type-specific transformations
-        left_trans = self.left_transform[token_types].float()  # (B, L, D, D)
-        right_trans = self.right_transform[token_types].float()  # (B, L, D, D)
+        left_trans = self.left_transform[token_types_safe].float()  # (B, L, D, D)
+        right_trans = self.right_transform[token_types_safe].float()  # (B, L, D, D)
 
         # Apply transformations: r_n = Linear_τ(v_n)
         # einsum: 'bld,blmd->blm' means output[b,l,m] = sum_d(input[b,l,d] * weight[b,l,m,d])
@@ -217,9 +227,17 @@ class EdgeModule(nn.Module):
 
         edge_embs = torch.cat([left_expanded, right_expanded], dim=-1)  # (B, L, L, 2D)
 
-        # Convert back and apply output projection
-        edge_embs = edge_embs.to(original_dtype)
-        return self.output(edge_embs)  # (B, L, L, edge_hidden_size)
+        # CRITICAL: Apply output projection in FP32 to prevent overflow
+        # Linear(1536, 64) sums 1536 terms which can overflow FP16 (max ~65504)
+        # Manually compute in FP32 to bypass autocast
+        edge_embs = F.linear(
+            edge_embs,  # Already FP32
+            self.output.weight.float(),
+            self.output.bias.float() if self.output.bias is not None else None
+        )
+
+        # Convert to original dtype AFTER the linear projection
+        return edge_embs.to(original_dtype)
 
 
 # ============================================================================
@@ -600,6 +618,8 @@ class HEART(PreTrainedModel):
         # CRITICAL: Ensure time stays in FP32 for numerical stability with AMP
         if time_offsets is not None:
             time_offsets = time_offsets.float()
+            # Clamp extreme time values to prevent overflow
+            time_offsets = time_offsets.clamp(-1e6, 1e6)
 
         # Token embeddings
         h = self.embeddings(input_ids)
@@ -625,7 +645,8 @@ class HEART(PreTrainedModel):
             h = self.entity_blocks[i](h, edge_embs, pair_pad_mask)
 
             # Encounter-level attention (across visits on [CLS] tokens)
-            if visit_ids is not None:
+            # Can be disabled for debugging with config.disable_encounter_attention
+            if visit_ids is not None and not self.config.disable_encounter_attention:
                 h = self._apply_encounter_attention(h, i, input_ids, attention_mask, visit_ids)
 
         h = self.final_norm(h)
@@ -647,27 +668,40 @@ class HEART(PreTrainedModel):
         """
         batch_size, seq_len, d_model = h.size()
         device = h.device
+        dtype = h.dtype  # Match dtype with input for AMP compatibility
 
         # Find unique visits and their first token positions
         max_visits = self.config.max_visits
 
         # Collect [CLS] tokens (first token of each visit)
-        cls_tokens = torch.zeros(batch_size, max_visits, d_model, device=device)
+        # CRITICAL: Match dtype with h for proper AMP handling
+        cls_tokens = torch.zeros(batch_size, max_visits, d_model, device=device, dtype=dtype)
         visit_mask = torch.zeros(batch_size, max_visits, dtype=torch.bool, device=device)
         visit_indices = torch.arange(max_visits, device=device).unsqueeze(0).expand(batch_size, -1)
         cls_positions = torch.zeros(batch_size, max_visits, dtype=torch.long, device=device)
 
         for b in range(batch_size):
             valid_mask = attention_mask[b].bool()
-            visits = visit_ids[b][valid_mask].unique()
+            valid_visits = visit_ids[b][valid_mask]
+
+            # Handle edge case: no valid tokens
+            if valid_visits.numel() == 0:
+                continue
+
+            visits = valid_visits.unique()
 
             for i, v in enumerate(visits):
                 if i >= max_visits:
                     break
                 # Find first position of this visit
                 visit_token_mask = (visit_ids[b] == v) & valid_mask
-                first_pos = visit_token_mask.nonzero(as_tuple=True)[0][0]
+                positions = visit_token_mask.nonzero(as_tuple=True)[0]
 
+                # Handle edge case: no matching positions
+                if positions.numel() == 0:
+                    continue
+
+                first_pos = positions[0]
                 cls_tokens[b, i] = h[b, first_pos]
                 visit_mask[b, i] = True
                 cls_positions[b, i] = first_pos
