@@ -31,6 +31,8 @@
 #   sbatch run_hi_behrt.sh finetune readmission  # Step 2: Finetune on readmission
 #   sbatch run_hi_behrt.sh finetune los          # Step 2: Finetune on LOS
 #   sbatch run_hi_behrt.sh finetune icd_chapter  # Step 2: Finetune on ICD chapter
+#   sbatch run_hi_behrt.sh finetune icd_multilabel  # Step 2: Finetune on ICD multilabel
+#   sbatch run_hi_behrt.sh finetune next_visit   # Step 2: Finetune on next visit
 # ============================================================================
 
 # Check arguments
@@ -147,8 +149,8 @@ if [ "$MODE" = "pretrain" ]; then
 # ==================== Fine-tuning ====================
 elif [ "$MODE" = "finetune" ]; then
     # Validate task argument
-    if [[ ! "$TASK" =~ ^(mortality|readmission|los|icd_chapter)$ ]]; then
-        echo "Error: Invalid task '$TASK'. Use 'mortality', 'readmission', 'los', or 'icd_chapter'."
+    if [[ ! "$TASK" =~ ^(mortality|readmission|los|icd_chapter|icd_multilabel|next_visit)$ ]]; then
+        echo "Error: Invalid task '$TASK'. Use 'mortality', 'readmission', 'los', 'icd_chapter', 'icd_multilabel', or 'next_visit'."
         exit 1
     fi
 
@@ -169,6 +171,12 @@ elif [ "$MODE" = "finetune" ]; then
             ;;
         "icd_chapter")
             TASK_ARG="icd_chapter"
+            ;;
+        "icd_multilabel")
+            TASK_ARG="icd_category_multilabel"
+            ;;
+        "next_visit")
+            TASK_ARG="next_visit"
             ;;
     esac
 
@@ -243,7 +251,7 @@ else
     echo "  sbatch run_hi_behrt.sh pretrain              # BYOL pretraining"
     echo "  sbatch run_hi_behrt.sh finetune <task>       # Finetuning"
     echo ""
-    echo "Tasks: mortality, readmission, los, icd_chapter"
+    echo "Tasks: mortality, readmission, los, icd_chapter, icd_multilabel, next_visit"
     exit 1
 fi
 

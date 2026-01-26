@@ -15,14 +15,14 @@
 # Baseline Models Fine-tuning on Downstream Tasks
 #
 # Models: core-behrt, heart
-# Tasks: mortality, readmission_30d, prolonged_los, icd_chapter
+# Tasks: mortality, readmission_30d, prolonged_los, icd_chapter, icd_category_multilabel, next_visit
 #
 # Usage:
 #   sbatch run_finetune_baselines.sh core-behrt mortality
 #   sbatch run_finetune_baselines.sh heart readmission_30d
 #
 # Or run all tasks for a model:
-#   for task in mortality readmission_30d prolonged_los icd_chapter; do
+#   for task in mortality readmission_30d prolonged_los icd_chapter icd_category_multilabel next_visit; do
 #     sbatch run_finetune_baselines.sh core-behrt $task
 #   done
 # ============================================================================
@@ -36,9 +36,9 @@ if [[ ! "$MODEL" =~ ^(core-behrt|heart)$ ]]; then
     exit 1
 fi
 
-if [[ ! "$TASK" =~ ^(mortality|readmission_30d|prolonged_los|icd_chapter)$ ]]; then
+if [[ ! "$TASK" =~ ^(mortality|readmission_30d|prolonged_los|icd_chapter|icd_category_multilabel|next_visit)$ ]]; then
     echo "Error: Invalid task '$TASK'."
-    echo "Available tasks: mortality, readmission_30d, prolonged_los, icd_chapter"
+    echo "Available tasks: mortality, readmission_30d, prolonged_los, icd_chapter, icd_category_multilabel, next_visit"
     exit 1
 fi
 

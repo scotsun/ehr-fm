@@ -41,7 +41,9 @@ from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_sco
 from tokenizers import Tokenizer
 
 # Reuse HAT's FinetuneDataset
-from src.finetune.data_utils import FinetuneDataset, DownstreamTask, TASK_CONFIGS, collate_finetune
+from src.finetune.data_utils import (
+    FinetuneDataset, NextVisitDataset, DownstreamTask, TASK_CONFIGS, collate_finetune
+)
 from src.baselines.hi_behrt import HiBEHRTConfig, HiBEHRTSimpleForClassification
 
 
@@ -78,6 +80,36 @@ def flatten_batch_for_hibehrt(batch):
         "time_values": time_values,
         "label": batch["label"],
     }
+
+
+def compute_recall_at_k(preds: np.ndarray, targets: np.ndarray, k: int) -> float:
+    """Compute Recall@k for set prediction task."""
+    recalls = []
+    for pred, target in zip(preds, targets):
+        top_k_indices = np.argsort(pred)[-k:]
+        true_indices = np.where(target > 0)[0]
+        if len(true_indices) == 0:
+            continue
+        hits = len(set(top_k_indices) & set(true_indices))
+        recalls.append(hits / len(true_indices))
+    return np.mean(recalls) if recalls else 0.0
+
+
+def compute_ndcg_at_k(preds: np.ndarray, targets: np.ndarray, k: int) -> float:
+    """Compute NDCG@k for set prediction task."""
+    ndcgs = []
+    for pred, target in zip(preds, targets):
+        top_k_indices = np.argsort(pred)[-k:][::-1]
+        dcg = 0.0
+        for i, idx in enumerate(top_k_indices):
+            if target[idx] > 0:
+                dcg += 1.0 / np.log2(i + 2)
+        num_relevant = int(target.sum())
+        if num_relevant == 0:
+            continue
+        ideal_dcg = sum(1.0 / np.log2(i + 2) for i in range(min(k, num_relevant)))
+        ndcgs.append(dcg / ideal_dcg if ideal_dcg > 0 else 0.0)
+    return np.mean(ndcgs) if ndcgs else 0.0
 
 
 def create_hi_behrt_model(num_classes, args, pretrained_path=None):
@@ -155,12 +187,14 @@ class HiBEHRTTrainer:
         self.patience = patience
         self.use_amp = use_amp and self.device.type == "cuda"
 
-        is_multilabel = self.task_config.get("is_multilabel", False)
+        self.is_multilabel = self.task_config.get("is_multilabel", False)
+        self.is_set_prediction = self.task_config.get("is_set_prediction", False)
         num_classes = model.num_classes
-        # For multi-class tasks, use auroc; for binary tasks, use auprc
-        if num_classes > 2:
-            self.metric_for_best_model = "auroc"
-        elif is_multilabel:
+
+        # Determine best metric for model selection
+        if self.is_set_prediction:
+            self.metric_for_best_model = "recall@20"
+        elif num_classes > 2 or self.is_multilabel:
             self.metric_for_best_model = "auroc"
         else:
             self.metric_for_best_model = "auprc"
@@ -270,6 +304,7 @@ class HiBEHRTTrainer:
         return total_loss / num_batches
 
     @torch.no_grad()
+    @torch.no_grad()
     def evaluate(self, dataloader=None):
         """Evaluate on validation/test set."""
         if dataloader is None:
@@ -291,59 +326,102 @@ class HiBEHRTTrainer:
             labels = labels.cpu()
 
             num_classes = self.model.num_classes
-            if num_classes == 1:
+
+            # Handle different task types
+            if self.is_set_prediction or self.is_multilabel:
+                probs = torch.sigmoid(logits)
+                preds = (probs > 0.5).long()
+                all_probs.append(probs.numpy())
+                all_preds.append(preds.numpy())
+                all_labels.append(labels.numpy())
+            elif num_classes == 1:
                 probs = torch.sigmoid(logits.squeeze(-1))
                 preds = (probs > 0.5).long()
                 all_probs.extend(probs.numpy())
+                all_preds.extend(preds.numpy())
+                all_labels.extend(labels.numpy())
             elif num_classes == 2:
                 probs = F.softmax(logits, dim=-1)[:, 1]
                 preds = (probs > 0.5).long()
                 all_probs.extend(probs.numpy())
+                all_preds.extend(preds.numpy())
+                all_labels.extend(labels.numpy())
             else:
                 probs = F.softmax(logits, dim=-1)
                 preds = logits.argmax(dim=-1)
                 all_probs.append(probs.numpy())
+                all_preds.extend(preds.numpy())
+                all_labels.extend(labels.numpy())
 
-            all_preds.extend(preds.numpy())
-            all_labels.extend(labels.numpy())
+        # Compute metrics based on task type
+        if self.is_set_prediction:
+            all_probs = np.vstack(all_probs)
+            all_labels = np.vstack(all_labels)
+            metrics = {}
+            for k in [10, 20, 30]:
+                metrics[f"recall@{k}"] = compute_recall_at_k(all_probs, all_labels, k)
+                metrics[f"ndcg@{k}"] = compute_ndcg_at_k(all_probs, all_labels, k)
+            return metrics
 
-        all_preds = np.array(all_preds)
-        all_labels = np.array(all_labels)
+        elif self.is_multilabel:
+            all_probs = np.vstack(all_probs)
+            all_labels = np.vstack(all_labels)
+            all_preds = np.vstack(all_preds)
 
-        metrics = {"accuracy": accuracy_score(all_labels, all_preds)}
-
-        num_classes = self.model.num_classes
-        if num_classes <= 2:
-            all_probs = np.array(all_probs)
+            metrics = {}
             try:
-                metrics["auroc"] = roc_auc_score(all_labels, all_probs)
-                metrics["auprc"] = average_precision_score(all_labels, all_probs)
-            except ValueError:
+                aurocs = []
+                for c in range(all_labels.shape[1]):
+                    if all_labels[:, c].sum() > 0 and all_labels[:, c].sum() < len(all_labels):
+                        aurocs.append(roc_auc_score(all_labels[:, c], all_probs[:, c]))
+                metrics["auroc"] = np.mean(aurocs) if aurocs else 0.0
+
+                auprcs = []
+                for c in range(all_labels.shape[1]):
+                    if all_labels[:, c].sum() > 0:
+                        auprcs.append(average_precision_score(all_labels[:, c], all_probs[:, c]))
+                metrics["auprc"] = np.mean(auprcs) if auprcs else 0.0
+            except ValueError as e:
+                print(f"  Warning: Could not compute metrics: {e}")
                 metrics["auroc"] = 0.0
                 metrics["auprc"] = 0.0
-            metrics["f1"] = f1_score(all_labels, all_preds)
-        else:
-            all_probs = np.vstack(all_probs)
-            try:
-                # Multi-class AUROC: compute per-class OVR AUROC and average
-                # Only include classes that appear in validation set
-                class_aurocs = []
-                for c in range(num_classes):
-                    binary_labels = (all_labels == c).astype(int)
-                    if binary_labels.sum() > 0 and binary_labels.sum() < len(binary_labels):
-                        # Class c has both positive and negative examples
-                        class_auroc = roc_auc_score(binary_labels, all_probs[:, c])
-                        class_aurocs.append(class_auroc)
-                if class_aurocs:
-                    metrics["auroc"] = np.mean(class_aurocs)
-                else:
-                    metrics["auroc"] = 0.0
-            except ValueError as e:
-                print(f"  Warning: Could not compute AUROC: {e}")
-                metrics["auroc"] = 0.0
-            metrics["f1_macro"] = f1_score(all_labels, all_preds, average="macro")
 
-        return metrics
+            metrics["f1_macro"] = f1_score(all_labels, all_preds, average="macro", zero_division=0)
+            metrics["f1_micro"] = f1_score(all_labels, all_preds, average="micro", zero_division=0)
+            return metrics
+
+        else:
+            all_preds = np.array(all_preds)
+            all_labels = np.array(all_labels)
+            num_classes = self.model.num_classes
+
+            metrics = {"accuracy": accuracy_score(all_labels, all_preds)}
+
+            if num_classes <= 2:
+                all_probs = np.array(all_probs)
+                try:
+                    metrics["auroc"] = roc_auc_score(all_labels, all_probs)
+                    metrics["auprc"] = average_precision_score(all_labels, all_probs)
+                except ValueError:
+                    metrics["auroc"] = 0.0
+                    metrics["auprc"] = 0.0
+                metrics["f1"] = f1_score(all_labels, all_preds)
+            else:
+                all_probs = np.vstack(all_probs)
+                try:
+                    class_aurocs = []
+                    for c in range(num_classes):
+                        binary_labels = (all_labels == c).astype(int)
+                        if binary_labels.sum() > 0 and binary_labels.sum() < len(binary_labels):
+                            class_auroc = roc_auc_score(binary_labels, all_probs[:, c])
+                            class_aurocs.append(class_auroc)
+                    metrics["auroc"] = np.mean(class_aurocs) if class_aurocs else 0.0
+                except ValueError as e:
+                    print(f"  Warning: Could not compute AUROC: {e}")
+                    metrics["auroc"] = 0.0
+                metrics["f1_macro"] = f1_score(all_labels, all_preds, average="macro")
+
+            return metrics
 
     def train(self):
         """Full training loop."""
@@ -388,7 +466,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Hi-BEHRT End-to-End Training")
 
     parser.add_argument("--task", type=str, required=True,
-                       choices=["mortality", "readmission_30d", "prolonged_los", "icd_chapter"])
+                       choices=["mortality", "readmission_30d", "prolonged_los",
+                                "icd_chapter", "icd_category_multilabel", "next_visit"])
 
     parser.add_argument("--data_path", type=str,
                        default="dataset/mimic4/data/mimic4_tokens.parquet")
@@ -501,40 +580,75 @@ def main():
     print(f"Loading labels from {args.labels_path}")
     labels_df = pd.read_csv(args.labels_path)
 
-    # Create datasets using HAT's FinetuneDataset
-    print("\nCreating datasets (using HAT's FinetuneDataset)...")
-    train_dataset = FinetuneDataset(
-        data_path=args.data_path,
-        labels_df=labels_df,
-        tokenizer=tokenizer,
-        task=task,
-        max_seg=args.max_seg,
-        max_seq_len=args.max_seq_len,
-        split="train",
-        seed=args.seed,
-    )
-    val_dataset = FinetuneDataset(
-        data_path=args.data_path,
-        labels_df=labels_df,
-        tokenizer=tokenizer,
-        task=task,
-        max_seg=args.max_seg,
-        max_seq_len=args.max_seq_len,
-        split="val",
-        seed=args.seed,
-    )
-    test_dataset = FinetuneDataset(
-        data_path=args.data_path,
-        labels_df=labels_df,
-        tokenizer=tokenizer,
-        task=task,
-        max_seg=args.max_seg,
-        max_seq_len=args.max_seq_len,
-        split="test",
-        seed=args.seed,
-    )
+    # Create datasets
+    task_config = TASK_CONFIGS[task]
+    is_set_prediction = task_config.get("is_set_prediction", False)
 
-    num_classes = train_dataset.num_classes
+    if is_set_prediction:
+        # Use NextVisitDataset for NEXT_VISIT task
+        print("\nCreating datasets (using NextVisitDataset)...")
+        train_dataset = NextVisitDataset(
+            data_path=args.data_path,
+            labels_df=labels_df,
+            tokenizer=tokenizer,
+            max_seg=args.max_seg,
+            max_seq_len=args.max_seq_len,
+            split="train",
+            seed=args.seed,
+        )
+        val_dataset = NextVisitDataset(
+            data_path=args.data_path,
+            labels_df=labels_df,
+            tokenizer=tokenizer,
+            max_seg=args.max_seg,
+            max_seq_len=args.max_seq_len,
+            split="val",
+            seed=args.seed,
+        )
+        test_dataset = NextVisitDataset(
+            data_path=args.data_path,
+            labels_df=labels_df,
+            tokenizer=tokenizer,
+            max_seg=args.max_seg,
+            max_seq_len=args.max_seq_len,
+            split="test",
+            seed=args.seed,
+        )
+    else:
+        # Use FinetuneDataset for classification tasks
+        print("\nCreating datasets (using FinetuneDataset)...")
+        train_dataset = FinetuneDataset(
+            data_path=args.data_path,
+            labels_df=labels_df,
+            tokenizer=tokenizer,
+            task=task,
+            max_seg=args.max_seg,
+            max_seq_len=args.max_seq_len,
+            split="train",
+            seed=args.seed,
+        )
+        val_dataset = FinetuneDataset(
+            data_path=args.data_path,
+            labels_df=labels_df,
+            tokenizer=tokenizer,
+            task=task,
+            max_seg=args.max_seg,
+            max_seq_len=args.max_seq_len,
+            split="val",
+            seed=args.seed,
+        )
+        test_dataset = FinetuneDataset(
+            data_path=args.data_path,
+            labels_df=labels_df,
+            tokenizer=tokenizer,
+            task=task,
+            max_seg=args.max_seg,
+            max_seq_len=args.max_seq_len,
+            split="test",
+            seed=args.seed,
+        )
+
+    num_classes = train_dataset.num_classes if hasattr(train_dataset, 'num_classes') else train_dataset.vocab_size
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
     print(f"  Num classes: {num_classes}")
 

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Baseline Models Fine-tuning Script
+GT-BEHRT Fine-tuning Script
 
-Uses FlatFinetuneDataset for consistent flat (512,) format with pretrain.
+Fine-tunes pre-trained GT-BEHRT on 6 downstream tasks.
 
 Usage:
-    python finetune_baselines.py --model core-behrt --task mortality \
-        --pretrained checkpoints/core-behrt/best_model.pt
+    python finetune_gt_behrt.py --task mortality \
+        --pretrained checkpoints/gt-behrt/best_model.pt
 """
 
 import sys
@@ -29,62 +29,36 @@ from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_sco
 
 from tokenizers import Tokenizer
 
-# Use flat dataset for baselines (consistent with pretrain)
 from src.baselines.data_utils import (
-    FlatFinetuneDataset, NextVisitFlatDataset,
+    GTBEHRTFinetuneDataset, NextVisitGTBEHRTDataset,
     DownstreamTask, TASK_CONFIGS,
-    collate_flat_finetune, collate_next_visit_flat
+    collate_gtbehrt_finetune, collate_next_visit_gtbehrt
 )
-from src.baselines.core_behrt import BEHRTConfig, BEHRTForSequenceClassification
-from src.baselines.heart import HEARTConfig, HEARTForSequenceClassification
+from src.baselines.gt_behrt import GTBEHRTConfig, GTBEHRTForSequenceClassification
 
 
 def compute_recall_at_k(preds: np.ndarray, targets: np.ndarray, k: int) -> float:
-    """Compute Recall@k for set prediction task.
-
-    Args:
-        preds: Predicted probabilities, shape (batch_size, num_classes)
-        targets: Binary target vectors, shape (batch_size, num_classes)
-        k: Number of top predictions to consider
-
-    Returns:
-        Average recall@k across all samples
-    """
+    """Compute Recall@k for set prediction task."""
     recalls = []
     for pred, target in zip(preds, targets):
-        # Get top-k predicted indices
         top_k_indices = np.argsort(pred)[-k:]
-        # Get true positive indices
         true_indices = np.where(target > 0)[0]
         if len(true_indices) == 0:
             continue
-        # Count hits
         hits = len(set(top_k_indices) & set(true_indices))
         recalls.append(hits / len(true_indices))
     return np.mean(recalls) if recalls else 0.0
 
 
 def compute_ndcg_at_k(preds: np.ndarray, targets: np.ndarray, k: int) -> float:
-    """Compute NDCG@k for set prediction task.
-
-    Args:
-        preds: Predicted probabilities, shape (batch_size, num_classes)
-        targets: Binary target vectors, shape (batch_size, num_classes)
-        k: Number of top predictions to consider
-
-    Returns:
-        Average NDCG@k across all samples
-    """
+    """Compute NDCG@k for set prediction task."""
     ndcgs = []
     for pred, target in zip(preds, targets):
-        # Get top-k predicted indices
-        top_k_indices = np.argsort(pred)[-k:][::-1]  # Descending order
-        # Compute DCG
+        top_k_indices = np.argsort(pred)[-k:][::-1]
         dcg = 0.0
         for i, idx in enumerate(top_k_indices):
             if target[idx] > 0:
-                dcg += 1.0 / np.log2(i + 2)  # i+2 because position starts from 1
-        # Compute ideal DCG
+                dcg += 1.0 / np.log2(i + 2)
         num_relevant = int(target.sum())
         if num_relevant == 0:
             continue
@@ -93,79 +67,50 @@ def compute_ndcg_at_k(preds: np.ndarray, targets: np.ndarray, k: int) -> float:
     return np.mean(ndcgs) if ndcgs else 0.0
 
 
-def create_finetune_model(model_type, pretrained_path, num_classes, vocab_size, args):
-    """Create fine-tune model from pretrained checkpoint."""
+def create_finetune_model(pretrained_path, num_classes, vocab_size, args):
+    """Create GT-BEHRT fine-tune model from pretrained checkpoint."""
 
-    checkpoint = torch.load(pretrained_path, map_location="cpu", weights_only=False)
+    config = GTBEHRTConfig(
+        vocab_size=vocab_size,
+        hidden_size=args.hidden_size,
+        d_stream=args.hidden_size // 5,
+        n_graph_layers=args.n_graph_layers,
+        n_bert_layers=args.n_bert_layers,
+        n_heads=args.n_heads,
+        intermediate_size=args.hidden_size * 4,
+        max_visits=args.max_visits,
+        num_visit_types=8,
+        max_age=103,
+        max_day=367,
+        dropout=0.0,  # Pretrained uses 0
+    )
 
-    # Use max_seq_len directly (flat format, same as pretrain)
-    max_seq_len = args.max_seq_len
+    model = GTBEHRTForSequenceClassification(
+        config=config,
+        num_classes=num_classes,
+        dropout=args.dropout,
+    )
 
-    if model_type == "core-behrt":
-        config = BEHRTConfig(
-            vocab_size=vocab_size,
-            d_model=args.d_model,
-            n_blocks=args.n_blocks,
-            n_heads=args.n_heads,
-            d_ff=args.d_ff,
-            max_seq_len=max_seq_len,
-            dropout=0.0,
-        )
-        model = BEHRTForSequenceClassification(
-            config=config,
-            num_classes=num_classes,
-            dropout=args.dropout,
-        )
-
-    elif model_type == "heart":
-        config = HEARTConfig(
-            vocab_size=vocab_size,
-            d_model=args.d_model,
-            n_blocks=args.n_blocks,
-            n_heads=args.n_heads,
-            d_ff=args.d_ff,
-            max_seq_len=max_seq_len,
-            dropout=0.0,
-            n_token_types=8,
-            edge_hidden_size=64,
-            max_visits=50,  # Must match pretrained model
-        )
-        model = HEARTForSequenceClassification(
-            config=config,
-            num_classes=num_classes,
-            dropout=args.dropout,
-        )
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
-
-    # Load pretrained encoder weights
-    state_dict = checkpoint.get("model_state_dict", checkpoint)
-    encoder_state_dict = {}
-    for k, v in state_dict.items():
-        if k.startswith("encoder."):
-            encoder_state_dict[k] = v
-        elif not k.startswith("classifier.") and not k.startswith("mlm_head."):
-            encoder_state_dict[f"encoder.{k}"] = v
-
-    missing, unexpected = model.load_state_dict(encoder_state_dict, strict=False)
-    missing = [k for k in missing if not k.startswith("classifier.")]
+    # Load pretrained weights
+    missing, unexpected = model.load_pretrained(pretrained_path, strict=False)
+    print(f"  Loaded pretrained weights from {pretrained_path}")
     if missing:
-        print(f"  Note: Missing encoder keys (expected for new classifier): {len(missing)}")
+        print(f"  Missing keys (expected for classifier): {len(missing)}")
 
     if args.freeze_encoder:
-        model.freeze_encoder()
+        for param in model.gtbehrt.parameters():
+            param.requires_grad = False
         print("  Encoder weights frozen")
 
     return model
 
 
-class BaselineFinetuneTrainer:
-    """Trainer for baseline model fine-tuning."""
+class GTBEHRTFinetuneTrainer:
+    """Trainer for GT-BEHRT fine-tuning."""
 
     def __init__(
         self,
         model,
-        model_type: str,
         train_dataset,
         val_dataset,
         task: DownstreamTask,
@@ -175,7 +120,6 @@ class BaselineFinetuneTrainer:
         num_epochs: int = 30,
         warmup_ratio: float = 0.1,
         weight_decay: float = 0.01,
-        use_class_weights: bool = True,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
         patience: int = 5,
@@ -185,7 +129,6 @@ class BaselineFinetuneTrainer:
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
-        self.model_type = model_type
         self.task = task
         self.task_config = TASK_CONFIGS[task]
         self.output_dir = Path(output_dir)
@@ -201,7 +144,7 @@ class BaselineFinetuneTrainer:
         self.is_set_prediction = self.task_config.get("is_set_prediction", False)
         num_classes = model.num_classes
 
-        # Determine best metric for model selection
+        # Determine best metric
         if self.is_set_prediction:
             self.metric_for_best_model = "recall@20"
         elif num_classes > 2 or self.is_multilabel:
@@ -209,11 +152,11 @@ class BaselineFinetuneTrainer:
         else:
             self.metric_for_best_model = "auprc"
 
-        # Select appropriate collate function
+        # Select collate function
         if self.is_set_prediction:
-            collate_fn = collate_next_visit_flat
+            collate_fn = collate_next_visit_gtbehrt
         else:
-            collate_fn = collate_flat_finetune
+            collate_fn = collate_gtbehrt_finetune
 
         # Data loaders
         self.train_loader = DataLoader(
@@ -226,12 +169,6 @@ class BaselineFinetuneTrainer:
             collate_fn=collate_fn, num_workers=num_workers,
             pin_memory=(self.device.type == "cuda")
         )
-
-        # Class weights
-        self.class_weights = None
-        if use_class_weights and hasattr(train_dataset, 'get_class_weights'):
-            weights = train_dataset.get_class_weights()
-            self.class_weights = weights.to(self.device)
 
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -259,18 +196,28 @@ class BaselineFinetuneTrainer:
         self.patience_counter = 0
 
     def _forward_step(self, batch):
-        """Forward pass with flat batch (already in correct format)."""
-        input_ids = batch["input_ids"].to(self.device)
-        attention_mask = batch["attention_mask"].to(self.device)
-        t = batch["t"].to(self.device)
-        labels = batch["label"].to(self.device)
+        """Forward pass with GT-BEHRT batch format."""
+        # Graph data
+        graph_data = {
+            'x': batch['node_ids'].to(self.device),
+            'edge_index': batch['edge_index'].to(self.device),
+            'edge_type': batch['edge_type'].to(self.device),
+            'batch_vst_indices': batch['batch_vst_indices'].to(self.device),
+            'batch_offsets': batch['batch_offsets'].to(self.device),
+        }
 
-        if self.model_type == "core-behrt":
-            output = self.model(input_ids, attention_mask, t, labels=labels)
-        else:  # heart
-            token_types = batch["token_types"].to(self.device)
-            visit_ids = batch["visit_ids"].to(self.device)
-            output = self.model(input_ids, attention_mask, token_types, visit_ids, t, labels=labels)
+        # Temporal features
+        visit_types = batch['visit_types'].to(self.device)
+        positions = batch['positions'].to(self.device)
+        ages = batch['ages'].to(self.device)
+        days = batch['days'].to(self.device)
+        attention_mask = batch['attention_mask'].to(self.device)
+        labels = batch['label'].to(self.device)
+
+        output = self.model(
+            graph_data, visit_types, positions, ages, days, attention_mask,
+            labels=labels
+        )
 
         return output, labels
 
@@ -340,9 +287,7 @@ class BaselineFinetuneTrainer:
 
             num_classes = self.model.num_classes
 
-            # Handle different task types
             if self.is_set_prediction or self.is_multilabel:
-                # Multilabel/set prediction: use sigmoid
                 probs = torch.sigmoid(logits)
                 preds = (probs > 0.5).long()
                 all_probs.append(probs.numpy())
@@ -367,12 +312,10 @@ class BaselineFinetuneTrainer:
                 all_preds.extend(preds.numpy())
                 all_labels.extend(labels.numpy())
 
-        # Compute metrics based on task type
+        # Compute metrics
         if self.is_set_prediction:
-            # Set prediction metrics: recall@k, NDCG@k
             all_probs = np.vstack(all_probs)
             all_labels = np.vstack(all_labels)
-
             metrics = {}
             for k in [10, 20, 30]:
                 metrics[f"recall@{k}"] = compute_recall_at_k(all_probs, all_labels, k)
@@ -380,21 +323,18 @@ class BaselineFinetuneTrainer:
             return metrics
 
         elif self.is_multilabel:
-            # Multilabel classification metrics
             all_probs = np.vstack(all_probs)
             all_labels = np.vstack(all_labels)
             all_preds = np.vstack(all_preds)
 
             metrics = {}
             try:
-                # Macro-averaged AUROC (average over classes)
                 aurocs = []
                 for c in range(all_labels.shape[1]):
                     if all_labels[:, c].sum() > 0 and all_labels[:, c].sum() < len(all_labels):
                         aurocs.append(roc_auc_score(all_labels[:, c], all_probs[:, c]))
                 metrics["auroc"] = np.mean(aurocs) if aurocs else 0.0
 
-                # Macro-averaged AUPRC
                 auprcs = []
                 for c in range(all_labels.shape[1]):
                     if all_labels[:, c].sum() > 0:
@@ -405,13 +345,11 @@ class BaselineFinetuneTrainer:
                 metrics["auroc"] = 0.0
                 metrics["auprc"] = 0.0
 
-            # F1 scores
             metrics["f1_macro"] = f1_score(all_labels, all_preds, average="macro", zero_division=0)
             metrics["f1_micro"] = f1_score(all_labels, all_preds, average="micro", zero_division=0)
             return metrics
 
         else:
-            # Standard classification
             all_preds = np.array(all_preds)
             all_labels = np.array(all_labels)
             num_classes = self.model.num_classes
@@ -430,7 +368,6 @@ class BaselineFinetuneTrainer:
             else:
                 all_probs = np.vstack(all_probs)
                 try:
-                    # Multi-class AUROC: compute per-class OVR AUROC and average
                     class_aurocs = []
                     for c in range(num_classes):
                         binary_labels = (all_labels == c).astype(int)
@@ -448,7 +385,7 @@ class BaselineFinetuneTrainer:
     def train(self):
         """Full training loop."""
         print(f"\n{'='*60}")
-        print(f"Training {self.model_type.upper()} on {self.task.value}")
+        print(f"Training GT-BEHRT on {self.task.value}")
         print(f"{'='*60}")
         print(f"  Train samples: {len(self.train_loader.dataset):,}")
         print(f"  Val samples:   {len(self.val_loader.dataset):,}")
@@ -485,10 +422,8 @@ class BaselineFinetuneTrainer:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Baseline Models Fine-tuning")
+    parser = argparse.ArgumentParser(description="GT-BEHRT Fine-tuning")
 
-    parser.add_argument("--model", type=str, required=True,
-                       choices=["core-behrt", "heart"])
     parser.add_argument("--task", type=str, required=True,
                        choices=["mortality", "readmission_30d", "prolonged_los",
                                 "icd_chapter", "icd_category_multilabel", "next_visit"])
@@ -501,7 +436,7 @@ def parse_args():
     parser.add_argument("--tokenizer_path", type=str, default="tokenizer.json")
     parser.add_argument("--output_dir", type=str, default="checkpoints/finetune")
 
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--num_epochs", type=int, default=30)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--warmup_ratio", type=float, default=0.1)
@@ -510,12 +445,12 @@ def parse_args():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
 
     # Model config (should match pretrained)
-    parser.add_argument("--d_model", type=int, default=768)
-    parser.add_argument("--n_blocks", type=int, default=6)
+    parser.add_argument("--hidden_size", type=int, default=540)
+    parser.add_argument("--n_graph_layers", type=int, default=3)
+    parser.add_argument("--n_bert_layers", type=int, default=6)
     parser.add_argument("--n_heads", type=int, default=12)
-    parser.add_argument("--d_ff", type=int, default=2048)
-    parser.add_argument("--max_seq_len", type=int, default=2048,
-                        help="Sequence length (same as pretrain, default 512)")
+    parser.add_argument("--max_visits", type=int, default=50)
+    parser.add_argument("--max_codes_per_visit", type=int, default=100)
     parser.add_argument("--dropout", type=float, default=0.1)
 
     parser.add_argument("--freeze_encoder", action="store_true")
@@ -536,13 +471,15 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
 
     task = DownstreamTask(args.task)
+    task_config = TASK_CONFIGS[task]
+    is_set_prediction = task_config.get("is_set_prediction", False)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir) / f"{args.model}_{args.task}_{timestamp}"
+    output_dir = Path(args.output_dir) / f"gt-behrt_{args.task}_{timestamp}"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
-    print(f"  {args.model.upper()} Fine-tuning on {args.task}")
+    print(f"  GT-BEHRT Fine-tuning on {args.task}")
     print("=" * 60)
 
     # Load tokenizer
@@ -554,85 +491,76 @@ def main():
     labels_df = pd.read_csv(args.labels_path)
 
     # Create datasets
-    is_heart = (args.model == "heart")
-    task_config = TASK_CONFIGS[task]
-    is_set_prediction = task_config.get("is_set_prediction", False)
-
     if is_set_prediction:
-        # Use NextVisitFlatDataset for NEXT_VISIT task
-        print("\nCreating datasets (using NextVisitFlatDataset)...")
-        train_dataset = NextVisitFlatDataset(
+        print("\nCreating datasets (using NextVisitGTBEHRTDataset)...")
+        train_dataset = NextVisitGTBEHRTDataset(
             data_path=args.data_path,
+            labels_df=labels_df,
             tokenizer=tokenizer,
-            max_seq_len=args.max_seq_len,
+            max_visits=args.max_visits,
+            max_codes_per_visit=args.max_codes_per_visit,
             split="train",
             seed=args.seed,
-            include_token_types=is_heart,
-            include_visit_ids=is_heart,
         )
-        val_dataset = NextVisitFlatDataset(
+        val_dataset = NextVisitGTBEHRTDataset(
             data_path=args.data_path,
+            labels_df=labels_df,
             tokenizer=tokenizer,
-            max_seq_len=args.max_seq_len,
+            max_visits=args.max_visits,
+            max_codes_per_visit=args.max_codes_per_visit,
             split="val",
             seed=args.seed,
-            include_token_types=is_heart,
-            include_visit_ids=is_heart,
         )
-        test_dataset = NextVisitFlatDataset(
+        test_dataset = NextVisitGTBEHRTDataset(
             data_path=args.data_path,
+            labels_df=labels_df,
             tokenizer=tokenizer,
-            max_seq_len=args.max_seq_len,
+            max_visits=args.max_visits,
+            max_codes_per_visit=args.max_codes_per_visit,
             split="test",
             seed=args.seed,
-            include_token_types=is_heart,
-            include_visit_ids=is_heart,
         )
     else:
-        # Use FlatFinetuneDataset for classification tasks
-        print("\nCreating datasets (using FlatFinetuneDataset)...")
-        train_dataset = FlatFinetuneDataset(
+        print("\nCreating datasets (using GTBEHRTFinetuneDataset)...")
+        train_dataset = GTBEHRTFinetuneDataset(
             data_path=args.data_path,
             labels_df=labels_df,
             tokenizer=tokenizer,
             task=task,
-            max_seq_len=args.max_seq_len,
+            max_visits=args.max_visits,
+            max_codes_per_visit=args.max_codes_per_visit,
             split="train",
             seed=args.seed,
-            include_token_types=is_heart,
-            include_visit_ids=is_heart,
         )
-        val_dataset = FlatFinetuneDataset(
+        val_dataset = GTBEHRTFinetuneDataset(
             data_path=args.data_path,
             labels_df=labels_df,
             tokenizer=tokenizer,
             task=task,
-            max_seq_len=args.max_seq_len,
+            max_visits=args.max_visits,
+            max_codes_per_visit=args.max_codes_per_visit,
             split="val",
             seed=args.seed,
-            include_token_types=is_heart,
-            include_visit_ids=is_heart,
         )
-        test_dataset = FlatFinetuneDataset(
+        test_dataset = GTBEHRTFinetuneDataset(
             data_path=args.data_path,
             labels_df=labels_df,
             tokenizer=tokenizer,
             task=task,
-            max_seq_len=args.max_seq_len,
+            max_visits=args.max_visits,
+            max_codes_per_visit=args.max_codes_per_visit,
             split="test",
             seed=args.seed,
-            include_token_types=is_heart,
-            include_visit_ids=is_heart,
         )
 
-    num_classes = train_dataset.num_classes
+    num_classes = train_dataset.num_classes if hasattr(train_dataset, 'num_classes') else train_dataset.vocab_size
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
     print(f"  Num classes: {num_classes}")
 
     # Create model
     print(f"\nLoading pre-trained model from {args.pretrained}")
     vocab_size = tokenizer.get_vocab_size()
-    model = create_finetune_model(args.model, args.pretrained, num_classes, vocab_size, args)
+    model = create_finetune_model(args.pretrained, num_classes, vocab_size, args)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {n_params:,}")
@@ -642,9 +570,8 @@ def main():
         json.dump(vars(args), f, indent=2)
 
     # Create trainer
-    trainer = BaselineFinetuneTrainer(
+    trainer = GTBEHRTFinetuneTrainer(
         model=model,
-        model_type=args.model,
         train_dataset=train_dataset,
         val_dataset=val_dataset,
         task=task,
@@ -673,8 +600,7 @@ def main():
     best_ckpt = torch.load(output_dir / "best_model.pt", map_location=device, weights_only=False)
     model.load_state_dict(best_ckpt["model_state_dict"])
 
-    # Use appropriate collate function
-    test_collate_fn = collate_next_visit_flat if is_set_prediction else collate_flat_finetune
+    test_collate_fn = collate_next_visit_gtbehrt if is_set_prediction else collate_gtbehrt_finetune
     test_loader = DataLoader(
         test_dataset, batch_size=args.batch_size * 2, shuffle=False,
         collate_fn=test_collate_fn, num_workers=args.num_workers
@@ -687,7 +613,7 @@ def main():
 
     # Save results
     results = {
-        "model": args.model,
+        "model": "gt-behrt",
         "task": args.task,
         "best_val_metric": best_metric,
         "test_metrics": test_metrics,
