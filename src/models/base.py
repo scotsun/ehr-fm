@@ -12,6 +12,7 @@ class FMBase(PreTrainedModel):
     def __init__(self, config: FMConfig):
         super().__init__(config)
         self.embeddings = FMEmbeddings(config)
+        self.t2v = T2V(config.d_model, config.t2v_scale)
         if config.dropout > 0.0:
             _half_n = config.n_blocks // 2
             dropout_ps = [0.0] * _half_n + [config.dropout] * _half_n
