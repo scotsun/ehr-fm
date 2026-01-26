@@ -46,6 +46,10 @@ def _get_last_segment_predictions_and_targets(
     """
     Helper function to extract predictions and targets for the last segment.
 
+    The model uses position 1 (MASK token) to predict ALL tokens in the segment
+    as a set prediction task. So targets should be the entire segment's tokens,
+    not just position 1-k.
+
     Args:
         logits: (batch, max_seg, max_seq_len, vocab_size)
         input_ids: (batch, max_seg, max_seq_len) - original input IDs
@@ -53,8 +57,8 @@ def _get_last_segment_predictions_and_targets(
         k: number of predictions to extract
 
     Returns:
-        p_tokens: (batch, k) - predicted token IDs
-        t_tokens: (batch, k) - target token IDs from last segment
+        p_tokens: (batch, k) - predicted token IDs from position 1
+        t_tokens: (batch, max_seq_len) - ALL target token IDs from last segment
     """
     batch_size = logits.size(0)
     device = logits.device
@@ -66,15 +70,14 @@ def _get_last_segment_predictions_and_targets(
 
     batch_indices = torch.arange(batch_size, device=device)
 
-    # Extract target tokens from last segment (skip CLS at position 0)
+    # Extract ALL target tokens from last segment (the entire segment is the target set)
     # input_ids[batch_indices, last_seg_idx]: (batch, max_seq_len)
-    last_seg_tokens = input_ids[batch_indices, last_seg_idx]  # (batch, max_seq_len)
-    t_tokens = last_seg_tokens[:, 1:k+1]  # Skip CLS, take k tokens: (batch, k)
+    t_tokens = input_ids[batch_indices, last_seg_idx]  # (batch, max_seq_len)
 
     # Extract predictions from last segment
     # logits[batch_indices, last_seg_idx]: (batch, max_seq_len, vocab_size)
     last_seg_logits = logits[batch_indices, last_seg_idx]  # (batch, max_seq_len, vocab_size)
-    # Use position 1 (after CLS) to predict tokens
+    # Use position 1 (MASK token) to predict the entire segment's token set
     p_tokens = last_seg_logits[:, 1].topk(k=k, dim=-1).indices  # (batch, k)
 
     return p_tokens, t_tokens
@@ -102,34 +105,29 @@ def recall_at_k(
         Recall@K (scalar tensor)
     """
     device = logits.device
-    batch_size = logits.size(0)
-    vocab_size = logits.size(-1)
 
+    # p_tokens: (batch, k), t_tokens: (batch, max_seq_len)
     p_tokens, t_tokens = _get_last_segment_predictions_and_targets(
         logits, input_ids, segment_attention_mask, k
     )
 
-    # Count valid target tokens (exclude special tokens 0-3: PAD, UNK, CLS, MASK)
-    t_valid_mask = t_tokens > 3
+    # Valid targets: exclude special tokens 0-3 (PAD, UNK, CLS, MASK)
+    t_valid_mask = t_tokens > 3  # (batch, max_seq_len)
     t_setsize = t_valid_mask.sum(dim=-1)  # (batch,)
 
-    # Convert to sets using one-hot encoding
-    p_sets = torch.zeros(batch_size, vocab_size, dtype=torch.bool, device=device)
-    t_sets = torch.zeros(batch_size, vocab_size, dtype=torch.bool, device=device)
-    p_sets.scatter_(1, p_tokens, True)
-    t_sets.scatter_(1, t_tokens, True)
+    # Check which predictions hit any valid target
+    # p_tokens: (batch, k) -> (batch, k, 1)
+    # t_tokens: (batch, max_seq_len) -> (batch, 1, max_seq_len)
+    # hit_matrix[b, i, j] = (p_tokens[b, i] == t_tokens[b, j]) & t_valid_mask[b, j]
+    hit_matrix = (p_tokens.unsqueeze(2) == t_tokens.unsqueeze(1)) & t_valid_mask.unsqueeze(1)
+    # For each prediction, did it match any valid target?
+    num_hits = hit_matrix.any(dim=2).sum(dim=-1)  # (batch,)
 
-    # Compute intersection
-    intersection_sets = p_sets & t_sets
-    intersection_size = intersection_sets.sum(dim=-1)  # (batch,)
-
-    # Recall = intersection / target_size
-    recall = intersection_size.float() / t_setsize.float().clamp(min=1)
-
-    # Only average over samples with valid targets
+    # Recall = num_hits / target_size
     valid_samples = t_setsize > 0
     if valid_samples.sum() > 0:
-        return recall[valid_samples].mean()
+        recall = num_hits[valid_samples].float() / t_setsize[valid_samples].float()
+        return recall.mean()
     return torch.tensor(0.0, device=device)
 
 
@@ -155,12 +153,13 @@ def ndcg_at_k(
     """
     device = logits.device
 
+    # p_tokens: (batch, k), t_tokens: (batch, max_seq_len)
     p_tokens, t_tokens = _get_last_segment_predictions_and_targets(
         logits, input_ids, segment_attention_mask, k
     )
 
-    # Count valid target tokens
-    t_valid_mask = t_tokens > 3
+    # Valid targets: exclude special tokens 0-3 (PAD, UNK, CLS, MASK)
+    t_valid_mask = t_tokens > 3  # (batch, max_seq_len)
     t_setsize = t_valid_mask.sum(dim=-1)  # (batch,)
 
     # DCG discount terms: 1/log2(rank+1) for ranks 1 to k
@@ -169,16 +168,17 @@ def ndcg_at_k(
         torch.arange(1, k + 1, dtype=torch.float32, device=device) + 1
     )  # (k,)
 
-    # Check which predictions match any target
-    # p_tokens: (batch, k), t_tokens: (batch, k)
-    # is_present_matrix[b, i, j] = (p_tokens[b, i] == t_tokens[b, j])
-    is_present_matrix = p_tokens.unsqueeze(2) == t_tokens.unsqueeze(1)  # (batch, k, k)
-    is_present = is_present_matrix.any(dim=2)  # (batch, k) - is prediction i correct?
+    # Check which predictions match any valid target
+    # p_tokens: (batch, k) -> (batch, k, 1)
+    # t_tokens: (batch, max_seq_len) -> (batch, 1, max_seq_len)
+    # hit_matrix[b, i, j] = (p_tokens[b, i] == t_tokens[b, j]) & t_valid_mask[b, j]
+    hit_matrix = (p_tokens.unsqueeze(2) == t_tokens.unsqueeze(1)) & t_valid_mask.unsqueeze(1)
+    is_hit = hit_matrix.any(dim=2)  # (batch, k) - is prediction i a hit?
 
     # DCG = sum of discounts for correct predictions
-    dcg = (discount_terms.unsqueeze(0) * is_present.float()).sum(dim=-1)  # (batch,)
+    dcg = (discount_terms.unsqueeze(0) * is_hit.float()).sum(dim=-1)  # (batch,)
 
-    # Ideal DCG = sum of first |target| discount terms
+    # Ideal DCG = sum of first min(|target|, k) discount terms
     # Precompute cumulative sum of discount terms
     idcg_cumsum = torch.zeros(k + 1, dtype=torch.float32, device=device)
     idcg_cumsum[1:] = torch.cumsum(discount_terms, dim=0)
@@ -188,10 +188,8 @@ def ndcg_at_k(
     idcg = idcg_cumsum[t_setsize_clamped]  # (batch,)
 
     # NDCG = DCG / IDCG
-    ndcg = dcg / idcg.clamp(min=1e-8)
-
-    # Only average over samples with valid targets
     valid_samples = t_setsize > 0
     if valid_samples.sum() > 0:
-        return ndcg[valid_samples].mean()
+        ndcg = dcg[valid_samples] / idcg[valid_samples].clamp(min=1e-8)
+        return ndcg.mean()
     return torch.tensor(0.0, device=device)
