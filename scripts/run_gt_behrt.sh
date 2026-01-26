@@ -62,26 +62,28 @@ OUTPUT_DIR="checkpoints/gt-behrt_${TIMESTAMP}"
 DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
 TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/tokenizer.json"
 
-# Model configuration (paper defaults: hidden_size=540, 3 GT layers, 6 BERT layers)
-HIDDEN_SIZE=540      # Must be 5 * d_stream (540 = 5 * 108)
+# Model configuration (GT-BEHRT architectural constraints)
+# Note: hidden_size must be 5 * d_stream (paper: 540 = 5 * 108)
+# This is an architectural constraint unique to GT-BEHRT
+HIDDEN_SIZE=540      # Must be 5 * d_stream (paper default)
 N_GRAPH_LAYERS=3     # Graph Transformer layers
 N_BERT_LAYERS=6      # BERT Transformer layers
 N_HEADS=12           # Attention heads
-DROPOUT=0.2
+DROPOUT=0.0          # Aligned with other baselines
 
 # Sequence configuration
 MAX_VISITS=50
 MAX_CODES_PER_VISIT=100
 
-# Training configuration
-BATCH_SIZE=32
+# Training configuration (aligned with other baselines)
+BATCH_SIZE=24        # Larger batch for faster training (GT-BEHRT uses less memory)
 NUM_EPOCHS=30
-LEARNING_RATE=3e-5
+LEARNING_RATE=5e-5   # Aligned with other baselines
 WARMUP_RATIO=0.1
 PATIENCE=5
 
 # Pre-training configuration
-NAM_MASK_PROB=0.15   # Node masking probability
+NAM_MASK_PROB=0.20   # Aligned with MASK_PROB in other baselines
 VTP_MASK_PROB=0.5    # Visit type masking probability
 NAM_EPOCHS=10        # Epochs for NAM-only pre-training
 
@@ -121,7 +123,7 @@ python train_gt_behrt.py \
     --vtp_mask_prob ${VTP_MASK_PROB} \
     --nam_epochs ${NAM_EPOCHS} \
     --gradient_accumulation_steps 2 \
-    --max_grad_norm 1.0 \
+    --max_grad_norm 5.0 \
     --save_every 5 \
     --use_amp
 
