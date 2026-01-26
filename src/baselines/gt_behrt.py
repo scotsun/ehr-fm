@@ -67,7 +67,9 @@ class GTBEHRTConfig:
     max_codes_per_visit: int = 100  # Maximum codes per visit
 
     # Additional embeddings
-    n_visit_types: int = 11  # Number of visit types
+    # Visit types derived from days_since_prior_admission:
+    #   0: PAD, 1: First visit, 2: Acute (<30d), 3: Short-term (30-90d), 4: Long-term (>90d)
+    n_visit_types: int = 5  # Number of visit types
     max_age: int = 103  # Maximum age vocabulary
     max_day_of_year: int = 367  # 1-366 + padding
     max_delta: int = 144  # Time delta vocabulary

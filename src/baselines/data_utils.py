@@ -576,7 +576,7 @@ class GTBEHRTDataset(Dataset):
         sort_col: str = "visit_seq",
         visit_time_col: str = "days_since_prior_admission",
         # GT-BEHRT specific columns (optional, use defaults if not available)
-        visit_type_col: str = "admission_type",  # Visit type (ER, inpatient, etc.)
+        visit_type_col: str = None,  # Visit type (derived from days_since_prior_admission)
         age_col: str = "anchor_age",  # Patient age at visit
         los_col: str = "los",  # Length of stay
     ):
@@ -681,11 +681,22 @@ class GTBEHRTDataset(Dataset):
             )
 
             # Get visit-level features
-            visit_type = 0  # Default
-            if self.visit_type_col and self.visit_type_col in group.columns:
-                vt = group[self.visit_type_col].iloc[0]
-                # Map visit type to ID (simple hash for now)
-                visit_type = hash(str(vt)) % 10 + 1 if pd.notna(vt) else 0
+            # Derive visit_type from days_since_prior_admission:
+            #   Type 1: First visit (NULL or no prior)
+            #   Type 2: Acute readmission (<30 days)
+            #   Type 3: Short-term readmission (30-90 days)
+            #   Type 4: Long-term follow-up (>90 days)
+            visit_type = 1  # Default: first visit
+            if self.visit_time_col and self.visit_time_col in group.columns:
+                days = group[self.visit_time_col].iloc[0]
+                if pd.notna(days):
+                    days = float(days)
+                    if days < 30:
+                        visit_type = 2  # Acute readmission
+                    elif days < 90:
+                        visit_type = 3  # Short-term readmission
+                    else:
+                        visit_type = 4  # Long-term follow-up
 
             age = 50  # Default
             if self.age_col and self.age_col in group.columns:
@@ -882,7 +893,7 @@ class GTBEHRTFinetuneDataset(Dataset):
         code_type_col: str = "code_type",
         sort_col: str = "admittime",
         visit_time_col: str = "days_since_prior_admission",
-        visit_type_col: str = "admission_type",
+        visit_type_col: str = None,  # Derived from days_since_prior_admission
         age_col: str = "anchor_age",
         token_time_col: str = "time_offset_hours",
     ):
@@ -1011,10 +1022,22 @@ class GTBEHRTFinetuneDataset(Dataset):
             )
 
             # Visit-level features
-            visit_type = 0
-            if self.visit_type_col in group.columns:
-                vt = group[self.visit_type_col].iloc[0]
-                visit_type = hash(str(vt)) % 10 + 1 if pd.notna(vt) else 0
+            # Derive visit_type from days_since_prior_admission:
+            #   Type 1: First visit (NULL or no prior)
+            #   Type 2: Acute readmission (<30 days)
+            #   Type 3: Short-term readmission (30-90 days)
+            #   Type 4: Long-term follow-up (>90 days)
+            visit_type = 1  # Default: first visit
+            if self.visit_time_col in group.columns:
+                days_val = group[self.visit_time_col].iloc[0]
+                if pd.notna(days_val):
+                    days_val = float(days_val)
+                    if days_val < 30:
+                        visit_type = 2  # Acute readmission
+                    elif days_val < 90:
+                        visit_type = 3  # Short-term readmission
+                    else:
+                        visit_type = 4  # Long-term follow-up
 
             age = 50
             if self.age_col in group.columns:
