@@ -267,14 +267,14 @@ def timelag_sigmoid(T, device, sigma=1):
 
 
 if __name__ == "__main__":
+    timelag_mat = timelag_sigmoid(10, "cuda", sigma=2)
+    print(timelag_mat.round(decimals=3))
     softclt = SoftCLT(tau_temp=0.1, lambda_=0.5, alpha=0.5)
     x = torch.randn(2, 10, 128, requires_grad=True).cuda()
     x.retain_grad()
-    z1 = torch.randn(2, 10, 128).cuda()
+    z1 = x @ torch.rand(128, 128).cuda()
     z2 = z1 + 0.01
     mask = torch.ones(2, 10, dtype=bool).cuda()
-
-    print(softclt.soft_dtw_mat(x, mask))
     loss = softclt(z1, z2, mask, x)
     loss.backward()
     print(x.grad)
