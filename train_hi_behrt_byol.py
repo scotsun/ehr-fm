@@ -583,8 +583,8 @@ def parse_args():
     # BYOL specific
     parser.add_argument("--byol_momentum", type=float, default=0.99,
                        help="EMA momentum for target network update")
-    parser.add_argument("--mask_probability", type=float, default=0.15,
-                       help="Probability of masking segments")
+    parser.add_argument("--mask_probability", type=float, default=0.20,
+                       help="Probability of masking segments (aligned with HAT)")
     parser.add_argument("--projector_hidden_size", type=int, default=256)
     parser.add_argument("--projector_output_size", type=int, default=128)
 

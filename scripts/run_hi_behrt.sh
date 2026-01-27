@@ -134,7 +134,7 @@ if [ "$MODE" = "pretrain" ]; then
         --max_total_len ${MAX_TOTAL_LEN} \
         --t2v_dim ${T2V_DIM} \
         --byol_momentum 0.996 \
-        --mask_probability 0.5 \
+        --mask_probability 0.20 \
         --learning_rate 1e-4 \
         --patience 5 \
         --use_amp
