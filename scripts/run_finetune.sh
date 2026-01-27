@@ -44,11 +44,11 @@ nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
 echo ""
 
 # ==================== Configuration ====================
-# Use the best pretrain from 20251217_073037
-PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251217_073037/best_model.pt"
+# Use token mode pretrained model
+PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_token_20260122_210214/best_model.pt"
 DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
 LABELS_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/downstream_labels.csv"
-TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_20251217_073037/tokenizer.json"
+TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/run_token_20260122_210214/tokenizer.json"
 OUTPUT_DIR="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/finetune"
 
 # Training hyperparameters
@@ -66,6 +66,7 @@ TASK=${1:-mortality}  # Default to mortality if not specified
 WANDB_FLAG=""
 K_VALUES="10,20,30"  # Default k values for next_visit task
 METRIC=""            # Auto-determined by task type
+RESUME_PATH=""       # Resume from checkpoint directory
 
 for arg in "$@"; do
     if [ "$arg" == "--wandb" ]; then
@@ -73,12 +74,23 @@ for arg in "$@"; do
     fi
 done
 
-# Parse --k-values if provided (for next_visit task)
-for i in "${!@}"; do
-    if [[ "${!i}" == "--k-values="* ]]; then
-        K_VALUES="${!i#*=}"
+# Parse --k-values and --resume flags
+for i in $(seq 1 $#); do
+    arg="${!i}"
+    if [[ "$arg" == "--k-values="* ]]; then
+        K_VALUES="${arg#*=}"
+    elif [[ "$arg" == "--resume" ]]; then
+        next=$((i + 1))
+        RESUME_PATH="${!next}"
     fi
 done
+
+# Build resume flag
+RESUME_FLAG=""
+if [ -n "$RESUME_PATH" ]; then
+    RESUME_FLAG="--resume $RESUME_PATH"
+    echo "  Resuming from: $RESUME_PATH"
+fi
 
 echo "Configuration:"
 echo "  Task:        $TASK"
@@ -110,7 +122,7 @@ if [ "$TASK" == "all" ]; then
         --max-seg $MAX_SEG \
         --max-seq-len $MAX_SEQ_LEN \
         --k-values "$K_VALUES" \
-        $WANDB_FLAG
+        $WANDB_FLAG $RESUME_FLAG
 elif [ "$TASK" == "next_visit" ]; then
     python run_finetune.py \
         --task "$TASK" \
@@ -127,7 +139,7 @@ elif [ "$TASK" == "next_visit" ]; then
         --max-seq-len $MAX_SEQ_LEN \
         --k-values "$K_VALUES" \
         --metric "recall@20" \
-        $WANDB_FLAG
+        $WANDB_FLAG $RESUME_FLAG
 else
     python run_finetune.py \
         --task "$TASK" \
@@ -142,7 +154,7 @@ else
         --warmup-ratio $WARMUP_RATIO \
         --max-seg $MAX_SEG \
         --max-seq-len $MAX_SEQ_LEN \
-        $WANDB_FLAG
+        $WANDB_FLAG $RESUME_FLAG
 fi
 
 echo ""

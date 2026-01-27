@@ -141,6 +141,14 @@ def parse_args():
         help="Disable class weighting for imbalanced data",
     )
 
+    # Resume training
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint directory to resume training from",
+    )
+
     return parser.parse_args()
 
 
@@ -201,10 +209,14 @@ def run_single_task(args, task: str):
         freeze_encoder=args.freeze_encoder,
     )
 
-    # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir) / f"{task}_{timestamp}"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Create output directory (reuse resume directory if resuming)
+    if args.resume:
+        output_dir = Path(args.resume)
+        print(f"Resuming training, using existing directory: {output_dir}")
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path(args.output_dir) / f"{task}_{timestamp}"
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save args
     with open(output_dir / "args.json", "w") as f:
@@ -228,8 +240,9 @@ def run_single_task(args, task: str):
         metric_for_best_model=args.metric,
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,
-        wandb_run_name=f"{task}_{timestamp}",
+        wandb_run_name=f"{task}_{output_dir.name}",
         num_workers=args.num_workers,
+        resume_from=args.resume,
     )
 
     # Train
@@ -346,10 +359,14 @@ def run_next_visit_task(args):
         freeze_encoder=args.freeze_encoder,
     )
 
-    # Create output directory
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = Path(args.output_dir) / f"next_visit_{timestamp}"
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # Create output directory (reuse resume directory if resuming)
+    if args.resume:
+        output_dir = Path(args.resume)
+        print(f"Resuming training, using existing directory: {output_dir}")
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_dir = Path(args.output_dir) / f"next_visit_{timestamp}"
+        output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save args
     with open(output_dir / "args.json", "w") as f:
@@ -372,8 +389,9 @@ def run_next_visit_task(args):
         metric_for_best_model=metric,
         use_wandb=args.wandb,
         wandb_project=args.wandb_project,
-        wandb_run_name=f"next_visit_{timestamp}",
+        wandb_run_name=f"next_visit_{output_dir.name}",
         num_workers=args.num_workers,
+        resume_from=args.resume,
     )
 
     # Train

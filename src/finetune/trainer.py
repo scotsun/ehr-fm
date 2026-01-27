@@ -51,6 +51,7 @@ class FinetuneTrainer:
         wandb_run_name: Optional[str] = None,
         device: str = "auto",
         num_workers: int = 4,
+        resume_from: Optional[str] = None,
     ):
         # Auto-detect device
         if device == "auto":
@@ -143,6 +144,10 @@ class FinetuneTrainer:
         self.use_wandb = use_wandb
         self.global_step = 0
 
+        # Resume from checkpoint if specified (must be after global_step init)
+        if resume_from:
+            self._load_training_state(resume_from)
+
         if use_wandb:
             wandb.init(
                 project=wandb_project,
@@ -220,6 +225,36 @@ class FinetuneTrainer:
         if len(checkpoints) > 3:
             for old_ckpt in checkpoints[:-3]:
                 old_ckpt.unlink()
+
+    def _load_training_state(self, checkpoint_dir: str):
+        """Load training state from checkpoint for resuming."""
+        ckpt_path = Path(checkpoint_dir)
+
+        # Find checkpoint file (prefer checkpoint_best.pt)
+        best_path = ckpt_path / "checkpoint_best.pt"
+        if best_path.exists():
+            checkpoint_file = best_path
+        else:
+            # Try to find latest epoch checkpoint
+            epoch_ckpts = sorted(ckpt_path.glob("checkpoint_epoch_*.pt"))
+            if epoch_ckpts:
+                checkpoint_file = epoch_ckpts[-1]
+            else:
+                raise FileNotFoundError(f"No checkpoint found in {checkpoint_dir}")
+
+        print(f"Resuming from checkpoint: {checkpoint_file}")
+        checkpoint = torch.load(checkpoint_file, map_location=self.device)
+
+        # Load states
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        self.global_step = checkpoint.get("global_step", 0)
+        self.best_metric = checkpoint.get("best_metric", 0.0)
+        self.patience_counter = checkpoint.get("patience_counter", 0)
+
+        print(f"  Loaded model, optimizer, scheduler states")
+        print(f"  global_step: {self.global_step}, best_metric: {self.best_metric:.4f}, patience: {self.patience_counter}")
 
     def _train_epoch(self, epoch: int) -> float:
         """Train for one epoch."""
@@ -459,6 +494,7 @@ class FinetuneTrainer:
             "scheduler_state_dict": self.scheduler.state_dict(),
             "global_step": self.global_step,
             "best_metric": self.best_metric,
+            "patience_counter": self.patience_counter,
             "task": self.task.value,
             "num_classes": self.model.num_classes,
             "config": config_dict,
@@ -656,6 +692,7 @@ class NextVisitTrainer:
         wandb_run_name: Optional[str] = None,
         device: str = "auto",
         num_workers: int = 4,
+        resume_from: Optional[str] = None,
     ):
         # Auto-detect device
         if device == "auto":
@@ -737,6 +774,10 @@ class NextVisitTrainer:
         self.use_wandb = use_wandb
         self.global_step = 0
 
+        # Resume from checkpoint if specified (must be after global_step init)
+        if resume_from:
+            self._load_training_state(resume_from)
+
         if use_wandb:
             wandb.init(
                 project=wandb_project,
@@ -807,6 +848,36 @@ class NextVisitTrainer:
         if len(checkpoints) > 3:
             for old_ckpt in checkpoints[:-3]:
                 old_ckpt.unlink()
+
+    def _load_training_state(self, checkpoint_dir: str):
+        """Load training state from checkpoint for resuming."""
+        ckpt_path = Path(checkpoint_dir)
+
+        # Find checkpoint file (prefer checkpoint_best.pt)
+        best_path = ckpt_path / "checkpoint_best.pt"
+        if best_path.exists():
+            checkpoint_file = best_path
+        else:
+            # Try to find latest epoch checkpoint
+            epoch_ckpts = sorted(ckpt_path.glob("checkpoint_epoch_*.pt"))
+            if epoch_ckpts:
+                checkpoint_file = epoch_ckpts[-1]
+            else:
+                raise FileNotFoundError(f"No checkpoint found in {checkpoint_dir}")
+
+        print(f"Resuming from checkpoint: {checkpoint_file}")
+        checkpoint = torch.load(checkpoint_file, map_location=self.device)
+
+        # Load states
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        self.global_step = checkpoint.get("global_step", 0)
+        self.best_metric = checkpoint.get("best_metric", 0.0)
+        self.patience_counter = checkpoint.get("patience_counter", 0)
+
+        print(f"  Loaded model, optimizer, scheduler states")
+        print(f"  global_step: {self.global_step}, best_metric: {self.best_metric:.4f}, patience: {self.patience_counter}")
 
     def _train_epoch(self, epoch: int) -> float:
         """Train for one epoch."""
@@ -938,6 +1009,7 @@ class NextVisitTrainer:
             "scheduler_state_dict": self.scheduler.state_dict(),
             "global_step": self.global_step,
             "best_metric": self.best_metric,
+            "patience_counter": self.patience_counter,
             "task": "next_visit",
             "vocab_size": self.model.vocab_size,
             "config": config_dict,
