@@ -16,7 +16,6 @@ trainer:
     early_stopping_mode: 'min'
     mlm_probability: 0.20
     softclt:
-      tau_inst: 0.1
       tau_temp: 0.1
       lambda_: 0.5
       alpha: 0.5
