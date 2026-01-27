@@ -88,23 +88,23 @@ LEARNING_RATE=1e-5
 EPOCHS=30
 WARMUP_RATIO=0.1
 PATIENCE=2
-# Must match pretrain format: FlatEHRDataset uses (max_seq_len,) = (2048,)
-MAX_SEQ_LEN=2048
 
-# Select pretrained checkpoint and batch size based on model
-# With flat 512-token format (matching pretrain), we can use larger batches
+# Select pretrained checkpoint, batch size, and max_seq_len based on model
+# Must match pretrain configuration for each model
 case "$MODEL" in
     "core-behrt")
         PRETRAINED=$CORE_BEHRT_PRETRAINED
         TOKENIZER_PATH=$CORE_BEHRT_TOKENIZER
-        BATCH_SIZE=8   # Reduced for 2048 seq_len
+        BATCH_SIZE=8
         GRAD_ACCUM=4   # Effective batch size = 8 × 4 = 32
+        MAX_SEQ_LEN=2048  # O(L) memory with efficient attention
         ;;
     "heart")
         PRETRAINED=$HEART_PRETRAINED
         TOKENIZER_PATH=$HEART_TOKENIZER
         BATCH_SIZE=10
         GRAD_ACCUM=4   # Effective batch size = 10 × 4 = 40
+        MAX_SEQ_LEN=768   # O(L²) edge embeddings - must match pretrain
         ;;
 esac
 
