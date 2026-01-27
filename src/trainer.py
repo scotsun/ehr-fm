@@ -901,7 +901,7 @@ class BaseWithSoftCLT(Trainer):
 
                 del mlm_logits, scaled_mlm_loss
 
-                # --- PASS 2: MSM ---
+                # --- PASS 2: SoftCLT ---
                 with autocast(device_type="cuda", dtype=torch.float16):
                     # h: (batch, max_seq, max_set_size, hidden_size)
                     # soft-dtw on h -> dist_mat: (batch, batch)
@@ -911,11 +911,9 @@ class BaseWithSoftCLT(Trainer):
                     mask = set_attention_mask.chunk(2, dim=0)[0]  # (batch, max_seq)
 
                     softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask, h)
-                    pass
+                    scaled_softclt_loss = trainer_args["l_softclt"] * softclt_loss
+                scaler.scale(scaled_softclt_loss).backward()
 
-                scaler.scale(0).backward()
-
-                # --- OPTIMIZER STEP ---
                 scaler.step(optimizer)
                 scaler.update()
 
@@ -962,46 +960,31 @@ class BaseWithSoftCLT(Trainer):
                 tokenizer=self.tokenizer,
                 mlm_probability=trainer_args["mlm_probability"],
             )
-            msm_input_ids, msm_labels, set_select_mask = random_masking_set(
-                input_ids=input_ids.clone(),
-                set_attention_mask=set_attention_mask,
-                tokenizer=self.tokenizer,
-                mask_probability=trainer_args["msm_probability"],
+            mlm_input_ids = torch.concat([mlm_input_ids, mlm_input_ids], dim=0)
+            attention_mask = torch.concat([attention_mask, attention_mask], dim=0)
+            set_attention_mask = torch.concat(
+                [set_attention_mask, set_attention_mask], dim=0
             )
-
-            target_dist = (
-                observed_set_distribution(  # TODO: decide between masked-only or mixed
-                    labels=msm_labels,
-                    set_select_mask=set_select_mask,
-                    # labels=input_ids,
-                    # set_select_mask=set_attention_mask,
-                    tokenizer=self.tokenizer,
-                )
-            )
+            t = torch.concat([t, t], dim=0)
 
             with autocast(device_type="cuda", dtype=torch.float16):
-                mlm_logits, _, _ = model(
+                mlm_logits, (h, mid_h) = model(
                     input_ids=mlm_input_ids,
                     attention_mask=attention_mask,
                     set_attention_mask=set_attention_mask,
                     t=t,
-                    set_mask=set_select_mask,
                 )
-                msm_logits, msm_set_logits, _ = model(
-                    input_ids=msm_input_ids,
-                    attention_mask=attention_mask,
-                    set_attention_mask=set_attention_mask,
-                    t=t,
-                    set_mask=set_select_mask,  # TODO: decide between masked-only or mixed
-                    # set_mask=set_attention_mask,
-                )
+                mlm_logits = mlm_logits.chunk(2, dim=0)[0]
                 mlm_loss = criterions["cross_entropy"](
-                    mlm_logits.view(-1, mlm_logits.size(-1)),
-                    mlm_labels.view(-1),
+                    mlm_logits.view(-1, mlm_logits.size(-1)), mlm_labels.view(-1)
                 )
-                msm_loss = criterions["kl_div"](
-                    F.log_softmax(msm_set_logits, dim=-1), target_dist
-                )
+                # h: (batch, max_seq, max_set_size, hidden_size)
+                h = h.chunk(2, dim=0)[0]
+                # mid_h: (2 * batch, max_seq, max_set_size, hidden_size)
+                mid_h1, mid_h2 = mid_h.chunk(2, dim=0)
+                mask = set_attention_mask.chunk(2, dim=0)[0]  # (batch, max_seq)
+
+                softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask, h)
 
                 if trainer_args["eval_last_set"]:
                     masked_last_set_logits, _, _ = model(
@@ -1021,16 +1004,10 @@ class BaseWithSoftCLT(Trainer):
                 recall10 = recall_at_k(p_tokens, t_tokens)
 
                 ndcg10 = ndcg_at_k(p_tokens, t_tokens)
-            else:
-                p_tokens, t_tokens = pred_and_target_sets(
-                    msm_logits, input_ids, set_select_mask, 10
-                )
-                recall10 = recall_at_k(p_tokens, t_tokens)
-                ndcg10 = ndcg_at_k(p_tokens, t_tokens)
 
             counter[0] += 1
             counter[1] += mlm_loss.item()
-            counter[2] += msm_loss.item()
+            counter[2] += softclt_loss.item()
             counter[3] += top1_acc.item()
             counter[4] += top10_acc.item()
             counter[5] += recall10.item()
@@ -1048,13 +1025,18 @@ class BaseWithSoftCLT(Trainer):
         )
 
     def _valid(self, dataloader, verbose, epoch_id):
-        val_mlm, val_msm, val_top1_acc, val_top10_acc, val_recall10, val_ndcg10 = (
-            self.evaluate(dataloader, verbose)
-        )
+        (
+            val_mlm,
+            val_softclt_loss,
+            val_top1_acc,
+            val_top10_acc,
+            val_recall10,
+            val_ndcg10,
+        ) = self.evaluate(dataloader, verbose)
         if verbose:
             print(
                 f"epoch {epoch_id}/val_mlm_loss: {round(val_mlm, 3)}/"
-                f"val_msm_loss: {round(val_msm, 3)}/"
+                f"val_softclt_loss: {round(val_softclt_loss, 3)}/"
                 f"val_top1_acc: {round(val_top1_acc, 3)}/"
                 f"val_top10_acc: {round(val_top10_acc, 3)}/"
                 f"val_recall10: {round(val_recall10, 3)}/"
@@ -1065,7 +1047,7 @@ class BaseWithSoftCLT(Trainer):
             "callback_metric": val_ndcg10,
             "logged_metrics": {
                 "val_mlm_loss": val_mlm,
-                "val_msm_loss": val_msm,
+                "val_softclt_loss": val_softclt_loss,
                 "val_top1_acc": val_top1_acc,
                 "val_top10_acc": val_top10_acc,
                 "val_recall10": val_recall10,

@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from tslearn.metrics import soft_dtw
+
+
 NEG_INF = -1e9
 
 
@@ -17,13 +20,13 @@ class SoftCLT(nn.Module):
 
     def forward(self, z1, z2, mask, x):
         dist_mat = self.soft_dtw_mat(x, mask)  # (B, B)
-        soft_label = 2 * self.alpha * F.sigmoid(dist_mat / self.tau_inst)  # (B, B)
+        soft_labels = 2 * self.alpha * F.sigmoid(dist_mat / self.tau_inst)  # (B, B)
         out = self.hier_CL_soft(
             z1=z1,
             z2=z2,
             mask1=mask,
             mask2=mask,
-            soft_label=soft_label,
+            soft_labels=soft_labels,
             tau_temp=self.tau_temp,
             lambda_=self.lambda_,
         )
@@ -32,17 +35,27 @@ class SoftCLT(nn.Module):
     def soft_dtw_mat(self, x, mask):
         # h: (batch, max_seq, max_set_size, hidden_size)
         # mask: (batch, max_seq)
-        pass
+        B = x.shape[0]
+        out = torch.zeros((B, B)).to(x.device)
+        for i in range(B):
+            for j in range(i, B):
+                out[i, j] = soft_dtw(
+                    x[i][mask[i]],
+                    x[j][mask[j]],
+                    gamma=0.1,
+                    be="pytorch",
+                    compute_with_backend=True,
+                )
+                out[j, i] = out[i, j]
+        return out
 
-    def masked_max_pool1d(self, z, set_attention_mask, kernel_size):
+    def masked_max_pool1d(self, z, mask, kernel_size):
         # z (batch_size, seq_len, d_model)
-        # set_attention_mask (batch_size, seq_len)
-        _, C, _ = z.shape
-        z = z.transpose(1, 2)  # (B, T, C)
-        set_attention_mask = set_attention_mask.unsqueeze(1).expand(
-            -1, C, -1
-        )  # (B, C, T)
-        z_masked = z.masked_fill(~set_attention_mask, -float("inf"))
+        # mask (batch_size, seq_len) <- set_attention_mask
+        _, _, C = z.shape
+        z = z.transpose(1, 2)  # (B, C, T)
+        mask = mask.unsqueeze(1).expand(-1, C, -1)  # (B, C, T)
+        z_masked = z.masked_fill(~mask, -float("inf"))
         z_pooled = F.max_pool1d(z_masked, kernel_size=kernel_size)
         z_pooled = z_pooled.transpose(1, 2)  # (B, T // kernel_size, C)
         z_pooled = z_pooled.masked_fill(torch.isinf(z_pooled), 0.0)
@@ -206,7 +219,6 @@ class SoftCLT(nn.Module):
         Returns:
         scalar loss (torch.tensor)
         """
-        soft_labels = torch.tensor(soft_labels, device=z1.device)
         soft_labels_L, soft_labels_R = dup_matrix(soft_labels)
 
         loss = torch.tensor(0.0, device=z1.device)
@@ -230,10 +242,11 @@ class SoftCLT(nn.Module):
             if d >= temporal_unit:
                 if 1 - lambda_ != 0:
                     if temporal_hierarchy:
-                        timelag = timelag_sigmoid(z1.shape[1], tau_temp * (2**d))
+                        timelag = timelag_sigmoid(
+                            z1.shape[1], z1.device, tau_temp * (2**d)
+                        )
                     else:
-                        timelag = timelag_sigmoid(z1.shape[1], tau_temp)
-                    timelag = torch.tensor(timelag, device=z1.device)
+                        timelag = timelag_sigmoid(z1.shape[1], z1.device, tau_temp)
                     timelag_L, timelag_R = dup_matrix(timelag)
                     loss += (1 - lambda_) * self.temp_CL_soft(
                         z1,
@@ -246,8 +259,8 @@ class SoftCLT(nn.Module):
             d += 1
 
             # Downsample z1, z2 via max pooling (as original)
-            z1 = F.max_pool1d(z1.transpose(1, 2), kernel_size=2).transpose(1, 2)
-            z2 = F.max_pool1d(z2.transpose(1, 2), kernel_size=2).transpose(1, 2)
+            z1 = self.masked_max_pool1d(z1, cur_mask1, kernel_size=2)
+            z2 = self.masked_max_pool1d(z2, cur_mask2, kernel_size=2)
 
             # Downsample masks in the same manner (logical OR over pooling window)
             cur_mask1 = _downsample_mask(cur_mask1)
@@ -295,8 +308,8 @@ def dup_matrix(mat):
     return mat1, mat2
 
 
-def timelag_sigmoid(T, sigma=1):
-    dist = torch.arange(T)
+def timelag_sigmoid(T, device, sigma=1):
+    dist = torch.arange(T).to(device)
     dist = torch.abs(dist - dist[:, None])
     matrix = 2 / (1 + torch.exp(dist.float() * sigma))
     matrix = torch.where(matrix < 1e-6, 0, matrix)  # set very small values to 0
@@ -304,5 +317,14 @@ def timelag_sigmoid(T, sigma=1):
 
 
 if __name__ == "__main__":
-    a = torch.eye(3)
-    print(dup_matrix(a)[0].shape)
+    softclt = SoftCLT(tau_inst=1, tau_temp=0.1, lambda_=0.5, alpha=0.5)
+    x = torch.randn(2, 10, 128, requires_grad=True).cuda()
+    x.retain_grad()
+    z1 = torch.randn(2, 10, 128).cuda()
+    z2 = z1 + 0.01
+    mask = torch.ones(2, 10, dtype=bool).cuda()
+
+    print(softclt.soft_dtw_mat(x, mask))
+    loss = softclt(z1, z2, mask, x)
+    loss.backward()
+    print(x.grad)
