@@ -905,9 +905,9 @@ class BaseWithSoftCLTTrainer(Trainer):
                 with autocast(device_type="cuda", dtype=torch.float16):
                     # h: (batch, max_seq, max_set_size, hidden_size)
                     # soft-dtw on h -> dist_mat: (batch, batch)
-                    h = h.chunk(2, dim=0)[0]
+                    h = h.chunk(2, dim=0)[0][:, :, 0, :]
                     # mid_h: (2 * batch, max_seq, max_set_size, hidden_size)
-                    mid_h1, mid_h2 = mid_h.chunk(2, dim=0)
+                    mid_h1, mid_h2 = mid_h[:, :, 0, :].chunk(2, dim=0)
                     mask = set_attention_mask.chunk(2, dim=0)[0]  # (batch, max_seq)
 
                     softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask, h)
