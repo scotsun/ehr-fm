@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from tslearn.metrics import soft_dtw
-
 
 NEG_INF = -1e4
 
@@ -19,34 +17,14 @@ class SoftCLT(nn.Module):
         self.alpha = alpha
 
     def forward(self, z1, z2, mask, x):
-        dist_mat = self.soft_dtw_mat(x, mask)  # (B, B)
-        soft_labels = 2 * self.alpha * F.sigmoid(dist_mat / self.tau_inst)  # (B, B)
-        out = self.hier_CL_soft(
+        out = self.hier_CL_semisoft(
             z1=z1,
             z2=z2,
             mask1=mask,
             mask2=mask,
-            soft_labels=soft_labels,
             tau_temp=self.tau_temp,
             lambda_=self.lambda_,
         )
-        return out
-
-    def soft_dtw_mat(self, x, mask):
-        # h: (batch, max_seq, max_set_size, hidden_size)
-        # mask: (batch, max_seq)
-        B = x.shape[0]
-        out = torch.zeros((B, B)).to(x.device)
-        for i in range(B):
-            for j in range(i, B):
-                out[i, j] = soft_dtw(
-                    x[i][mask[i]],
-                    x[j][mask[j]],
-                    gamma=0.1,
-                    be="pytorch",
-                    compute_with_backend=True,
-                )
-                out[j, i] = out[i, j]
         return out
 
     def masked_max_pool1d(self, z, mask, kernel_size):
@@ -61,21 +39,12 @@ class SoftCLT(nn.Module):
         z_pooled = z_pooled.masked_fill(torch.isinf(z_pooled), 0.0)
         return z_pooled
 
-    def inst_CL_soft(
-        self,
-        z1,
-        z2,
-        soft_labels_L,
-        soft_labels_R,
-        mask1,
-        mask2,
-    ):
+    def inst_CL_hard(self, z1, z2, mask1, mask2):
         """
         Instance-wise soft contrastive loss with masking.
 
         Args:
             z1, z2: (B, T, C)
-            soft_labels_L, soft_labels_R: T x B x (2B-1) soft label weight tensors (as produced by dup_matrix)
             mask1, mask2: (B, T) boolean masks (True=valid). If None, no masking applied.
 
         Returns:
@@ -113,20 +82,21 @@ class SoftCLT(nn.Module):
         # Compute negative log-softmax
         logits = -F.log_softmax(logits, dim=-1)
 
-        # Apply mask to soft labels so invalid targets get weight 0
-        left_mask = mask_squeezed[:, :B, :]  # T x B x (2B-1)
-        right_mask = mask_squeezed[:, B:, :]  # T x B x (2B-1)
-        soft_labels_L = soft_labels_L * left_mask.float()
-        soft_labels_R = soft_labels_R * right_mask.float()
-
+        # Extract positive pairs i->B+i and B+i->i for valid pairs
         i = torch.arange(B, device=z1.device)
-        loss = torch.sum(logits[:, i] * soft_labels_L)
-        loss += torch.sum(logits[:, B + i] * soft_labels_R)
+        # Validity for z1->z2 positive pairs
+        valid_pos1 = mask_squeezed[:, i, B + i - 1]
+        # Validity for z2->z1 positive pairs
+        valid_pos2 = mask_squeezed[:, B + i, i]
 
-        # Normalize by the number of valid anchor-target pairs used
-        # total valid entries across T x 2B x (2B-1)
-        n_valid = mask_squeezed.sum().clamp_min(1.0)
-        loss = loss / n_valid
+        pos_loss1 = logits[:, i, B + i - 1] * valid_pos1  # z1->z2 loss
+        pos_loss2 = logits[:, B + i, i] * valid_pos2  # z2->z1 loss
+
+        # Normalize by the number of valid positive pairs
+        n_valid_pos1 = valid_pos1.sum().clamp_min(1.0)  # Avoid division by zero
+        n_valid_pos2 = valid_pos2.sum().clamp_min(1.0)
+
+        loss = (pos_loss1.sum() / n_valid_pos1 + pos_loss2.sum() / n_valid_pos2) / 2
         return loss
 
     def temp_CL_soft(
@@ -194,13 +164,12 @@ class SoftCLT(nn.Module):
         loss = loss / n_valid
         return loss
 
-    def hier_CL_soft(
+    def hier_CL_semisoft(
         self,
         z1,
         z2,
         mask1,
         mask2,
-        soft_labels,
         tau_temp=2,
         lambda_=0.5,
         temporal_unit=0,
@@ -212,15 +181,12 @@ class SoftCLT(nn.Module):
         Args:
         z1, z2: (B, T, C)
         mask1, mask2: (B, T) boolean masks (True=valid)
-        soft_labels (B, B): soft label structure expected by dup_matrix (None or array/tensor)
         tau_temp, lambda_, temporal_unit, soft_temporal, soft_instance, temporal_hierarchy:
             same meaning as original function
 
         Returns:
         scalar loss (torch.tensor)
         """
-        soft_labels_L, soft_labels_R = dup_matrix(soft_labels)
-
         loss = torch.tensor(0.0, device=z1.device)
         d = 0
 
@@ -230,13 +196,8 @@ class SoftCLT(nn.Module):
 
         while z1.size(1) > 1:
             if lambda_ != 0:
-                loss += lambda_ * self.inst_CL_soft(
-                    z1,
-                    z2,
-                    soft_labels_L,
-                    soft_labels_R,
-                    mask1=cur_mask1,
-                    mask2=cur_mask2,
+                loss += lambda_ * self.inst_CL_hard(
+                    z1, z2, mask1=cur_mask1, mask2=cur_mask2
                 )
 
             if d >= temporal_unit:
@@ -249,12 +210,7 @@ class SoftCLT(nn.Module):
                         timelag = timelag_sigmoid(z1.shape[1], z1.device, tau_temp)
                     timelag_L, timelag_R = dup_matrix(timelag)
                     loss += (1 - lambda_) * self.temp_CL_soft(
-                        z1,
-                        z2,
-                        timelag_L,
-                        timelag_R,
-                        mask1=cur_mask1,
-                        mask2=cur_mask2,
+                        z1, z2, timelag_L, timelag_R, mask1=cur_mask1, mask2=cur_mask2
                     )
             d += 1
 
@@ -268,13 +224,8 @@ class SoftCLT(nn.Module):
 
         if z1.size(1) == 1:
             if lambda_ != 0:
-                loss += lambda_ * self.inst_CL_soft(
-                    z1,
-                    z2,
-                    soft_labels_L,
-                    soft_labels_R,
-                    mask1=cur_mask1,
-                    mask2=cur_mask2,
+                loss += lambda_ * self.inst_CL_hard(
+                    z1, z2, mask1=cur_mask1, mask2=cur_mask2
                 )
             d += 1
 
