@@ -878,6 +878,7 @@ class BaseWithSoftCLTTrainer(Trainer):
 
                 # duplicate
                 mlm_input_ids = torch.concat([mlm_input_ids, mlm_input_ids], dim=0)
+                mlm_labels = torch.concat([mlm_labels, mlm_labels], dim=0)
                 attention_mask = torch.concat([attention_mask, attention_mask], dim=0)
                 set_attention_mask = torch.concat(
                     [set_attention_mask, set_attention_mask], dim=0
@@ -957,6 +958,7 @@ class BaseWithSoftCLTTrainer(Trainer):
                 mlm_probability=trainer_args["mlm_probability"],
             )
             mlm_input_ids_dup = torch.concat([mlm_input_ids, mlm_input_ids], dim=0)
+            mlm_labels_dup = torch.concat([mlm_labels, mlm_labels], dim=0)
             attention_mask_dup = torch.concat([attention_mask, attention_mask], dim=0)
             set_attention_mask_dup = torch.concat(
                 [set_attention_mask, set_attention_mask], dim=0
@@ -970,9 +972,8 @@ class BaseWithSoftCLTTrainer(Trainer):
                     set_attention_mask=set_attention_mask_dup,
                     t=t_dup,
                 )
-                mlm_logits = mlm_logits.chunk(2, dim=0)[0]
                 mlm_loss = criterions["cross_entropy"](
-                    mlm_logits.view(-1, mlm_logits.size(-1)), mlm_labels.view(-1)
+                    mlm_logits.view(-1, mlm_logits.size(-1)), mlm_labels_dup.view(-1)
                 )
                 # h: (batch, max_seq, max_set_size, hidden_size)
                 h = h.chunk(2, dim=0)[0]
