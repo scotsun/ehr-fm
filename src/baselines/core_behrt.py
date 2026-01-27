@@ -181,10 +181,12 @@ class BEHRTForSequenceClassification(nn.Module):
         num_classes: int,
         dropout: float = 0.1,
         freeze_encoder: bool = False,
+        is_multilabel: bool = False,
     ):
         super().__init__()
         self.config = config
         self.num_classes = num_classes
+        self.is_multilabel = is_multilabel
 
         # BEHRT encoder
         self.encoder = BEHRT(config)
@@ -250,7 +252,11 @@ class BEHRTForSequenceClassification(nn.Module):
         output = {"logits": logits}
 
         if labels is not None:
-            loss = F.cross_entropy(logits, labels)
+            if self.is_multilabel:
+                # Multilabel: BCEWithLogitsLoss expects float labels
+                loss = F.binary_cross_entropy_with_logits(logits, labels.float())
+            else:
+                loss = F.cross_entropy(logits, labels)
             output["loss"] = loss
 
         return output

@@ -93,7 +93,7 @@ def compute_ndcg_at_k(preds: np.ndarray, targets: np.ndarray, k: int) -> float:
     return np.mean(ndcgs) if ndcgs else 0.0
 
 
-def create_finetune_model(model_type, pretrained_path, num_classes, vocab_size, args):
+def create_finetune_model(model_type, pretrained_path, num_classes, vocab_size, args, is_multilabel=False):
     """Create fine-tune model from pretrained checkpoint."""
 
     checkpoint = torch.load(pretrained_path, map_location="cpu", weights_only=False)
@@ -115,6 +115,7 @@ def create_finetune_model(model_type, pretrained_path, num_classes, vocab_size, 
             config=config,
             num_classes=num_classes,
             dropout=args.dropout,
+            is_multilabel=is_multilabel,
         )
 
     elif model_type == "heart":
@@ -134,6 +135,7 @@ def create_finetune_model(model_type, pretrained_path, num_classes, vocab_size, 
             config=config,
             num_classes=num_classes,
             dropout=args.dropout,
+            is_multilabel=is_multilabel,
         )
     else:
         raise ValueError(f"Unknown model type: {model_type}")
@@ -563,6 +565,7 @@ def main():
         print("\nCreating datasets (using NextVisitFlatDataset)...")
         train_dataset = NextVisitFlatDataset(
             data_path=args.data_path,
+            labels_df=labels_df,
             tokenizer=tokenizer,
             max_seq_len=args.max_seq_len,
             split="train",
@@ -572,6 +575,7 @@ def main():
         )
         val_dataset = NextVisitFlatDataset(
             data_path=args.data_path,
+            labels_df=labels_df,
             tokenizer=tokenizer,
             max_seq_len=args.max_seq_len,
             split="val",
@@ -581,6 +585,7 @@ def main():
         )
         test_dataset = NextVisitFlatDataset(
             data_path=args.data_path,
+            labels_df=labels_df,
             tokenizer=tokenizer,
             max_seq_len=args.max_seq_len,
             split="test",
@@ -629,10 +634,13 @@ def main():
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
     print(f"  Num classes: {num_classes}")
 
+    # Determine if multilabel task (includes set prediction tasks like next_visit)
+    is_multilabel = is_set_prediction or task_config.get("is_multilabel", False)
+
     # Create model
     print(f"\nLoading pre-trained model from {args.pretrained}")
     vocab_size = tokenizer.get_vocab_size()
-    model = create_finetune_model(args.model, args.pretrained, num_classes, vocab_size, args)
+    model = create_finetune_model(args.model, args.pretrained, num_classes, vocab_size, args, is_multilabel=is_multilabel)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {n_params:,}")

@@ -601,6 +601,7 @@ class NextVisitFlatDataset(Dataset):
         self.include_visit_ids = include_visit_ids
 
         self.vocab_size = tokenizer.get_vocab_size()
+        self.num_classes = self.vocab_size  # For compatibility with finetune code
 
         # Patient-level split
         all_patients = labels_df[patient_id_col].unique()
@@ -1507,6 +1508,7 @@ class NextVisitGTBEHRTDataset(Dataset):
 
         self.vst_token_id = tokenizer.token_to_id("[PAD]")
         self.vocab_size = tokenizer.get_vocab_size()
+        self.num_classes = self.vocab_size  # For compatibility with finetune code
 
         # Patient-level split
         all_patients = labels_df[patient_id_col].unique()

@@ -732,10 +732,12 @@ class HEARTForSequenceClassification(nn.Module):
         num_classes: int,
         dropout: float = 0.1,
         freeze_encoder: bool = False,
+        is_multilabel: bool = False,
     ):
         super().__init__()
         self.config = config
         self.num_classes = num_classes
+        self.is_multilabel = is_multilabel
 
         self.encoder = HEART(config)
 
@@ -794,7 +796,10 @@ class HEARTForSequenceClassification(nn.Module):
         output = {"logits": logits, "hidden_states": hidden_states}
 
         if labels is not None:
-            if self.num_classes == 1:
+            if self.is_multilabel:
+                # Multilabel: BCEWithLogitsLoss expects float labels
+                loss = F.binary_cross_entropy_with_logits(logits, labels.float())
+            elif self.num_classes == 1:
                 loss = F.binary_cross_entropy_with_logits(logits.squeeze(-1), labels.float())
             else:
                 loss = F.cross_entropy(logits, labels)
