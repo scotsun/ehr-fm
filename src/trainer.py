@@ -956,19 +956,19 @@ class BaseWithSoftCLTTrainer(Trainer):
                 tokenizer=self.tokenizer,
                 mlm_probability=trainer_args["mlm_probability"],
             )
-            mlm_input_ids = torch.concat([mlm_input_ids, mlm_input_ids], dim=0)
-            attention_mask = torch.concat([attention_mask, attention_mask], dim=0)
-            set_attention_mask = torch.concat(
+            mlm_input_ids_dup = torch.concat([mlm_input_ids, mlm_input_ids], dim=0)
+            attention_mask_dup = torch.concat([attention_mask, attention_mask], dim=0)
+            set_attention_mask_dup = torch.concat(
                 [set_attention_mask, set_attention_mask], dim=0
             )
-            t = torch.concat([t, t], dim=0)
+            t_dup = torch.concat([t, t], dim=0)
 
             with autocast(device_type="cuda", dtype=torch.float16):
                 mlm_logits, (h, mid_h) = model(
-                    input_ids=mlm_input_ids,
-                    attention_mask=attention_mask,
-                    set_attention_mask=set_attention_mask,
-                    t=t,
+                    input_ids=mlm_input_ids_dup,
+                    attention_mask=attention_mask_dup,
+                    set_attention_mask=set_attention_mask_dup,
+                    t=t_dup,
                 )
                 mlm_logits = mlm_logits.chunk(2, dim=0)[0]
                 mlm_loss = criterions["cross_entropy"](
@@ -978,7 +978,7 @@ class BaseWithSoftCLTTrainer(Trainer):
                 h = h.chunk(2, dim=0)[0]
                 # mid_h: (2 * batch, max_seq, max_set_size, hidden_size)
                 mid_h1, mid_h2 = mid_h.chunk(2, dim=0)
-                mask = set_attention_mask.chunk(2, dim=0)[0]  # (batch, max_seq)
+                mask = set_attention_mask_dup.chunk(2, dim=0)[0]  # (batch, max_seq)
 
                 softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask, h)
 
@@ -997,9 +997,8 @@ class BaseWithSoftCLTTrainer(Trainer):
                 p_tokens, t_tokens = pred_and_target_sets(
                     masked_last_set_logits, input_ids, set_select_mask, 10
                 )
-                recall10 = recall_at_k(p_tokens, t_tokens)
-
-                ndcg10 = ndcg_at_k(p_tokens, t_tokens)
+                recall10 = recall_at_k(p_tokens, t_tokens, k=10)
+                ndcg10 = ndcg_at_k(p_tokens, t_tokens, k=10)
 
             counter[0] += 1
             counter[1] += mlm_loss.item()
