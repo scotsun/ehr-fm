@@ -989,8 +989,8 @@ class BaseWithSoftCLTTrainer(Trainer):
                         set_attention_mask=set_attention_mask,
                         t=t,
                     )
-            top1_acc = topk_accuracy(mlm_logits, mlm_labels, 1)
-            top10_acc = topk_accuracy(mlm_logits, mlm_labels, 10)
+            top1_acc = topk_accuracy(mlm_logits, mlm_labels_dup, 1)
+            top10_acc = topk_accuracy(mlm_logits, mlm_labels_dup, 10)
 
             if trainer_args["eval_last_set"]:
                 set_select_mask = select_last_set(set_attention_mask)
