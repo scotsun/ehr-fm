@@ -143,8 +143,9 @@ class FinetuneTrainer:
         self.eval_interval = eval_interval
         self.use_wandb = use_wandb
         self.global_step = 0
+        self.start_epoch = 0
 
-        # Resume from checkpoint if specified (must be after global_step init)
+        # Resume from checkpoint if specified (must be after init)
         if resume_from:
             self._load_training_state(resume_from)
 
@@ -177,10 +178,11 @@ class FinetuneTrainer:
         print(f"  Num classes:   {self.model.num_classes}")
         print(f"  Batch size:    {self.batch_size}")
         print(f"  Num epochs:    {self.num_epochs}")
+        print(f"  Start epoch:   {self.start_epoch}")
         print(f"  Learning rate: {self.learning_rate}")
         print(f"{'='*60}\n")
 
-        for epoch in range(self.num_epochs):
+        for epoch in range(self.start_epoch, self.num_epochs):
             train_loss = self._train_epoch(epoch)
             val_metrics = self.evaluate()
 
@@ -201,7 +203,7 @@ class FinetuneTrainer:
             if current_metric > self.best_metric:
                 self.best_metric = current_metric
                 self.patience_counter = 0
-                self._save_checkpoint("best")
+                self._save_checkpoint("best", epoch=epoch)
                 print(f"  New best {self.metric_for_best_model}: {self.best_metric:.4f}")
             else:
                 self.patience_counter += 1
@@ -210,10 +212,10 @@ class FinetuneTrainer:
                     break
 
             # Save periodic checkpoint and cleanup old ones (keep last 3)
-            self._save_checkpoint(f"epoch_{epoch + 1:04d}")
+            self._save_checkpoint(f"epoch_{epoch + 1:04d}", epoch=epoch)
             self._cleanup_old_checkpoints()
 
-        self._save_checkpoint("final")
+        self._save_checkpoint("final", epoch=epoch)
         self._load_checkpoint("best")
 
         print(f"\nTraining complete! Best {self.metric_for_best_model}: {self.best_metric:.4f}")
@@ -252,9 +254,10 @@ class FinetuneTrainer:
         self.global_step = checkpoint.get("global_step", 0)
         self.best_metric = checkpoint.get("best_metric", 0.0)
         self.patience_counter = checkpoint.get("patience_counter", 0)
+        self.start_epoch = checkpoint.get("epoch", -1) + 1  # Resume from next epoch
 
         print(f"  Loaded model, optimizer, scheduler states")
-        print(f"  global_step: {self.global_step}, best_metric: {self.best_metric:.4f}, patience: {self.patience_counter}")
+        print(f"  Resuming from epoch {self.start_epoch}, global_step: {self.global_step}, best_metric: {self.best_metric:.4f}, patience: {self.patience_counter}")
 
     def _train_epoch(self, epoch: int) -> float:
         """Train for one epoch."""
@@ -478,7 +481,7 @@ class FinetuneTrainer:
         self.val_metrics_history.append(metrics)
         return metrics
 
-    def _save_checkpoint(self, name: str):
+    def _save_checkpoint(self, name: str, epoch: Optional[int] = None):
         """Save a checkpoint."""
         config_dict = {
             "vocab_size": self.model.config.vocab_size,
@@ -489,6 +492,7 @@ class FinetuneTrainer:
         }
 
         checkpoint = {
+            "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
@@ -773,8 +777,9 @@ class NextVisitTrainer:
         self.log_interval = log_interval
         self.use_wandb = use_wandb
         self.global_step = 0
+        self.start_epoch = 0
 
-        # Resume from checkpoint if specified (must be after global_step init)
+        # Resume from checkpoint if specified (must be after init)
         if resume_from:
             self._load_training_state(resume_from)
 
@@ -802,9 +807,10 @@ class NextVisitTrainer:
         print(f"  Vocab size:    {self.model.vocab_size}")
         print(f"  Batch size:    {self.batch_size}")
         print(f"  Num epochs:    {self.num_epochs}")
+        print(f"  Start epoch:   {self.start_epoch}")
         print(f"{'='*60}\n")
 
-        for epoch in range(self.num_epochs):
+        for epoch in range(self.start_epoch, self.num_epochs):
             train_loss = self._train_epoch(epoch)
             val_metrics = self.evaluate()
 
@@ -824,7 +830,7 @@ class NextVisitTrainer:
             if current_metric > self.best_metric:
                 self.best_metric = current_metric
                 self.patience_counter = 0
-                self._save_checkpoint("best")
+                self._save_checkpoint("best", epoch=epoch)
                 print(f"  New best {self.metric_for_best_model}: {self.best_metric:.4f}")
             else:
                 self.patience_counter += 1
@@ -833,10 +839,10 @@ class NextVisitTrainer:
                     break
 
             # Save periodic checkpoint and cleanup old ones (keep last 3)
-            self._save_checkpoint(f"epoch_{epoch + 1:04d}")
+            self._save_checkpoint(f"epoch_{epoch + 1:04d}", epoch=epoch)
             self._cleanup_old_checkpoints()
 
-        self._save_checkpoint("final")
+        self._save_checkpoint("final", epoch=epoch)
         self._load_checkpoint("best")
 
         print(f"\nTraining complete! Best {self.metric_for_best_model}: {self.best_metric:.4f}")
@@ -875,9 +881,10 @@ class NextVisitTrainer:
         self.global_step = checkpoint.get("global_step", 0)
         self.best_metric = checkpoint.get("best_metric", 0.0)
         self.patience_counter = checkpoint.get("patience_counter", 0)
+        self.start_epoch = checkpoint.get("epoch", -1) + 1  # Resume from next epoch
 
         print(f"  Loaded model, optimizer, scheduler states")
-        print(f"  global_step: {self.global_step}, best_metric: {self.best_metric:.4f}, patience: {self.patience_counter}")
+        print(f"  Resuming from epoch {self.start_epoch}, global_step: {self.global_step}, best_metric: {self.best_metric:.4f}, patience: {self.patience_counter}")
 
     def _train_epoch(self, epoch: int) -> float:
         """Train for one epoch."""
@@ -993,7 +1000,7 @@ class NextVisitTrainer:
 
         return metrics
 
-    def _save_checkpoint(self, name: str):
+    def _save_checkpoint(self, name: str, epoch: Optional[int] = None):
         """Save a checkpoint."""
         config_dict = {
             "vocab_size": self.model.config.vocab_size,
@@ -1004,6 +1011,7 @@ class NextVisitTrainer:
         }
 
         checkpoint = {
+            "epoch": epoch,
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
