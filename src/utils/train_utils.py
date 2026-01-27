@@ -13,6 +13,7 @@ from transformers import PreTrainedModel
 from tokenizers import Tokenizer
 
 from src.models import FMConfig
+from src.loss.softclt import SoftCLT
 from src.trainer import (
     EarlyStopping,
     Trainer,
@@ -185,7 +186,7 @@ def build_trainer(
             signature = make_fm_signature(cfg)
             criterions = {
                 "cross_entropy": CrossEntropyLoss(ignore_index=-100),
-                "softclt": cfg.trainer["softclt"],
+                "softclt": SoftCLT(**cfg.trainer["softclt"]),
             }
         case _:
             raise ValueError(f"Unknown model type: {model_type}")
