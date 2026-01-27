@@ -196,13 +196,14 @@ class GTBEHRTFinetuneTrainer:
 
     def _forward_step(self, batch):
         """Forward pass with GT-BEHRT batch format."""
-        # Graph data
+        # Graph data (nested under 'graph_data' key from collate function)
+        batch_graph = batch['graph_data']
         graph_data = {
-            'x': batch['node_ids'].to(self.device),
-            'edge_index': batch['edge_index'].to(self.device),
-            'edge_type': batch['edge_type'].to(self.device),
-            'batch_vst_indices': batch['batch_vst_indices'].to(self.device),
-            'batch_offsets': batch['batch_offsets'].to(self.device),
+            'node_ids': batch_graph['node_ids'].to(self.device),
+            'edge_index': batch_graph['edge_index'].to(self.device),
+            'edge_type': batch_graph['edge_type'].to(self.device),
+            'vst_indices': batch_graph['vst_indices'].to(self.device),
+            'batch_visit_counts': batch_graph['batch_visit_counts'].to(self.device),
         }
 
         # Temporal features
