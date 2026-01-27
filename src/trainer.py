@@ -884,7 +884,6 @@ class BaseWithSoftCLTTrainer(Trainer):
                 )
                 t = torch.concat([t, t], dim=0)
 
-                # --- PASS 1: MLM ---
                 with autocast(device_type="cuda", dtype=torch.float16):
                     mlm_logits, (h, mid_h) = model(
                         input_ids=mlm_input_ids,
@@ -896,13 +895,7 @@ class BaseWithSoftCLTTrainer(Trainer):
                     mlm_loss = criterions["cross_entropy"](
                         mlm_logits.view(-1, mlm_logits.size(-1)), mlm_labels.view(-1)
                     )
-                    scaled_mlm_loss = trainer_args["l_mlm"] * mlm_loss
-                scaler.scale(scaled_mlm_loss).backward()
 
-                del mlm_logits, scaled_mlm_loss
-
-                # --- PASS 2: SoftCLT ---
-                with autocast(device_type="cuda", dtype=torch.float16):
                     # h: (batch, max_seq, max_set_size, hidden_size)
                     # soft-dtw on h -> dist_mat: (batch, batch)
                     h = h.chunk(2, dim=0)[0][:, :, 0, :]
@@ -911,9 +904,12 @@ class BaseWithSoftCLTTrainer(Trainer):
                     mask = set_attention_mask.chunk(2, dim=0)[0]  # (batch, max_seq)
 
                     softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask, h)
-                    scaled_softclt_loss = trainer_args["l_softclt"] * softclt_loss
-                scaler.scale(scaled_softclt_loss).backward()
+                    loss = (
+                        trainer_args["l_mlm"] * mlm_loss
+                        + trainer_args["l_softclt"] * softclt_loss
+                    )
 
+                scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
 
