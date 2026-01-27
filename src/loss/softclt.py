@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from tslearn.metrics import soft_dtw
 
 
-NEG_INF = -1e9
+NEG_INF = -1e4
 
 
 class SoftCLT(nn.Module):
@@ -109,7 +109,7 @@ class SoftCLT(nn.Module):
         )
 
         # Mask logits for invalid anchor-target pairs
-        logits = logits.masked_fill(~mask_squeezed, -1e9)
+        logits = logits.masked_fill(~mask_squeezed, -1e4)
         # Compute negative log-softmax
         logits = -F.log_softmax(logits, dim=-1)
 
@@ -174,7 +174,7 @@ class SoftCLT(nn.Module):
         )  # B x 2T x (2T-1)
 
         # Mask logits for invalid anchor-target pairs
-        logits = logits.masked_fill(~mask_squeezed, -1e9)
+        logits = logits.masked_fill(~mask_squeezed, -1e4)
         # Negative log-softmax
         logits = -F.log_softmax(logits, dim=-1)
 
