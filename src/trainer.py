@@ -850,7 +850,7 @@ class BaseWithSoftCLTTrainer(Trainer):
         self.trainer_args = trainer_args
 
     def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
-        model: FMBaseWithHeads | DDP = self.model
+        model: FMBase | DDP = self.model
         model.train()
         scaler = self.scaler
         optimizer = self.optimizer
@@ -930,7 +930,7 @@ class BaseWithSoftCLTTrainer(Trainer):
 
     @torch.no_grad()
     def evaluate(self, dataloader: DataLoader, verbose: bool) -> torch.Tensor:
-        model: FMBaseWithHeads | DDP = self.model
+        model: FMBase | DDP = self.model
         model.eval()
         device = self.device
         criterions = self.criterions
@@ -983,7 +983,7 @@ class BaseWithSoftCLTTrainer(Trainer):
                 softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask, h)
 
                 if trainer_args["eval_last_set"]:
-                    masked_last_set_logits, _, _ = model(
+                    masked_last_set_logits, (_, _) = model(
                         input_ids=masked_last_set_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
