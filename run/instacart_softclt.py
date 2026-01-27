@@ -70,6 +70,11 @@ def main():
         outcome_vars=None,
         **kwargs,
     )
+
+    #######################
+    instacart = random_split(instacart, [0.01, 0.99])[0]
+    #######################
+
     train, valid = random_split(
         dataset=instacart,
         lengths=cfg.trainer["split"],
