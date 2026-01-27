@@ -57,13 +57,13 @@ cd /hpc/group/engelhardlab/hg176/ehr-fm
 mkdir -p checkpoints/finetune finetune_logs
 
 # ==================== Configuration ====================
-# Pre-trained model checkpoint (update to your actual path)
-PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/gt-behrt/best_model.pt"
+# Pre-trained model checkpoint from completed GT-BEHRT pretrain
+PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/gt-behrt_20260126_115847/best_model.pt"
 
 # Data paths
 DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
 LABELS_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/downstream_labels.csv"
-TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/gt-behrt/tokenizer.json"
+TOKENIZER_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/gt-behrt_20260126_115847/tokenizer.json"
 OUTPUT_DIR="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/finetune"
 
 # Model configuration (must match pre-trained model)

@@ -76,13 +76,12 @@ def create_finetune_model(pretrained_path, num_classes, vocab_size, args):
         d_stream=args.hidden_size // 5,
         n_graph_layers=args.n_graph_layers,
         n_bert_layers=args.n_bert_layers,
-        n_heads=args.n_heads,
-        intermediate_size=args.hidden_size * 4,
+        n_bert_heads=args.n_heads,
+        intermediate_size=512,  # Match pretrain config
         max_visits=args.max_visits,
-        num_visit_types=8,
+        n_visit_types=5,
         max_age=103,
-        max_day=367,
-        dropout=0.0,  # Pretrained uses 0
+        max_day_of_year=367,
     )
 
     model = GTBEHRTForSequenceClassification(

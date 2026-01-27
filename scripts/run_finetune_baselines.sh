@@ -66,14 +66,14 @@ mkdir -p checkpoints/finetune finetune_logs
 # ==================== Configuration ====================
 # Pre-trained model checkpoints
 # Update these paths to your actual checkpoint locations
-CORE_BEHRT_PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/core-behrt_20260122_012454/core-behrt/best_model.pt"
+CORE_BEHRT_PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/core-behrt_20260125_161457/core-behrt/best_model.pt"
 HEART_PRETRAINED="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/heart_20260122_014025/heart/best_model.pt"
 
 # Data paths
 DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
 LABELS_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/downstream_labels.csv"
 # Tokenizer paths (each model has its own tokenizer)
-CORE_BEHRT_TOKENIZER="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/core-behrt_20260122_012454/core-behrt/tokenizer.json"
+CORE_BEHRT_TOKENIZER="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/core-behrt_20260125_161457/core-behrt/tokenizer.json"
 HEART_TOKENIZER="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/heart_20260122_014025/heart/tokenizer.json"
 OUTPUT_DIR="/hpc/group/engelhardlab/hg176/ehr-fm/checkpoints/finetune"
 
