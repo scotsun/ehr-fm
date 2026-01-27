@@ -975,10 +975,9 @@ class BaseWithSoftCLTTrainer(Trainer):
                     mlm_logits.view(-1, mlm_logits.size(-1)), mlm_labels_dup.view(-1)
                 )
                 # h: (batch, max_seq, max_set_size, hidden_size)
-                h = h.chunk(2, dim=0)[0]
+                h = h.chunk(2, dim=0)[0][:, :, 0, :]
                 # mid_h: (2 * batch, max_seq, max_set_size, hidden_size)
-                mid_h1, mid_h2 = mid_h.chunk(2, dim=0)
-                print(mid_h1.shape, mid_h2.shape)
+                mid_h1, mid_h2 = mid_h[:, :, 0, :].chunk(2, dim=0)
                 mask = set_attention_mask_dup.chunk(2, dim=0)[0]  # (batch, max_seq)
 
                 softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask, h)
