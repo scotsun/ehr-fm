@@ -9,10 +9,9 @@ NEG_INF = -1e4
 class SoftCLT(nn.Module):
     """adapted from softclt github repo"""
 
-    def __init__(self, tau_temp, tau_inst, lambda_, alpha):
+    def __init__(self, tau_temp, lambda_, alpha):
         super().__init__()
         self.tau_temp = tau_temp
-        self.tau_inst = tau_inst
         self.lambda_ = lambda_
         self.alpha = alpha
 
@@ -268,7 +267,7 @@ def timelag_sigmoid(T, device, sigma=1):
 
 
 if __name__ == "__main__":
-    softclt = SoftCLT(tau_inst=1, tau_temp=0.1, lambda_=0.5, alpha=0.5)
+    softclt = SoftCLT(tau_temp=0.1, lambda_=0.5, alpha=0.5)
     x = torch.randn(2, 10, 128, requires_grad=True).cuda()
     x.retain_grad()
     z1 = torch.randn(2, 10, 128).cuda()
