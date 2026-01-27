@@ -20,6 +20,7 @@ from src.trainer import (
     LongformerTrainer,
     BaseTrainer,
     BaseWithHeadsTrainer,
+    BaseWithSoftCLTTrainer,
 )
 
 
@@ -170,7 +171,7 @@ def build_trainer(
             criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-longformer":
             trainer_class = LongformerTrainer
-            signature = make_fm_signature(cfg)
+            signature = make_bert_signature(cfg)
             criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-base-with_heads":
             trainer_class = BaseWithHeadsTrainer
@@ -178,6 +179,13 @@ def build_trainer(
             criterions = {
                 "cross_entropy": CrossEntropyLoss(ignore_index=-100),
                 "kl_div": KLDivLoss(reduction="batchmean"),
+            }
+        case "fm-base-with_softclt":
+            trainer_class = BaseWithSoftCLTTrainer
+            signature = make_fm_signature(cfg)
+            criterions = {
+                "cross_entropy": CrossEntropyLoss(ignore_index=-100),
+                "softclt": cfg.trainer["softclt"],
             }
         case _:
             raise ValueError(f"Unknown model type: {model_type}")

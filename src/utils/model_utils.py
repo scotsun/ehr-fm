@@ -28,6 +28,9 @@ def build_model(
             model = FMBase(cfg)
         case "FMBaseWithHeads":
             model = FMBaseWithHeads(cfg)
+        case "FMBaseWithSoftCLT":
+            model = FMBase(cfg)
+            model.model_type = "fm-base-with_softclt"
         case _:
             raise ValueError(f"Unknown model class: {model_class}")
     model.to(device)

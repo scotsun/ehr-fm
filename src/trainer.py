@@ -829,7 +829,7 @@ class BaseWithHeadsTrainer(Trainer):
         return valid_metrics
 
 
-class BaseWithSoftCLT(Trainer):
+class BaseWithSoftCLTTrainer(Trainer):
     def __init__(
         self,
         model: FMBase | DDP,
