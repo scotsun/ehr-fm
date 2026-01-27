@@ -892,7 +892,6 @@ class BaseWithSoftCLTTrainer(Trainer):
                         set_attention_mask=set_attention_mask,
                         t=t,
                     )
-                    mlm_logits = mlm_logits.chunk(2, dim=0)[0]
                     mlm_loss = criterions["cross_entropy"](
                         mlm_logits.view(-1, mlm_logits.size(-1)), mlm_labels.view(-1)
                     )
