@@ -37,7 +37,7 @@ def parse_args():
                        help="Batch size (adjust for GPU memory)")
     parser.add_argument("--num_workers", type=int, default=6,
                        help="Number of DataLoader workers (default: 6)")
-    parser.add_argument("--num_epochs", type=int, default=50,
+    parser.add_argument("--num_epochs", type=int, default=30,
                        help="Number of epochs")
     parser.add_argument("--masking_strategy", type=str, default="both",
                        choices=["token", "encounter", "both", "staged"],

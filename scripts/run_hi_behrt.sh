@@ -123,7 +123,7 @@ if [ "$MODE" = "pretrain" ]; then
         --tokenizer_path "${TOKENIZER_PATH}" \
         --output_dir "${OUTPUT_DIR}" \
         --batch_size 32 \
-        --num_epochs 100 \
+        --num_epochs 30 \
         --d_model ${D_MODEL} \
         --n_extractor_layers ${N_EXTRACTOR_LAYERS} \
         --n_aggregator_layers ${N_AGGREGATOR_LAYERS} \
@@ -135,7 +135,7 @@ if [ "$MODE" = "pretrain" ]; then
         --t2v_dim ${T2V_DIM} \
         --byol_momentum 0.996 \
         --mask_probability 0.20 \
-        --learning_rate 1e-4 \
+        --learning_rate 5e-5 \
         --patience 5 \
         --use_amp
 
