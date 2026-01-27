@@ -1,6 +1,6 @@
 #!/bin/bash
 
-#SBATCH --job-name=instacart_base
+#SBATCH --job-name=instacart_softclt
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --nodes=1
@@ -11,8 +11,8 @@
 #SBATCH --time=24:00:00
 
 
-#SBATCH --partition=engelhardlab-gpu
-#SBATCH --account=engelhardlab
+#SBATCH --partition=h200ea
+#SBATCH --account=h200ea
 
 #SBATCH --mail-user=ms1008@duke.edu
 #SBATCH --mail-type=BEGIN,END,FAIL
