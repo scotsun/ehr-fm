@@ -997,8 +997,8 @@ class BaseWithSoftCLTTrainer(Trainer):
                 p_tokens, t_tokens = pred_and_target_sets(
                     masked_last_set_logits, input_ids, set_select_mask, 10
                 )
-                recall10 = recall_at_k(p_tokens, t_tokens, k=10)
-                ndcg10 = ndcg_at_k(p_tokens, t_tokens, k=10)
+                recall10 = recall_at_k(p_tokens, t_tokens)
+                ndcg10 = ndcg_at_k(p_tokens, t_tokens)
 
             counter[0] += 1
             counter[1] += mlm_loss.item()
