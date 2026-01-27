@@ -480,12 +480,18 @@ class BYOLPretrainer:
         if val_loss is not None:
             checkpoint['val_loss'] = val_loss
 
+        # Save periodic checkpoint
+        ckpt_path = self.output_dir / f"checkpoint_epoch_{epoch:04d}.pt"
+        torch.save(checkpoint, ckpt_path)
+
         # Save latest
         torch.save(checkpoint, self.output_dir / "latest_checkpoint.pt")
 
-        # Save epoch checkpoint
-        if (epoch + 1) % self.save_every == 0:
-            torch.save(checkpoint, self.output_dir / f"checkpoint_epoch_{epoch + 1}.pt")
+        # Cleanup old checkpoints (keep last 3)
+        checkpoints = sorted(self.output_dir.glob("checkpoint_epoch_*.pt"))
+        if len(checkpoints) > 3:
+            for old_ckpt in checkpoints[:-3]:
+                old_ckpt.unlink()
 
     def train(self):
         """Full training loop."""
@@ -642,9 +648,10 @@ def main():
         from src.tokenizer import get_tokenizer
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        # Sample patients for tokenizer training
+        # Use ALL patients for tokenizer training (not just a sample)
         data_path = Path(args.data_path)
-        patient_dirs = sorted(data_path.glob("subject_id=*"))[:5000]
+        patient_dirs = sorted(data_path.glob("subject_id=*"))
+        print(f"Loading data from {len(patient_dirs)} patients for tokenizer training...")
 
         def read_patient(d):
             try:

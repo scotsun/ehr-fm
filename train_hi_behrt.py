@@ -546,9 +546,10 @@ def main():
         import pyarrow.parquet as pq
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        # Sample patients for tokenizer training
+        # Use ALL patients for tokenizer training
         data_path = Path(args.data_path)
-        patient_dirs = sorted(data_path.glob("subject_id=*"))[:5000]
+        patient_dirs = sorted(data_path.glob("subject_id=*"))
+        print(f"Loading data from {len(patient_dirs)} patients for tokenizer training...")
 
         def read_patient(d):
             try:

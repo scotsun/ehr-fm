@@ -204,13 +204,22 @@ class FinetuneTrainer:
                     print(f"\nEarly stopping triggered after {epoch + 1} epochs")
                     break
 
-            self._save_checkpoint(f"epoch_{epoch + 1}")
+            # Save periodic checkpoint and cleanup old ones (keep last 3)
+            self._save_checkpoint(f"epoch_{epoch + 1:04d}")
+            self._cleanup_old_checkpoints()
 
         self._save_checkpoint("final")
         self._load_checkpoint("best")
 
         print(f"\nTraining complete! Best {self.metric_for_best_model}: {self.best_metric:.4f}")
         return self.best_metric
+
+    def _cleanup_old_checkpoints(self):
+        """Keep only the last 3 epoch checkpoints."""
+        checkpoints = sorted(self.output_dir.glob("checkpoint_epoch_*.pt"))
+        if len(checkpoints) > 3:
+            for old_ckpt in checkpoints[:-3]:
+                old_ckpt.unlink()
 
     def _train_epoch(self, epoch: int) -> float:
         """Train for one epoch."""
@@ -782,13 +791,22 @@ class NextVisitTrainer:
                     print(f"\nEarly stopping triggered after {epoch + 1} epochs")
                     break
 
-            self._save_checkpoint(f"epoch_{epoch + 1}")
+            # Save periodic checkpoint and cleanup old ones (keep last 3)
+            self._save_checkpoint(f"epoch_{epoch + 1:04d}")
+            self._cleanup_old_checkpoints()
 
         self._save_checkpoint("final")
         self._load_checkpoint("best")
 
         print(f"\nTraining complete! Best {self.metric_for_best_model}: {self.best_metric:.4f}")
         return self.best_metric
+
+    def _cleanup_old_checkpoints(self):
+        """Keep only the last 3 epoch checkpoints."""
+        checkpoints = sorted(self.output_dir.glob("checkpoint_epoch_*.pt"))
+        if len(checkpoints) > 3:
+            for old_ckpt in checkpoints[:-3]:
+                old_ckpt.unlink()
 
     def _train_epoch(self, epoch: int) -> float:
         """Train for one epoch."""

@@ -790,7 +790,9 @@ def main():
             else:
                 patience_counter += 1
 
-            trainer.save_checkpoint(epoch, val_loss, is_best, f"nam_checkpoint_{epoch}.pt")
+            # Only save best NAM model (not every epoch)
+            if is_best:
+                trainer.save_checkpoint(epoch, val_loss, is_best, "best_nam_model.pt")
 
             if patience_counter >= args.patience:
                 print(f"NAM early stopping at epoch {epoch}")
@@ -828,10 +830,6 @@ def main():
         else:
             patience_counter += 1
 
-        if (epoch + 1) % args.save_every == 0 or is_best:
-            trainer.save_checkpoint(epoch, val_loss, is_best, f"checkpoint_epoch{epoch}.pt")
-
-        # Latest checkpoint for resume
         ckpt = {
             'epoch': epoch,
             'model_state_dict': model.state_dict(),
@@ -844,7 +842,24 @@ def main():
             ckpt['scheduler_state_dict'] = scheduler.state_dict()
         if trainer.scaler:
             ckpt['scaler_state_dict'] = trainer.scaler.state_dict()
+
+        # Save periodic checkpoint
+        ckpt_path = output_dir / f"checkpoint_epoch_{epoch:04d}.pt"
+        torch.save(ckpt, ckpt_path)
+
+        # Save best model
+        if is_best:
+            torch.save(ckpt, output_dir / "best_model.pt")
+            print(f"  -> Saved best model (val_loss: {val_loss:.4f})")
+
+        # Latest checkpoint for resume
         torch.save(ckpt, output_dir / "latest_checkpoint.pt")
+
+        # Cleanup old checkpoints (keep last 3)
+        checkpoints = sorted(output_dir.glob("checkpoint_epoch_*.pt"))
+        if len(checkpoints) > 3:
+            for old_ckpt in checkpoints[:-3]:
+                old_ckpt.unlink()
 
         if patience_counter >= args.patience:
             print(f"\nEarly stopping at epoch {epoch}")

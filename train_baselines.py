@@ -540,27 +540,33 @@ def main():
         else:
             patience_counter += 1
 
-        if (epoch + 1) % args.save_every == 0 or is_best:
-            ckpt_path = output_dir / f"checkpoint_epoch{epoch}.pt"
-            ckpt = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': val_loss,
-                'best_val_loss': best_val_loss,
-            }
-            if trainer.scaler:
-                ckpt['scaler_state_dict'] = trainer.scaler.state_dict()
-            torch.save(ckpt, ckpt_path)
+        ckpt = {
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'val_loss': val_loss,
+            'best_val_loss': best_val_loss,
+        }
+        if trainer.scaler:
+            ckpt['scaler_state_dict'] = trainer.scaler.state_dict()
 
-            if is_best:
-                best_path = output_dir / "best_model.pt"
-                torch.save(ckpt, best_path)
-                print(f"  -> Saved best model (val_loss: {val_loss:.4f})")
+        # Save periodic checkpoint
+        ckpt_path = output_dir / f"checkpoint_epoch_{epoch:04d}.pt"
+        torch.save(ckpt, ckpt_path)
+
+        # Save best model
+        if is_best:
+            torch.save(ckpt, output_dir / "best_model.pt")
+            print(f"  -> Saved best model (val_loss: {val_loss:.4f})")
 
         # Latest checkpoint for resume
-        latest_path = output_dir / "latest_checkpoint.pt"
-        torch.save(ckpt, latest_path)
+        torch.save(ckpt, output_dir / "latest_checkpoint.pt")
+
+        # Cleanup old checkpoints (keep last 3)
+        checkpoints = sorted(output_dir.glob("checkpoint_epoch_*.pt"))
+        if len(checkpoints) > 3:
+            for old_ckpt in checkpoints[:-3]:
+                old_ckpt.unlink()
 
         # Early stopping
         if patience_counter >= args.patience:
