@@ -58,7 +58,7 @@ def main():
     trainer = build_trainer(cfg, model, tk, device)
 
     if is_distributed:
-        trainer.model = DDP(model, device_ids=[rank], find_unused_parameters=True)
+        trainer.model = DDP(model, device_ids=[rank])
 
     kwargs = cfg_dict["dataset"]
     kwargs["time_operation"] = lambda x: x["t"]
@@ -70,10 +70,6 @@ def main():
         outcome_vars=None,
         **kwargs,
     )
-
-    #######################
-    instacart = random_split(instacart, [0.01, 0.99])[0]
-    #######################
 
     train, valid = random_split(
         dataset=instacart,
