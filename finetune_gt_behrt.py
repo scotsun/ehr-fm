@@ -67,7 +67,7 @@ def compute_ndcg_at_k(preds: np.ndarray, targets: np.ndarray, k: int) -> float:
     return np.mean(ndcgs) if ndcgs else 0.0
 
 
-def create_finetune_model(pretrained_path, num_classes, vocab_size, args):
+def create_finetune_model(pretrained_path, num_classes, vocab_size, args, is_multilabel=False):
     """Create GT-BEHRT fine-tune model from pretrained checkpoint."""
 
     config = GTBEHRTConfig(
@@ -88,6 +88,7 @@ def create_finetune_model(pretrained_path, num_classes, vocab_size, args):
         config=config,
         num_classes=num_classes,
         dropout=args.dropout,
+        is_multilabel=is_multilabel,
     )
 
     # Load pretrained weights
@@ -557,10 +558,13 @@ def main():
     print(f"  Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
     print(f"  Num classes: {num_classes}")
 
+    # Determine if multilabel task (includes set prediction tasks like next_visit)
+    is_multilabel = is_set_prediction or task_config.get("is_multilabel", False)
+
     # Create model
     print(f"\nLoading pre-trained model from {args.pretrained}")
     vocab_size = tokenizer.get_vocab_size()
-    model = create_finetune_model(args.pretrained, num_classes, vocab_size, args)
+    model = create_finetune_model(args.pretrained, num_classes, vocab_size, args, is_multilabel=is_multilabel)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {n_params:,}")

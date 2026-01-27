@@ -902,10 +902,11 @@ class GTBEHRTForSequenceClassification(nn.Module):
     Uses the pooled CLS representation for classification.
     """
 
-    def __init__(self, config: GTBEHRTConfig, num_classes: int, dropout: float = 0.1):
+    def __init__(self, config: GTBEHRTConfig, num_classes: int, dropout: float = 0.1, is_multilabel: bool = False):
         super().__init__()
         self.config = config
         self.num_classes = num_classes
+        self.is_multilabel = is_multilabel
 
         self.gtbehrt = GTBEHRT(config)
 
@@ -917,7 +918,11 @@ class GTBEHRTForSequenceClassification(nn.Module):
             nn.Linear(config.hidden_size, num_classes),
         )
 
-        self.loss_fn = nn.CrossEntropyLoss()
+        # Use BCEWithLogitsLoss for multilabel tasks, CrossEntropyLoss otherwise
+        if is_multilabel:
+            self.loss_fn = nn.BCEWithLogitsLoss()
+        else:
+            self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(
         self,
