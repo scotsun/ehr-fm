@@ -894,7 +894,7 @@ class BaseWithSoftCLTTrainer(Trainer):
                 t = torch.concat([t, t], dim=0)
 
                 with autocast(device_type="cuda", dtype=torch.float16):
-                    mlm_logits, (h, mid_h) = model(
+                    mlm_logits, (h, _) = model(
                         input_ids=mlm_input_ids,
                         attention_mask=attention_mask,
                         set_attention_mask=set_attention_mask,
@@ -909,15 +909,15 @@ class BaseWithSoftCLTTrainer(Trainer):
                     # soft inst not stable
                     # h = h.chunk(2, dim=0)[0][:, :, 0, :]
                     # mid_h: (2 * batch, max_seq, max_set_size, hidden_size)
-                    mid_h1, mid_h2 = mid_h[:, :, 0, :].chunk(2, dim=0)
-                    mid_h1 = self.proj(mid_h1)
-                    mid_h2 = self.proj(mid_h2)
+                    h1, h2 = h[:, :, 0, :].chunk(2, dim=0)
+                    h1 = self.proj(h1)
+                    h2 = self.proj(h2)
 
                     mask = set_attention_mask.chunk(2, dim=0)[0]  # (batch, max_seq)
 
-                    softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask)
+                    softclt_loss = criterions["softclt"](h1, h2, mask)
                     loss = (
-                        0.1 * trainer_args["l_mlm"] * mlm_loss
+                        trainer_args["l_mlm"] * mlm_loss
                         + trainer_args["l_softclt"] * softclt_loss
                     )
 
@@ -977,7 +977,7 @@ class BaseWithSoftCLTTrainer(Trainer):
             t_dup = torch.concat([t, t], dim=0)
 
             with autocast(device_type="cuda", dtype=torch.float16):
-                mlm_logits, (h, mid_h) = model(
+                mlm_logits, (h, _) = model(
                     input_ids=mlm_input_ids_dup,
                     attention_mask=attention_mask_dup,
                     set_attention_mask=set_attention_mask_dup,
@@ -989,14 +989,13 @@ class BaseWithSoftCLTTrainer(Trainer):
                 # h: (batch, max_seq, max_set_size, hidden_size)
                 # h = h.chunk(2, dim=0)[0][:, :, 0, :]
                 # mid_h: (2 * batch, max_seq, max_set_size, hidden_size)
-                mid_h1, mid_h2 = mid_h[:, :, 0, :].chunk(2, dim=0)
-                mid_h1, mid_h2 = mid_h[:, :, 0, :].chunk(2, dim=0)
-                mid_h1 = self.proj(mid_h1)
-                mid_h2 = self.proj(mid_h2)
+                h1, h2 = h[:, :, 0, :].chunk(2, dim=0)
+                h1 = self.proj(h1)
+                h2 = self.proj(h2)
 
                 mask = set_attention_mask_dup.chunk(2, dim=0)[0]  # (batch, max_seq)
 
-                softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask)
+                softclt_loss = criterions["softclt"](h1, h2, mask)
 
                 if trainer_args["eval_last_set"]:
                     masked_last_set_logits, (_, _) = model(
