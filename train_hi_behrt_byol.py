@@ -645,35 +645,35 @@ def main():
         tokenizer = Tokenizer.from_file(args.tokenizer_path)
     else:
         print(f"Tokenizer not found at {args.tokenizer_path}, training new tokenizer...")
-        from src.tokenizer import get_tokenizer
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from tokenizers import Tokenizer as HFTokenizer
+        from tokenizers.models import WordLevel
+        from tokenizers.trainers import WordLevelTrainer
+        from src.tokenizer import SPECIAL_TOKENS
 
-        # Use ALL patients for tokenizer training (not just a sample)
+        # Use lazy loading iterator for tokenizer training to avoid OOM
         data_path = Path(args.data_path)
         patient_dirs = sorted(data_path.glob("subject_id=*"))
-        print(f"Loading data from {len(patient_dirs)} patients for tokenizer training...")
+        print(f"Training tokenizer from {len(patient_dirs)} patients using lazy loading...")
 
-        def read_patient(d):
-            try:
-                return pq.read_table(d).to_pandas()
-            except Exception:
-                return None
+        def lazy_code_iterator(dirs):
+            """Lazy iterator that reads one patient at a time."""
+            for d in tqdm(dirs, desc="Training tokenizer"):
+                try:
+                    table = pq.read_table(d, columns=["code"])
+                    yield from table.column("code").to_pylist()
+                except Exception:
+                    continue
 
-        dfs = []
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [executor.submit(read_patient, d) for d in patient_dirs]
-            for f in tqdm(as_completed(futures), total=len(futures), desc="Loading tokenizer data"):
-                result = f.result()
-                if result is not None:
-                    dfs.append(result)
-
-        df_sample = pd.concat(dfs, ignore_index=True)
-        tokenizer = get_tokenizer([df_sample], {
-            "tokenizer_path": str(output_dir / "tokenizer.json"),
-            "patient_id_col": "subject_id",
-            "token_col": "code",
-            "min_frequency": 5,
-        })
+        # Train tokenizer directly from iterator (no DataFrame needed)
+        tokenizer = HFTokenizer(WordLevel(unk_token="[UNK]"))
+        tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
+        trainer = WordLevelTrainer(
+            special_tokens=SPECIAL_TOKENS,
+            min_frequency=5,
+            show_progress=False,  # We have tqdm in the iterator
+        )
+        tokenizer.train_from_iterator(trainer=trainer, iterator=lazy_code_iterator(patient_dirs))
+        tokenizer.save(str(output_dir / "tokenizer.json"))
         print(f"Tokenizer trained and saved to {output_dir / 'tokenizer.json'}")
 
     vocab_size = tokenizer.get_vocab_size()
