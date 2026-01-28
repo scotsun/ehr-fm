@@ -850,7 +850,9 @@ class BaseWithSoftCLTTrainer(Trainer):
         self.trainer_args = trainer_args
 
         d_model = model.embeddings.embeddings.embedding_dim
-        self.proj = nn.Sequential(nn.Linear(d_model, d_model), nn.Tanh())
+        self.proj = nn.Sequential(nn.Linear(d_model, d_model), nn.Tanh()).to(
+            self.device
+        )
         self.optimizer.add_param_group(
             {"params": self.proj.parameters(), "lr": trainer_args["lr"]}
         )
