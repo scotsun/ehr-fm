@@ -20,7 +20,7 @@ trainer:
       lambda_: 0.5
       alpha: 0.5
     eval_last_set: true
-    l_mlm: 1
+    l_mlm: 0.1
     l_softclt: 1
 model:
     tokenizer: "dataset/instacart/data/tk.json"
