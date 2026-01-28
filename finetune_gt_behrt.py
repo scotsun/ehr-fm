@@ -376,9 +376,17 @@ class GTBEHRTFinetuneTrainer:
                             class_auroc = roc_auc_score(binary_labels, all_probs[:, c])
                             class_aurocs.append(class_auroc)
                     metrics["auroc"] = np.mean(class_aurocs) if class_aurocs else 0.0
+
+                    class_auprcs = []
+                    for c in range(num_classes):
+                        binary_labels = (all_labels == c).astype(int)
+                        if binary_labels.sum() > 0 and binary_labels.sum() < len(binary_labels):
+                            class_auprcs.append(average_precision_score(binary_labels, all_probs[:, c]))
+                    metrics["auprc_macro"] = np.mean(class_auprcs) if class_auprcs else 0.0
                 except ValueError as e:
-                    print(f"  Warning: Could not compute AUROC: {e}")
+                    print(f"  Warning: Could not compute AUROC/AUPRC: {e}")
                     metrics["auroc"] = 0.0
+                    metrics["auprc_macro"] = 0.0
                 metrics["f1_macro"] = f1_score(all_labels, all_preds, average="macro")
 
             return metrics
