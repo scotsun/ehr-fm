@@ -849,6 +849,12 @@ class BaseWithSoftCLTTrainer(Trainer):
         self.criterions = criterions
         self.trainer_args = trainer_args
 
+        d_model = model.embeddings.embeddings.embedding_dim
+        self.proj = nn.Sequential(nn.Linear(d_model, d_model), nn.Tanh())
+        self.optimizer.add_param_group(
+            {"params": self.proj.parameters(), "lr": trainer_args["lr"]}
+        )
+
     def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
         model: FMBase | DDP = self.model
         model.train()
@@ -898,14 +904,18 @@ class BaseWithSoftCLTTrainer(Trainer):
 
                     # h: (batch, max_seq, max_set_size, hidden_size)
                     # soft-dtw on h -> dist_mat: (batch, batch)
-                    h = h.chunk(2, dim=0)[0][:, :, 0, :]
+                    # soft inst not stable
+                    # h = h.chunk(2, dim=0)[0][:, :, 0, :]
                     # mid_h: (2 * batch, max_seq, max_set_size, hidden_size)
                     mid_h1, mid_h2 = mid_h[:, :, 0, :].chunk(2, dim=0)
+                    mid_h1 = self.proj(mid_h1)
+                    mid_h2 = self.proj(mid_h2)
+
                     mask = set_attention_mask.chunk(2, dim=0)[0]  # (batch, max_seq)
 
-                    softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask, h)
+                    softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask)
                     loss = (
-                        trainer_args["l_mlm"] * mlm_loss
+                        0.1 * trainer_args["l_mlm"] * mlm_loss
                         + trainer_args["l_softclt"] * softclt_loss
                     )
 
@@ -975,12 +985,16 @@ class BaseWithSoftCLTTrainer(Trainer):
                     mlm_logits.view(-1, mlm_logits.size(-1)), mlm_labels_dup.view(-1)
                 )
                 # h: (batch, max_seq, max_set_size, hidden_size)
-                h = h.chunk(2, dim=0)[0][:, :, 0, :]
+                # h = h.chunk(2, dim=0)[0][:, :, 0, :]
                 # mid_h: (2 * batch, max_seq, max_set_size, hidden_size)
                 mid_h1, mid_h2 = mid_h[:, :, 0, :].chunk(2, dim=0)
+                mid_h1, mid_h2 = mid_h[:, :, 0, :].chunk(2, dim=0)
+                mid_h1 = self.proj(mid_h1)
+                mid_h2 = self.proj(mid_h2)
+
                 mask = set_attention_mask_dup.chunk(2, dim=0)[0]  # (batch, max_seq)
 
-                softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask, h)
+                softclt_loss = criterions["softclt"](mid_h1, mid_h2, mask)
 
                 if trainer_args["eval_last_set"]:
                     masked_last_set_logits, (_, _) = model(

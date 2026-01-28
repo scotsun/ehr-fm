@@ -15,7 +15,7 @@ class SoftCLT(nn.Module):
         self.lambda_ = lambda_
         self.alpha = alpha
 
-    def forward(self, z1, z2, mask, x):
+    def forward(self, z1, z2, mask):
         out = self.hier_CL_semisoft(
             z1=z1,
             z2=z2,

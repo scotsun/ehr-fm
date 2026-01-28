@@ -82,12 +82,14 @@ def main():
             batch_size=cfg.trainer["batch_size"],
             sampler=DistributedSampler(train, drop_last=True),
             num_workers=8,
+            drop_last=True,
         )
         valid_loader = DataLoader(
             dataset=valid,
             batch_size=cfg.trainer["batch_size"],
             sampler=DistributedSampler(valid, drop_last=True),
             num_workers=8,
+            drop_last=True,
         )
     else:
         train_loader = DataLoader(
