@@ -26,7 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torch.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import pandas as pd
@@ -37,48 +37,445 @@ from tqdm import tqdm
 import json
 from datetime import datetime
 from sklearn.metrics import roc_auc_score, average_precision_score, accuracy_score, f1_score
+import pyarrow.parquet as pq
 
 from tokenizers import Tokenizer
 
-# Reuse HAT's FinetuneDataset
-from src.finetune.data_utils import (
-    FinetuneDataset, NextVisitDataset, DownstreamTask, TASK_CONFIGS, collate_finetune
-)
+from src.finetune.data_utils import DownstreamTask, TASK_CONFIGS
 from src.baselines.hi_behrt import HiBEHRTConfig, HiBEHRTSimpleForClassification
 
 
-def flatten_batch_for_hibehrt(batch):
+# ============================================================================
+# Hi-BEHRT Native Finetune Dataset
+# ============================================================================
+
+class HiBEHRTFinetuneDataset(Dataset):
     """
-    Convert HAT's hierarchical batch format to flat format for Hi-BEHRT.
+    Native flat-format dataset for Hi-BEHRT finetuning.
 
-    HAT format:
-        input_ids: (B, max_seg, max_seq_len)
-        attention_mask: (B, max_seg, max_seq_len)
-        segment_time: (B, max_seg) - optional, cumsum time per segment
-
-    Hi-BEHRT format:
-        input_ids: (B, max_seg * max_seq_len)
-        attention_mask: (B, max_seg * max_seq_len)
-        time_values: (B, max_seg * max_seq_len) - cumsum time expanded to tokens
+    Produces compact flat token sequences with per-token cumulative time values,
+    matching the format used during BYOL pretraining. This avoids the data format
+    mismatch caused by flattening HAT's hierarchical format (which introduces
+    inter-segment padding).
     """
-    B, S, L = batch["input_ids"].shape
 
-    # Flatten input_ids and attention_mask
-    input_ids = batch["input_ids"].view(B, S * L)
-    attention_mask = batch["attention_mask"].view(B, S * L)
+    def __init__(
+        self,
+        data_path,
+        labels_df: pd.DataFrame,
+        tokenizer: Tokenizer,
+        task: DownstreamTask,
+        max_total_len: int = 2048,
+        split: str = "train",
+        split_ratios: tuple = (0.7, 0.15, 0.15),
+        seed: int = 42,
+        patient_id_col: str = "subject_id",
+        enc_id_col: str = "hadm_id",
+        token_col: str = "code",
+        time_col: str = "days_since_prior_admission",
+        sort_col: str = "admittime",
+        token_time_col: str = "time_offset_hours",
+    ):
+        self.data_path = Path(data_path)
+        self.tokenizer = tokenizer
+        self.max_total_len = max_total_len
+        self.patient_id_col = patient_id_col
+        self.enc_id_col = enc_id_col
+        self.token_col = token_col
+        self.time_col = time_col
+        self.sort_col = sort_col
+        self.token_time_col = token_time_col
 
-    # Expand segment_time to token level if available
-    time_values = None
-    if "segment_time" in batch and batch["segment_time"] is not None:
-        # segment_time: (B, S) -> expand to (B, S, L) -> flatten to (B, S*L)
-        segment_time = batch["segment_time"]  # (B, S)
-        time_values = segment_time.unsqueeze(-1).expand(B, S, L).reshape(B, S * L)
+        self.task = task
+        self.task_config = TASK_CONFIGS[task]
+        self.is_multilabel = self.task_config.get("is_multilabel", False)
+
+        self.pad_token_id = tokenizer.token_to_id("[PAD]")
+        self.cls_token_id = tokenizer.token_to_id("[CLS]")
+
+        # Label setup (same logic as FinetuneDataset)
+        if self.is_multilabel:
+            valid_labels = labels_df[labels_df['icd_categories'].notna() & (labels_df['icd_categories'] != '')].copy()
+            self.hadm_to_categories = {}
+            for _, row in valid_labels.iterrows():
+                cats = [int(x) for x in row['icd_categories'].split(',')]
+                self.hadm_to_categories[row[enc_id_col]] = cats
+            all_indices = [idx for cats in self.hadm_to_categories.values() for idx in cats]
+            self.num_classes = max(all_indices) + 1 if all_indices else 0
+            self.label_mapping = None
+        else:
+            self.label_col = task.value
+            valid_labels = labels_df[labels_df[self.label_col] >= 0].copy()
+
+            if task == DownstreamTask.ICD_CHAPTER:
+                self.num_classes = valid_labels[self.label_col].nunique()
+                unique_labels = sorted(valid_labels[self.label_col].unique())
+                self.label_mapping = {old: new for new, old in enumerate(unique_labels)}
+            else:
+                self.num_classes = 2
+                self.label_mapping = None
+
+        # Patient-level split
+        all_patients = valid_labels[patient_id_col].unique()
+        rng = np.random.default_rng(seed)
+        all_patients = rng.permutation(all_patients)
+
+        n_train = int(len(all_patients) * split_ratios[0])
+        n_val = int(len(all_patients) * split_ratios[1])
+
+        if split == "train":
+            split_patients = set(all_patients[:n_train])
+        elif split == "val":
+            split_patients = set(all_patients[n_train:n_train + n_val])
+        else:
+            split_patients = set(all_patients[n_train + n_val:])
+
+        self.labels = valid_labels[
+            valid_labels[patient_id_col].isin(split_patients)
+        ].reset_index(drop=True)
+
+        # Build label dict and patient admissions
+        self.label_dict = {}
+        pid_idx = self.labels.columns.get_loc(patient_id_col)
+        enc_idx = self.labels.columns.get_loc(enc_id_col)
+
+        if self.is_multilabel:
+            for row in self.labels.itertuples(index=False):
+                key = (row[pid_idx], row[enc_idx])
+                hadm_id = row[enc_idx]
+                if hadm_id in self.hadm_to_categories:
+                    self.label_dict[key] = self.hadm_to_categories[hadm_id]
+        else:
+            label_idx = self.labels.columns.get_loc(self.label_col)
+            for row in self.labels.itertuples(index=False):
+                key = (row[pid_idx], row[enc_idx])
+                label = row[label_idx]
+                if self.label_mapping:
+                    label = self.label_mapping[label]
+                self.label_dict[key] = label
+
+        self.samples = list(self.label_dict.keys())
+
+        self.patient_admissions = {}
+        for (pid, hadm_id) in self.samples:
+            if pid not in self.patient_admissions:
+                self.patient_admissions[pid] = []
+            self.patient_admissions[pid].append(hadm_id)
+
+        for pid in self.patient_admissions:
+            patient_labels = self.labels[self.labels[patient_id_col] == pid]
+            sorted_hadms = patient_labels.sort_values(sort_col)[enc_id_col].tolist()
+            self.patient_admissions[pid] = sorted_hadms
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        subject_id, target_hadm_id = self.samples[index]
+        label = self.label_dict[(subject_id, target_hadm_id)]
+
+        all_hadms = self.patient_admissions[subject_id]
+        target_idx = all_hadms.index(target_hadm_id)
+        history_hadms = list(all_hadms[:target_idx + 1])
+
+        # Read patient data
+        subject_dir = self.data_path / f"{self.patient_id_col}={subject_id}"
+        table = pq.read_table(subject_dir, filters=[(self.enc_id_col, 'in', history_hadms)])
+        history_data = table.to_pandas()
+
+        grouped = history_data.groupby(self.enc_id_col)
+        max_hours = self.task_config.get("max_hours")
+        exclude_target_dx = self.task_config.get("exclude_target_dx", False)
+
+        encounter_data = []
+        for enc_id, group in grouped:
+            if enc_id == target_hadm_id:
+                if exclude_target_dx:
+                    group = group[~group[self.token_col].str.startswith('DX:', na=False)]
+                if max_hours is not None and self.token_time_col in group.columns:
+                    group = group[group[self.token_time_col] <= max_hours]
+
+            tokens = group[self.token_col].tolist()
+            if len(tokens) == 0:
+                continue
+
+            time_val = group[self.time_col].iloc[0] if self.time_col and self.time_col in group.columns else 0.0
+            sort_val = group[self.sort_col].iloc[0] if self.sort_col and self.sort_col in group.columns else 0
+
+            token_times = group[self.token_time_col].tolist() if self.token_time_col and self.token_time_col in group.columns else [0.0] * len(tokens)
+
+            encounter_data.append({
+                'tokens': tokens,
+                'time': time_val if not (time_val is None or (isinstance(time_val, float) and np.isnan(time_val))) else 0.0,
+                'sort_key': sort_val,
+                'token_times': token_times,
+            })
+
+        encounter_data.sort(key=lambda x: x['sort_key'] if x['sort_key'] is not None else 0)
+
+        # Compute cumulative time
+        cumsum_time = 0.0
+        for enc in encounter_data:
+            cumsum_time += enc['time']
+            enc['cumsum_time'] = cumsum_time
+
+        # Build flat token sequence with per-token time (same as BYOLPretrainDataset)
+        all_tokens = []
+        all_times = []
+
+        for enc in encounter_data:
+            all_tokens.append("[CLS]")
+            all_times.append(enc['cumsum_time'])
+
+            for tok, tok_time in zip(enc['tokens'], enc['token_times']):
+                all_tokens.append(tok)
+                tok_time_clean = tok_time if not (tok_time is None or (isinstance(tok_time, float) and np.isnan(tok_time))) else 0.0
+                all_times.append(enc['cumsum_time'] + tok_time_clean / 24.0)
+
+        # Truncate (keep most recent)
+        if len(all_tokens) > self.max_total_len:
+            all_tokens = all_tokens[-self.max_total_len:]
+            all_times = all_times[-self.max_total_len:]
+
+        # Tokenize
+        encoding = self.tokenizer.encode(all_tokens, is_pretokenized=True)
+        input_ids = encoding.ids
+        attention_mask = [1 if tid != self.pad_token_id else 0 for tid in input_ids]
+
+        # Align time values
+        if len(all_times) < len(input_ids):
+            last_time = all_times[-1] if all_times else 0.0
+            all_times = all_times + [last_time] * (len(input_ids) - len(all_times))
+        else:
+            all_times = all_times[:len(input_ids)]
+
+        item = {
+            'input_ids': torch.tensor(input_ids, dtype=torch.long),
+            'attention_mask': torch.tensor(attention_mask, dtype=torch.long),
+            'time_values': torch.tensor(all_times, dtype=torch.float),
+        }
+
+        if self.is_multilabel:
+            multi_hot = torch.zeros(self.num_classes, dtype=torch.float)
+            for idx in label:
+                multi_hot[idx] = 1.0
+            item["label"] = multi_hot
+        else:
+            item["label"] = torch.tensor(label, dtype=torch.long)
+
+        return item
+
+    def get_class_weights(self):
+        """Get inverse frequency weights for imbalanced data."""
+        if self.is_multilabel:
+            class_counts = torch.zeros(self.num_classes)
+            for s in self.samples:
+                for idx in self.label_dict[s]:
+                    class_counts[idx] += 1
+            neg_counts = len(self.samples) - class_counts
+            return (neg_counts / (class_counts + 1e-6)).float()
+        else:
+            labels = torch.tensor([self.label_dict[s] for s in self.samples])
+            class_counts = torch.bincount(labels, minlength=self.num_classes).float()
+            weights = 1.0 / (class_counts + 1e-6)
+            weights = weights / weights.sum() * self.num_classes
+            return weights
+
+
+class HiBEHRTNextVisitDataset(Dataset):
+    """
+    Native flat-format dataset for Hi-BEHRT next visit prediction.
+
+    Input: history admissions (NOT including target)
+    Label: multi-hot vector of token IDs from target admission
+    """
+
+    def __init__(
+        self,
+        data_path,
+        labels_df: pd.DataFrame,
+        tokenizer: Tokenizer,
+        max_total_len: int = 2048,
+        split: str = "train",
+        split_ratios: tuple = (0.7, 0.15, 0.15),
+        seed: int = 42,
+        patient_id_col: str = "subject_id",
+        enc_id_col: str = "hadm_id",
+        token_col: str = "code",
+        time_col: str = "days_since_prior_admission",
+        sort_col: str = "admittime",
+        token_time_col: str = "time_offset_hours",
+    ):
+        self.data_path = Path(data_path)
+        self.tokenizer = tokenizer
+        self.max_total_len = max_total_len
+        self.patient_id_col = patient_id_col
+        self.enc_id_col = enc_id_col
+        self.token_col = token_col
+        self.time_col = time_col
+        self.sort_col = sort_col
+        self.token_time_col = token_time_col
+
+        self.pad_token_id = tokenizer.token_to_id("[PAD]")
+        self.vocab_size = tokenizer.get_vocab_size()
+        self.num_classes = self.vocab_size
+
+        # Patient-level split
+        all_patients = labels_df[patient_id_col].unique()
+        rng = np.random.default_rng(seed)
+        all_patients = rng.permutation(all_patients)
+
+        n_train = int(len(all_patients) * split_ratios[0])
+        n_val = int(len(all_patients) * split_ratios[1])
+
+        if split == "train":
+            split_patients = set(all_patients[:n_train])
+        elif split == "val":
+            split_patients = set(all_patients[n_train:n_train + n_val])
+        else:
+            split_patients = set(all_patients[n_train + n_val:])
+
+        labels = labels_df[labels_df[patient_id_col].isin(split_patients)].reset_index(drop=True)
+
+        self.patient_admissions = {}
+        for pid in labels[patient_id_col].unique():
+            patient_data = labels[labels[patient_id_col] == pid]
+            sorted_hadms = patient_data.sort_values(sort_col)[enc_id_col].tolist()
+            if len(sorted_hadms) >= 2:
+                self.patient_admissions[pid] = sorted_hadms
+
+        self.samples = []
+        for pid, hadms in self.patient_admissions.items():
+            for i in range(1, len(hadms)):
+                self.samples.append((pid, hadms[i]))
+
+        print(f"HiBEHRTNextVisitDataset [{split}]: {len(self.samples)} samples from {len(self.patient_admissions)} patients")
+
+    def __len__(self):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        subject_id, target_hadm_id = self.samples[index]
+
+        all_hadms = self.patient_admissions[subject_id]
+        target_idx = all_hadms.index(target_hadm_id)
+        history_hadms = list(all_hadms[:target_idx])
+
+        subject_dir = self.data_path / f"{self.patient_id_col}={subject_id}"
+
+        # Read history
+        history_table = pq.read_table(subject_dir, filters=[(self.enc_id_col, 'in', history_hadms)])
+        history_data = history_table.to_pandas()
+
+        # Read target for labels
+        target_table = pq.read_table(subject_dir, filters=[(self.enc_id_col, '==', target_hadm_id)])
+        target_data = target_table.to_pandas()
+
+        # Process history encounters
+        grouped = history_data.groupby(self.enc_id_col)
+        encounter_data = []
+        for enc_id, group in grouped:
+            tokens = group[self.token_col].tolist()
+            if len(tokens) == 0:
+                continue
+            time_val = group[self.time_col].iloc[0] if self.time_col and self.time_col in group.columns else 0.0
+            sort_val = group[self.sort_col].iloc[0] if self.sort_col and self.sort_col in group.columns else 0
+            token_times = group[self.token_time_col].tolist() if self.token_time_col and self.token_time_col in group.columns else [0.0] * len(tokens)
+            encounter_data.append({
+                'tokens': tokens,
+                'time': time_val if not (time_val is None or (isinstance(time_val, float) and np.isnan(time_val))) else 0.0,
+                'sort_key': sort_val,
+                'token_times': token_times,
+            })
+
+        encounter_data.sort(key=lambda x: x['sort_key'] if x['sort_key'] is not None else 0)
+
+        # Compute cumulative time
+        cumsum_time = 0.0
+        for enc in encounter_data:
+            cumsum_time += enc['time']
+            enc['cumsum_time'] = cumsum_time
+
+        # Build flat token sequence
+        all_tokens = []
+        all_times = []
+        for enc in encounter_data:
+            all_tokens.append("[CLS]")
+            all_times.append(enc['cumsum_time'])
+            for tok, tok_time in zip(enc['tokens'], enc['token_times']):
+                all_tokens.append(tok)
+                tok_time_clean = tok_time if not (tok_time is None or (isinstance(tok_time, float) and np.isnan(tok_time))) else 0.0
+                all_times.append(enc['cumsum_time'] + tok_time_clean / 24.0)
+
+        if len(all_tokens) > self.max_total_len:
+            all_tokens = all_tokens[-self.max_total_len:]
+            all_times = all_times[-self.max_total_len:]
+
+        # Handle empty history
+        if len(all_tokens) == 0:
+            all_tokens = ["[CLS]"]
+            all_times = [0.0]
+
+        encoding = self.tokenizer.encode(all_tokens, is_pretokenized=True)
+        input_ids = encoding.ids
+        attention_mask = [1 if tid != self.pad_token_id else 0 for tid in input_ids]
+
+        if len(all_times) < len(input_ids):
+            last_time = all_times[-1] if all_times else 0.0
+            all_times = all_times + [last_time] * (len(input_ids) - len(all_times))
+        else:
+            all_times = all_times[:len(input_ids)]
+
+        # Label: multi-hot vector of target admission tokens
+        target_tokens = target_data[self.token_col].tolist()
+        target_token_ids = set()
+        for token in target_tokens:
+            token_id = self.tokenizer.token_to_id(str(token))
+            if token_id is not None and token_id >= 4:  # Skip special tokens
+                target_token_ids.add(token_id)
+
+        multi_hot = torch.zeros(self.vocab_size, dtype=torch.float)
+        for tid in target_token_ids:
+            multi_hot[tid] = 1.0
+
+        return {
+            'input_ids': torch.tensor(input_ids, dtype=torch.long),
+            'attention_mask': torch.tensor(attention_mask, dtype=torch.long),
+            'time_values': torch.tensor(all_times, dtype=torch.float),
+            'label': multi_hot,
+        }
+
+
+def collate_hibehrt(batch):
+    """Collate function for Hi-BEHRT - pads variable-length flat sequences to max length in batch."""
+    max_len = max(item['input_ids'].shape[0] for item in batch)
+
+    input_ids = []
+    attention_mask = []
+    time_values = []
+    labels = []
+
+    for item in batch:
+        seq_len = item['input_ids'].shape[0]
+        pad_len = max_len - seq_len
+
+        if pad_len > 0:
+            input_ids.append(F.pad(item['input_ids'], (0, pad_len), value=0))
+            attention_mask.append(F.pad(item['attention_mask'], (0, pad_len), value=0))
+            last_time = item['time_values'][-1].item() if seq_len > 0 else 0.0
+            time_values.append(F.pad(item['time_values'], (0, pad_len), value=last_time))
+        else:
+            input_ids.append(item['input_ids'])
+            attention_mask.append(item['attention_mask'])
+            time_values.append(item['time_values'])
+
+        labels.append(item['label'])
 
     return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "time_values": time_values,
-        "label": batch["label"],
+        'input_ids': torch.stack(input_ids),
+        'attention_mask': torch.stack(attention_mask),
+        'time_values': torch.stack(time_values),
+        'label': torch.stack(labels),
     }
 
 
@@ -199,15 +596,15 @@ class HiBEHRTTrainer:
         else:
             self.metric_for_best_model = "auprc"
 
-        # Data loaders (use HAT's collate_finetune)
+        # Data loaders (use native flat collate)
         self.train_loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True,
-            collate_fn=collate_finetune, num_workers=num_workers,
+            collate_fn=collate_hibehrt, num_workers=num_workers,
             pin_memory=(self.device.type == "cuda")
         )
         self.val_loader = DataLoader(
             val_dataset, batch_size=batch_size * 2, shuffle=False,
-            collate_fn=collate_finetune, num_workers=num_workers,
+            collate_fn=collate_hibehrt, num_workers=num_workers,
             pin_memory=(self.device.type == "cuda")
         )
 
@@ -243,18 +640,11 @@ class HiBEHRTTrainer:
         self.patience_counter = 0
 
     def _forward_step(self, batch):
-        """Forward pass with flattened batch."""
-        # Flatten HAT's hierarchical format to flat format
-        flat_batch = flatten_batch_for_hibehrt(batch)
-
-        input_ids = flat_batch["input_ids"].to(self.device)
-        attention_mask = flat_batch["attention_mask"].to(self.device)
-        labels = flat_batch["label"].to(self.device)
-
-        # Pass time_values if available (for Time2Vec encoding)
-        time_values = flat_batch.get("time_values")
-        if time_values is not None:
-            time_values = time_values.to(self.device)
+        """Forward pass with native flat batch."""
+        input_ids = batch["input_ids"].to(self.device)
+        attention_mask = batch["attention_mask"].to(self.device)
+        labels = batch["label"].to(self.device)
+        time_values = batch["time_values"].to(self.device)
 
         output = self.model(input_ids, attention_mask, time_values=time_values, labels=labels)
 
@@ -303,7 +693,6 @@ class HiBEHRTTrainer:
 
         return total_loss / num_batches
 
-    @torch.no_grad()
     @torch.no_grad()
     def evaluate(self, dataloader=None):
         """Evaluate on validation/test set."""
@@ -512,9 +901,9 @@ def parse_args():
     parser.add_argument("--t2v_dim", type=int, default=64,
                        help="Time2Vec output dimension")
 
-    # Dataset config (matching HAT's FinetuneDataset)
-    parser.add_argument("--max_seg", type=int, default=8)
-    parser.add_argument("--max_seq_len", type=int, default=512)
+    # Dataset config (native flat format, matching BYOL pretrain)
+    parser.add_argument("--max_total_len", type=int, default=2048,
+                       help="Max flat sequence length (same as BYOL pretrain)")
 
     parser.add_argument("--use_amp", action="store_true")
     parser.add_argument("--device", type=str, default="cuda")
@@ -589,70 +978,62 @@ def main():
     print(f"Loading labels from {args.labels_path}")
     labels_df = pd.read_csv(args.labels_path)
 
-    # Create datasets
+    # Create datasets (native flat format matching BYOL pretrain)
     task_config = TASK_CONFIGS[task]
     is_set_prediction = task_config.get("is_set_prediction", False)
 
     if is_set_prediction:
-        # Use NextVisitDataset for NEXT_VISIT task
-        print("\nCreating datasets (using NextVisitDataset)...")
-        train_dataset = NextVisitDataset(
+        print("\nCreating datasets (using HiBEHRTNextVisitDataset)...")
+        train_dataset = HiBEHRTNextVisitDataset(
             data_path=args.data_path,
             labels_df=labels_df,
             tokenizer=tokenizer,
-            max_seg=args.max_seg,
-            max_seq_len=args.max_seq_len,
+            max_total_len=args.max_total_len,
             split="train",
             seed=args.seed,
         )
-        val_dataset = NextVisitDataset(
+        val_dataset = HiBEHRTNextVisitDataset(
             data_path=args.data_path,
             labels_df=labels_df,
             tokenizer=tokenizer,
-            max_seg=args.max_seg,
-            max_seq_len=args.max_seq_len,
+            max_total_len=args.max_total_len,
             split="val",
             seed=args.seed,
         )
-        test_dataset = NextVisitDataset(
+        test_dataset = HiBEHRTNextVisitDataset(
             data_path=args.data_path,
             labels_df=labels_df,
             tokenizer=tokenizer,
-            max_seg=args.max_seg,
-            max_seq_len=args.max_seq_len,
+            max_total_len=args.max_total_len,
             split="test",
             seed=args.seed,
         )
     else:
-        # Use FinetuneDataset for classification tasks
-        print("\nCreating datasets (using FinetuneDataset)...")
-        train_dataset = FinetuneDataset(
+        print("\nCreating datasets (using HiBEHRTFinetuneDataset)...")
+        train_dataset = HiBEHRTFinetuneDataset(
             data_path=args.data_path,
             labels_df=labels_df,
             tokenizer=tokenizer,
             task=task,
-            max_seg=args.max_seg,
-            max_seq_len=args.max_seq_len,
+            max_total_len=args.max_total_len,
             split="train",
             seed=args.seed,
         )
-        val_dataset = FinetuneDataset(
+        val_dataset = HiBEHRTFinetuneDataset(
             data_path=args.data_path,
             labels_df=labels_df,
             tokenizer=tokenizer,
             task=task,
-            max_seg=args.max_seg,
-            max_seq_len=args.max_seq_len,
+            max_total_len=args.max_total_len,
             split="val",
             seed=args.seed,
         )
-        test_dataset = FinetuneDataset(
+        test_dataset = HiBEHRTFinetuneDataset(
             data_path=args.data_path,
             labels_df=labels_df,
             tokenizer=tokenizer,
             task=task,
-            max_seg=args.max_seg,
-            max_seq_len=args.max_seq_len,
+            max_total_len=args.max_total_len,
             split="test",
             seed=args.seed,
         )
@@ -713,7 +1094,7 @@ def main():
 
     test_loader = DataLoader(
         test_dataset, batch_size=args.batch_size * 2, shuffle=False,
-        collate_fn=collate_finetune, num_workers=args.num_workers
+        collate_fn=collate_hibehrt, num_workers=args.num_workers
     )
     test_metrics = trainer.evaluate(test_loader)
 

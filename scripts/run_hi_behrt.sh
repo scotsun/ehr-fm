@@ -75,9 +75,7 @@ STRIDE=30
 T2V_DIM=64  # Time2Vec dimension
 
 # Data sequence length configuration (unified to 2048 for consistency)
-MAX_TOTAL_LEN=2048      # For pretrain (flat sequence)
-MAX_SEG=8               # For finetune (hierarchical: max_seg * max_seq_len = 2048)
-MAX_SEQ_LEN=256         # Tokens per segment
+MAX_TOTAL_LEN=2048      # Max flat sequence length (same for pretrain and finetune)
 
 # Data paths
 DATA_PATH="/hpc/group/engelhardlab/hg176/ehr-fm/dataset/mimic4/data/mimic4_tokens.parquet"
@@ -208,7 +206,7 @@ elif [ "$MODE" = "finetune" ]; then
     echo "  extractor:      ${N_EXTRACTOR_LAYERS} layers"
     echo "  aggregator:     ${N_AGGREGATOR_LAYERS} layers"
     echo "  window_size:    ${WINDOW_SIZE}, stride: ${STRIDE}"
-    echo "  max_seg:        ${MAX_SEG}, max_seq_len: ${MAX_SEQ_LEN} (total: $((MAX_SEG * MAX_SEQ_LEN)))"
+    echo "  max_total_len:  ${MAX_TOTAL_LEN}"
     echo "  t2v_dim:        ${T2V_DIM}"
     echo "  Pretrained:     ${PRETRAINED_PATH:-None (training from scratch)}"
     echo "  Output:         ${OUTPUT_DIR}"
@@ -221,7 +219,7 @@ elif [ "$MODE" = "finetune" ]; then
         --labels_path ${LABELS_PATH} \
         --tokenizer_path ${TOKENIZER_PATH} \
         --output_dir ${OUTPUT_DIR} \
-        --batch_size 8 \
+        --batch_size 16 \
         --num_epochs 30 \
         --d_model ${D_MODEL} \
         --n_extractor_layers ${N_EXTRACTOR_LAYERS} \
@@ -230,10 +228,9 @@ elif [ "$MODE" = "finetune" ]; then
         --d_ff ${D_FF} \
         --window_size ${WINDOW_SIZE} \
         --stride ${STRIDE} \
-        --max_seg ${MAX_SEG} \
-        --max_seq_len ${MAX_SEQ_LEN} \
+        --max_total_len ${MAX_TOTAL_LEN} \
         --t2v_dim ${T2V_DIM} \
-        --learning_rate 5e-5 \
+        --learning_rate 1e-5 \
         --patience 2 \
         --use_amp"
 
