@@ -86,3 +86,6 @@ dagster.yaml
 
 mlruns/
 __pycache__
+
+# Scripts (contain personal info)
+scripts/
