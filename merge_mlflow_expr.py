@@ -1,8 +1,5 @@
-import mlflow
 from mlflow.tracking import MlflowClient
-import time
 import os
-import yaml
 
 # CONFIGURATION
 # 1. The root of your local mlruns folder (e.g., current directory)
@@ -51,7 +48,7 @@ print("Done. You can now open `mlflow ui` or run the migration scripts.")
 
 
 # Configuration
-SOURCE_EXP_ID = "748975335134678951"
+SOURCE_EXP_ID = "518397901931513976"
 TARGET_EXP_ID = "428834719722401669"
 
 client = MlflowClient()
