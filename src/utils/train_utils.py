@@ -1,95 +1,16 @@
-import os
-import yaml
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.distributed as dist
 import mlflow
 
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn import CrossEntropyLoss, KLDivLoss
 from mlflow.types import TensorSpec, Schema
 from mlflow.models import ModelSignature
-from datetime import timedelta
 from transformers import PreTrainedModel
 from tokenizers import Tokenizer
 
 from src.models import FMConfig
 from src.loss.softclt import SoftCLT
-from src.trainer import (
-    EarlyStopping,
-    Trainer,
-    BertTrainer,
-    LongformerTrainer,
-    BaseTrainer,
-    BaseWithHeadsTrainer,
-    BaseWithSoftCLTTrainer,
-)
-
-
-def _dist_is_initialized():
-    return dist.is_available() and dist.is_initialized()
-
-
-def _is_main_process():
-    return not _dist_is_initialized() or dist.get_rank() == 0
-
-
-def _get_module(model: nn.Module | DDP) -> nn.Module:
-    return model.module if isinstance(model, DDP) else model
-
-
-def _broadcast_bool(flag: bool, device: torch.device) -> bool:
-    """
-    single gpu: return the flag as is
-    ddp: broadcast the flag from rank 0 to all other ranks, and return the broadcasted flag
-    """
-    if not _dist_is_initialized():
-        return flag
-    flag_tensor = torch.tensor([1 if flag else 0], device=device, dtype=torch.int16)
-    dist.broadcast(flag_tensor, src=0)
-    return bool(flag_tensor.item())
-
-
-def _broadcast_float(value: float, device: torch.device) -> float:
-    """
-    single gpu: return the value as is
-    ddp: broadcast the value from rank 0 to all other ranks, and return the
-    """
-    if not _dist_is_initialized():
-        return value
-    value_tensor = torch.tensor([value], device=device, dtype=torch.float32)
-    dist.broadcast(value_tensor, src=0)
-    return float(value_tensor.item())
-
-
-def load_cfg(cfg_path) -> dict:
-    with open(cfg_path, "r") as f:
-        cfg = yaml.safe_load(f)
-    return cfg
-
-
-def setup_training():
-    # check if in ddp env
-    if _dist_is_initialized():
-        local_rank = int(os.environ["LOCAL_RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        rank = int(os.environ["RANK"])
-
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(local_rank)
-        dist.init_process_group(backend="nccl", timeout=timedelta(seconds=600))
-
-        return local_rank, world_size, rank, device, True
-    else:
-        local_rank = 0
-        world_size = 1
-        rank = 0
-
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        torch.cuda.set_device(local_rank)
-
-        return local_rank, world_size, rank, device, False
+from src.trainers import EarlyStopping, Trainer, pt_trainers
 
 
 def setup_mlflow_tracked_fit(
@@ -201,26 +122,26 @@ def build_trainer(
 
     match model_type:
         case "fm-bert":
-            trainer_class = BertTrainer
+            trainer_class = pt_trainers.BertTrainer
             signature = make_bert_signature(cfg)
             criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-base":
-            trainer_class = BaseTrainer
+            trainer_class = pt_trainers.BaseTrainer
             signature = make_fm_signature(cfg)
             criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-longformer":
-            trainer_class = LongformerTrainer
+            trainer_class = pt_trainers.LongformerTrainer
             signature = make_bert_signature(cfg)
             criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-base-with_heads":
-            trainer_class = BaseWithHeadsTrainer
+            trainer_class = pt_trainers.BaseWithHeadsTrainer
             signature = make_fm_signature(cfg)
             criterions = {
                 "cross_entropy": CrossEntropyLoss(ignore_index=-100),
                 "kl_div": KLDivLoss(reduction="batchmean"),
             }
         case "fm-base-with_softclt":
-            trainer_class = BaseWithSoftCLTTrainer
+            trainer_class = pt_trainers.BaseWithSoftCLTTrainer
             signature = make_fm_signature(cfg)
             criterions = {
                 "cross_entropy": CrossEntropyLoss(ignore_index=-100),
