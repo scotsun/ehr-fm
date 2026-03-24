@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import mlflow
+import yaml
 
 from torch.nn import CrossEntropyLoss, KLDivLoss
 from mlflow.types import TensorSpec, Schema
@@ -11,6 +12,12 @@ from tokenizers import Tokenizer
 from src.models import FMConfig
 from src.loss.softclt import SoftCLT
 from src.trainers import EarlyStopping, Trainer, pt_trainers
+
+
+def load_cfg(cfg_path) -> dict:
+    with open(cfg_path, "r") as f:
+        cfg = yaml.safe_load(f)
+    return cfg
 
 
 def setup_mlflow_tracked_fit(
