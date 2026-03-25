@@ -101,6 +101,13 @@ class Downstream(nn.Module):
         set_mask = ~(x == 0).all(dim=-1)  # set_mask.shape: (batch, max_batch_seq_len)
         return x, set_mask
 
+    def _last_pool(self, x: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        mask_sums = mask.sum(dim=1)
+        last_indices = torch.clamp_min(mask_sums - 1, 0)
+        batch_indices = torch.arange(x.shape[0], device=x.device)
+        last_embeddings = x[batch_indices, last_indices]
+        return last_embeddings
+
     def forward(
         self, x: torch.Tensor, mask: torch.Tensor, set_mask: torch.Tensor | None
     ) -> torch.Tensor:
@@ -118,5 +125,10 @@ class Downstream(nn.Module):
             case "mlp":
                 x = self._masked_avg_pool(x, set_mask)
                 return self.net(x)
+            case "mlp-last":
+                x = self._last_pool(x, set_mask)
+                return self.net(x)
             case "gru":
                 return self.net(x, set_mask)
+            case _:
+                raise ValueError(f"Unknown model_type: {self.model_type}")
