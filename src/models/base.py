@@ -47,19 +47,16 @@ class FMBase(PreTrainedModel):
         h, mid_h = self.encode(input_ids, attention_mask, set_attention_mask, t)
         logits = self.lm_head(h)
         # (batch, max_seq, max_set_size, d_model)
-        return logits, (h, mid_h)
+        return logits, h
 
     def encode(self, input_ids, attention_mask, set_attention_mask, t):
         h = self.embeddings(input_ids)
         h = h + self.t2v(t)
-        mid_h = None
-        for l_id, block in enumerate(self.blocks):  # DONE: get mid representation
+        for _, block in enumerate(self.blocks):
             h = block(h, attention_mask, set_attention_mask, t)
-            if l_id == len(self.blocks) // 2:
-                mid_h = h
         h = self.last_norm(h)
         # (batch, max_seq, max_set_size, d_model)
-        return h, mid_h
+        return h
 
 
 class FMBaseWithHeads(PreTrainedModel):
@@ -80,7 +77,7 @@ class FMBaseWithHeads(PreTrainedModel):
         # set_mask: (batch, max_seq) is used to select the sets for DM (e.g., MSM sets)
         if set_mask is None:
             set_mask = set_attention_mask
-        logits_mlm, (h, mid_h) = self.transformer(
+        logits_mlm, h = self.transformer(
             input_ids, attention_mask, set_attention_mask, t
         )
         # M := # masked/selected sets
@@ -90,7 +87,7 @@ class FMBaseWithHeads(PreTrainedModel):
         logits_dm = self.mlp_dm(h_cls)
         # TODO: logits_tte = self.mlp_tte(t)
 
-        return logits_mlm, logits_dm, (h, mid_h)
+        return logits_mlm, logits_dm, h
 
     def encode(self, input_ids, attention_mask, set_attention_mask, t):
         return self.transformer.encode(input_ids, attention_mask, set_attention_mask, t)

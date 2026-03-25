@@ -1,4 +1,3 @@
-import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -30,7 +29,7 @@ from src.metric import (
     pred_and_target_sets,
     pred_and_target_sets_1d,
 )
-from src.utils.dist_utils import is_main_process
+from src.utils.dist_utils import is_main_process, _dist_is_initialized
 from . import EarlyStopping, Trainer
 
 
@@ -165,7 +164,7 @@ class BertTrainer(Trainer):
                 recall10 = torch.zeros_like(top1_acc)
                 ndcg10 = torch.zeros_like(top1_acc)
 
-        if "LOCAL_RANK" in os.environ:
+        if _dist_is_initialized() and dist.get_world_size() > 1:
             dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
             (counter[1] / counter[0]).item(),
@@ -369,7 +368,7 @@ class BaseTrainer(Trainer):
                 counter[4] += recall10.item()
                 counter[5] += ndcg10.item()
 
-        if "LOCAL_RANK" in os.environ:
+        if _dist_is_initialized() and dist.get_world_size() > 1:
             dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
             (counter[1] / counter[0]).item(),
@@ -635,7 +634,7 @@ class BaseWithHeadsTrainer(Trainer):
             counter[5] += recall10.item()
             counter[6] += ndcg10.item()
 
-        if "LOCAL_RANK" in os.environ:
+        if _dist_is_initialized() and dist.get_world_size() > 1:
             dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
             (counter[1] / counter[0]).item(),
@@ -750,10 +749,6 @@ class BaseWithSoftCLTTrainer(Trainer):
                     )
 
                     # h: (batch, max_seq, max_set_size, hidden_size)
-                    # soft-dtw on h -> dist_mat: (batch, batch)
-                    # soft inst not stable
-                    # h = h.chunk(2, dim=0)[0][:, :, 0, :]
-                    # mid_h: (2 * batch, max_seq, max_set_size, hidden_size)
                     h1, h2 = h[:, :, 0, :].chunk(2, dim=0)
                     h1 = self.proj(h1)
                     h2 = self.proj(h2)
@@ -831,9 +826,7 @@ class BaseWithSoftCLTTrainer(Trainer):
                 mlm_loss = criterions["cross_entropy"](
                     mlm_logits.view(-1, mlm_logits.size(-1)), mlm_labels_dup.view(-1)
                 )
-                # h: (batch, max_seq, max_set_size, hidden_size)
-                # h = h.chunk(2, dim=0)[0][:, :, 0, :]
-                # mid_h: (2 * batch, max_seq, max_set_size, hidden_size)
+
                 h1, h2 = h[:, :, 0, :].chunk(2, dim=0)
                 h1 = self.proj(h1)
                 h2 = self.proj(h2)
@@ -868,7 +861,7 @@ class BaseWithSoftCLTTrainer(Trainer):
             counter[5] += recall10.item()
             counter[6] += ndcg10.item()
 
-        if "LOCAL_RANK" in os.environ:
+        if _dist_is_initialized() and dist.get_world_size() > 1:
             dist.all_reduce(counter, op=dist.ReduceOp.SUM)
         return (
             (counter[1] / counter[0]).item(),
