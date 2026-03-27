@@ -16,9 +16,11 @@ class ClassificationHead(nn.Module):
         num_classes: int,
         dropout: float = 0.1,
         pooling: str = "last_cls",
+        encounter_repr: str = "cls",
     ):
         super().__init__()
         self.pooling = pooling
+        self.encounter_repr = encounter_repr
         self.dropout = nn.Dropout(dropout)
 
         if pooling == "attention":
@@ -35,15 +37,24 @@ class ClassificationHead(nn.Module):
             nn.Linear(d_model, num_classes),
         )
 
-    def forward(self, hidden_states, segment_attention_mask):
+    def forward(self, hidden_states, segment_attention_mask, attention_mask=None):
         """
         Args:
             hidden_states: (batch, max_seg, max_seq_len, d_model)
             segment_attention_mask: (batch, max_seg)
+            attention_mask: (batch, max_seg, max_seq_len) — needed for mean_pool_tokens
         Returns:
             logits: (batch, num_classes)
         """
-        cls_tokens = hidden_states[:, :, 0, :]  # (batch, max_seg, d_model)
+        if self.encounter_repr == "mean_pool_tokens":
+            # A2 ablation: mean pool over non-special tokens instead of CLS
+            assert attention_mask is not None, "attention_mask required for mean_pool_tokens"
+            token_mask = attention_mask.clone()
+            token_mask[:, :, 0] = 0  # exclude CLS (position 0)
+            mask_exp = token_mask.unsqueeze(-1)  # (B, S, L, 1)
+            cls_tokens = (hidden_states * mask_exp).sum(dim=2) / mask_exp.sum(dim=2).clamp(min=1)
+        else:
+            cls_tokens = hidden_states[:, :, 0, :]  # (batch, max_seg, d_model)
 
         if self.pooling == "last_cls":
             valid_counts = segment_attention_mask.sum(dim=1).long()
@@ -76,6 +87,7 @@ class HATForSequenceClassification(nn.Module):
         dropout: float = 0.1,
         pooling: str = "last_cls",
         freeze_encoder: bool = False,
+        encounter_repr: str = "cls",
     ):
         super().__init__()
         self.config = config
@@ -87,6 +99,7 @@ class HATForSequenceClassification(nn.Module):
             num_classes=num_classes,
             dropout=dropout,
             pooling=pooling,
+            encounter_repr=encounter_repr,
         )
 
         if freeze_encoder:
@@ -99,6 +112,18 @@ class HATForSequenceClassification(nn.Module):
     def unfreeze_encoder(self):
         for param in self.encoder.parameters():
             param.requires_grad = True
+
+    def freeze_swe(self):
+        """A3 ablation: freeze all SWE parameters, only fine-tune CSE + head."""
+        for block in self.encoder.transformer_encoder.blocks:
+            for param in block.swe.parameters():
+                param.requires_grad = False
+
+    def freeze_cse(self):
+        """A3 ablation: freeze all CSE parameters, only fine-tune SWE + head."""
+        for block in self.encoder.transformer_encoder.blocks:
+            for param in block.cse.parameters():
+                param.requires_grad = False
 
     def load_pretrained(self, checkpoint_path: str, strict: bool = True):
         """Load pre-trained encoder weights from checkpoint.
@@ -177,7 +202,8 @@ class HATForSequenceClassification(nn.Module):
             token_time,
         )
 
-        logits = self.classifier(hidden_states, segment_attention_mask)
+        logits = self.classifier(hidden_states, segment_attention_mask,
+                                 attention_mask=attention_mask)
         output = {"logits": logits}
 
         if labels is not None:
@@ -198,6 +224,7 @@ def create_finetune_model(
     dropout: float = 0.1,
     pooling: str = "last_cls",
     freeze_encoder: bool = False,
+    encounter_repr: str = "cls",
 ) -> HATForSequenceClassification:
     """Create a fine-tuning model from pre-trained checkpoint.
 
@@ -270,6 +297,7 @@ def create_finetune_model(
         dropout=dropout,
         pooling=pooling,
         freeze_encoder=freeze_encoder,
+        encounter_repr=encounter_repr,
     )
 
     model.load_pretrained(pretrained_path, strict=False)

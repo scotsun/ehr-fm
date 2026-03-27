@@ -52,6 +52,7 @@ class FinetuneDataset(Dataset):
         time_col: str = "days_since_prior_admission",
         sort_col: str = "admittime",
         token_time_col: str = "time_offset_hours",
+        temporal_shuffle: bool = False,
     ):
         self.data_path = Path(data_path)
         self.tokenizer = tokenizer
@@ -68,6 +69,7 @@ class FinetuneDataset(Dataset):
         self.time_col = time_col
         self.sort_col = sort_col
         self.token_time_col = token_time_col
+        self.temporal_shuffle = temporal_shuffle
 
         self.is_multilabel = self.task_config.get("is_multilabel", False)
 
@@ -189,6 +191,13 @@ class FinetuneDataset(Dataset):
 
         if len(encounter_data) > self.max_seg:
             encounter_data = encounter_data[-self.max_seg:]
+
+        # A1 ablation: shuffle encounter order to disrupt temporal structure
+        # T2V token_time stays with each encounter, but segment_time (cumsum)
+        # becomes meaningless, destroying CSE RoPE temporal position encoding
+        if self.temporal_shuffle:
+            import random
+            random.shuffle(encounter_data)
 
         _tokens = [enc['tokens'] for enc in encounter_data]
 
