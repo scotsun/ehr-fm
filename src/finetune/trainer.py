@@ -2,7 +2,9 @@
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+import torch.distributed as dist
+from torch.utils.data import DataLoader, DistributedSampler
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.amp import GradScaler, autocast
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 import numpy as np
@@ -21,6 +23,7 @@ import wandb
 
 from src.finetune.model import HATForSequenceClassification, HATForNextVisit
 from src.finetune.data_utils import FinetuneDataset, NextVisitDataset, collate_finetune, DownstreamTask, TASK_CONFIGS
+from src.dist_utils import _dist_is_initialized, is_main_process, get_module, _broadcast_bool
 
 
 class FinetuneTrainer:
@@ -53,7 +56,9 @@ class FinetuneTrainer:
         num_workers: int = 4,
         resume_from: Optional[str] = None,
     ):
-        # Auto-detect device
+        # Auto-detect device (supports torch.device from setup_training)
+        if isinstance(device, torch.device):
+            device = str(device)
         if device == "auto":
             if torch.cuda.is_available():
                 device = "cuda"
@@ -61,14 +66,21 @@ class FinetuneTrainer:
                 device = "mps"
             else:
                 device = "cpu"
-            print(f"Using device: {device}")
+            if is_main_process():
+                print(f"Using device: {device}")
+
+        self._is_distributed = _dist_is_initialized()
 
         self.model = model.to(device)
+        if self._is_distributed:
+            self.model = DDP(self.model, device_ids=[torch.cuda.current_device()])
+
         self.device = device
         self.device_type = device.split(':')[0]
         self.task = task
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if is_main_process():
+            self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.learning_rate = learning_rate
         self.batch_size = batch_size
@@ -78,13 +90,23 @@ class FinetuneTrainer:
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
 
+        # DistributedSampler for training data in multi-GPU mode
+        if self._is_distributed:
+            self.train_sampler = DistributedSampler(train_dataset, shuffle=True)
+            train_shuffle = False
+        else:
+            self.train_sampler = None
+            train_shuffle = True
+
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=train_shuffle,
+            sampler=self.train_sampler,
             collate_fn=collate_finetune,
             num_workers=num_workers,
             pin_memory=True,
+            drop_last=self._is_distributed,
         )
         self.val_loader = DataLoader(
             val_dataset,
@@ -103,7 +125,7 @@ class FinetuneTrainer:
             self.class_weights = weights.to(device)
 
         self.optimizer = torch.optim.AdamW(
-            model.parameters(),
+            self.model.parameters(),
             lr=learning_rate,
             weight_decay=weight_decay,
         )
@@ -149,7 +171,8 @@ class FinetuneTrainer:
         if resume_from:
             self._load_training_state(resume_from)
 
-        if use_wandb:
+        if use_wandb and is_main_process():
+            raw_model = get_module(self.model)
             wandb.init(
                 project=wandb_project,
                 name=wandb_run_name or f"{task.value}",
@@ -160,8 +183,8 @@ class FinetuneTrainer:
                     "num_epochs": num_epochs,
                     "warmup_ratio": warmup_ratio,
                     "weight_decay": weight_decay,
-                    "num_classes": model.num_classes,
-                    "pooling": model.classifier.pooling,
+                    "num_classes": raw_model.num_classes,
+                    "pooling": raw_model.classifier.pooling,
                 },
             )
 
@@ -170,55 +193,75 @@ class FinetuneTrainer:
 
     def train(self):
         """Run the full training loop."""
-        print(f"\n{'='*60}")
-        print(f"Starting fine-tuning for task: {self.task.value}")
-        print(f"{'='*60}")
-        print(f"  Train samples: {len(self.train_loader.dataset):,}")
-        print(f"  Val samples:   {len(self.val_loader.dataset):,}")
-        print(f"  Num classes:   {self.model.num_classes}")
-        print(f"  Batch size:    {self.batch_size}")
-        print(f"  Num epochs:    {self.num_epochs}")
-        print(f"  Start epoch:   {self.start_epoch}")
-        print(f"  Learning rate: {self.learning_rate}")
-        print(f"{'='*60}\n")
+        if is_main_process():
+            raw_model = get_module(self.model)
+            print(f"\n{'='*60}")
+            print(f"Starting fine-tuning for task: {self.task.value}")
+            print(f"{'='*60}")
+            print(f"  Train samples: {len(self.train_loader.dataset):,}")
+            print(f"  Val samples:   {len(self.val_loader.dataset):,}")
+            print(f"  Num classes:   {raw_model.num_classes}")
+            print(f"  Batch size:    {self.batch_size}")
+            print(f"  Num epochs:    {self.num_epochs}")
+            print(f"  Start epoch:   {self.start_epoch}")
+            print(f"  Learning rate: {self.learning_rate}")
+            if self._is_distributed:
+                print(f"  DDP:           world_size={dist.get_world_size()}")
+            print(f"{'='*60}\n")
 
         for epoch in range(self.start_epoch, self.num_epochs):
+            if self.train_sampler is not None:
+                self.train_sampler.set_epoch(epoch)
+
             train_loss = self._train_epoch(epoch)
-            val_metrics = self.evaluate()
 
-            print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
-            print(f"  Train Loss: {train_loss:.4f}")
-            print(f"  Val AUROC:  {val_metrics['auroc']:.4f}")
-            print(f"  Val AUPRC:  {val_metrics['auprc']:.4f}")
-            print(f"  Val Acc:    {val_metrics['accuracy']:.4f}")
+            # Evaluate and make decisions on rank 0; broadcast stop signal
+            should_stop = False
+            if is_main_process():
+                val_metrics = self.evaluate()
 
-            if self.use_wandb:
-                wandb.log({
-                    "epoch": epoch + 1,
-                    "train/loss_epoch": train_loss,
-                    **{f"val/{k}": v for k, v in val_metrics.items()},
-                })
+                print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
+                print(f"  Train Loss: {train_loss:.4f}")
+                print(f"  Val AUROC:  {val_metrics['auroc']:.4f}")
+                print(f"  Val AUPRC:  {val_metrics['auprc']:.4f}")
+                print(f"  Val Acc:    {val_metrics['accuracy']:.4f}")
 
-            current_metric = val_metrics[self.metric_for_best_model]
-            if current_metric > self.best_metric:
-                self.best_metric = current_metric
-                self.patience_counter = 0
-                self._save_checkpoint("best", epoch=epoch)
-                print(f"  New best {self.metric_for_best_model}: {self.best_metric:.4f}")
-            else:
-                self.patience_counter += 1
-                if self.patience_counter >= self.patience:
-                    print(f"\nEarly stopping triggered after {epoch + 1} epochs")
-                    break
+                if self.use_wandb:
+                    wandb.log({
+                        "epoch": epoch + 1,
+                        "train/loss_epoch": train_loss,
+                        **{f"val/{k}": v for k, v in val_metrics.items()},
+                    })
 
-            # Save periodic checkpoint and cleanup old ones (keep last 3)
-            self._save_checkpoint(f"epoch_{epoch + 1:04d}", epoch=epoch)
-            self._cleanup_old_checkpoints()
+                current_metric = val_metrics[self.metric_for_best_model]
+                if current_metric > self.best_metric:
+                    self.best_metric = current_metric
+                    self.patience_counter = 0
+                    self._save_checkpoint("best", epoch=epoch)
+                    print(f"  New best {self.metric_for_best_model}: {self.best_metric:.4f}")
+                else:
+                    self.patience_counter += 1
+                    if self.patience_counter >= self.patience:
+                        print(f"\nEarly stopping triggered after {epoch + 1} epochs")
+                        should_stop = True
+
+                self._save_checkpoint(f"epoch_{epoch + 1:04d}", epoch=epoch)
+                self._cleanup_old_checkpoints()
+
+            if self._is_distributed:
+                should_stop = _broadcast_bool(should_stop, torch.device(self.device))
+            if should_stop:
+                break
 
         self._save_checkpoint("final", epoch=epoch)
+
+        # Barrier before loading best checkpoint so rank 0 finishes saving first
+        if self._is_distributed:
+            dist.barrier()
         self._load_checkpoint("best")
 
-        print(f"\nTraining complete! Best {self.metric_for_best_model}: {self.best_metric:.4f}")
+        if is_main_process():
+            print(f"\nTraining complete! Best {self.metric_for_best_model}: {self.best_metric:.4f}")
         return self.best_metric
 
     def _cleanup_old_checkpoints(self):
@@ -265,7 +308,7 @@ class FinetuneTrainer:
         total_loss = 0.0
         num_batches = 0
 
-        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}")
+        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}", disable=not is_main_process())
 
         for batch_idx, batch in enumerate(pbar):
             input_ids = batch["input_ids"].to(self.device)
@@ -365,12 +408,13 @@ class FinetuneTrainer:
             loader = self.val_loader
 
         self.model.eval()
+        raw_model = get_module(self.model)
 
         all_preds = []
         all_labels = []
         all_probs = []
 
-        for batch in tqdm(loader, desc="Evaluating"):
+        for batch in tqdm(loader, desc="Evaluating", disable=not is_main_process()):
             input_ids = batch["input_ids"].to(self.device)
             attention_mask = batch["attention_mask"].to(self.device)
             segment_attention_mask = batch["segment_attention_mask"].to(self.device)
@@ -403,7 +447,7 @@ class FinetuneTrainer:
                 all_labels.append(labels.numpy())
             else:
                 probs = torch.softmax(logits, dim=-1)
-                if self.model.num_classes == 2:
+                if raw_model.num_classes == 2:
                     preds = (probs[:, 1] > 0.5).long()
                     all_probs.extend(probs[:, 1].numpy())
                 else:
@@ -419,7 +463,7 @@ class FinetuneTrainer:
 
             auroc_scores = []
             auprc_scores = []
-            for i in range(self.model.num_classes):
+            for i in range(raw_model.num_classes):
                 class_labels = all_labels[:, i]
                 class_probs = all_probs[:, i]
                 if class_labels.sum() > 0 and class_labels.sum() < len(class_labels):
@@ -445,7 +489,7 @@ class FinetuneTrainer:
 
             metrics = {"accuracy": accuracy_score(all_labels, all_preds)}
 
-            if self.model.num_classes == 2:
+            if raw_model.num_classes == 2:
                 all_probs = np.array(all_probs)
                 metrics["auroc"] = roc_auc_score(all_labels, all_probs)
                 metrics["auprc"] = average_precision_score(all_labels, all_probs)
@@ -457,7 +501,7 @@ class FinetuneTrainer:
                 auroc_scores = []
                 auprc_scores = []
                 class_weights = []
-                for i in range(self.model.num_classes):
+                for i in range(raw_model.num_classes):
                     binary_labels = (all_labels == i).astype(int)
                     class_count = binary_labels.sum()
                     if class_count > 0 and class_count < len(all_labels):
@@ -478,29 +522,34 @@ class FinetuneTrainer:
                 metrics["f1_macro"] = f1_score(all_labels, all_preds, average="macro")
                 metrics["f1_weighted"] = f1_score(all_labels, all_preds, average="weighted")
 
+        # Ensure all values are JSON-serializable (convert numpy scalars to Python float)
+        metrics = {k: float(v) for k, v in metrics.items()}
         self.val_metrics_history.append(metrics)
         return metrics
 
     def _save_checkpoint(self, name: str, epoch: Optional[int] = None):
-        """Save a checkpoint."""
+        """Save a checkpoint (only rank 0 in distributed mode)."""
+        if not is_main_process():
+            return
+        raw_model = get_module(self.model)
         config_dict = {
-            "vocab_size": self.model.config.vocab_size,
-            "d_model": self.model.config.d_model,
-            "d_ff": self.model.config.d_ff,
-            "n_blocks": self.model.config.n_blocks,
-            "n_heads": self.model.config.n_heads,
+            "vocab_size": raw_model.config.vocab_size,
+            "d_model": raw_model.config.d_model,
+            "d_ff": raw_model.config.d_ff,
+            "n_blocks": raw_model.config.n_blocks,
+            "n_heads": raw_model.config.n_heads,
         }
 
         checkpoint = {
             "epoch": epoch,
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": raw_model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "global_step": self.global_step,
             "best_metric": self.best_metric,
             "patience_counter": self.patience_counter,
             "task": self.task.value,
-            "num_classes": self.model.num_classes,
+            "num_classes": raw_model.num_classes,
             "config": config_dict,
         }
 
@@ -511,7 +560,8 @@ class FinetuneTrainer:
         """Load a checkpoint."""
         path = self.output_dir / f"checkpoint_{name}.pt"
         checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        raw_model = get_module(self.model)
+        raw_model.load_state_dict(checkpoint["model_state_dict"])
 
 
 def run_finetune(
@@ -698,7 +748,9 @@ class NextVisitTrainer:
         num_workers: int = 4,
         resume_from: Optional[str] = None,
     ):
-        # Auto-detect device
+        # Auto-detect device (supports torch.device from setup_training)
+        if isinstance(device, torch.device):
+            device = str(device)
         if device == "auto":
             if torch.cuda.is_available():
                 device = "cuda"
@@ -706,13 +758,20 @@ class NextVisitTrainer:
                 device = "mps"
             else:
                 device = "cpu"
-            print(f"Using device: {device}")
+            if is_main_process():
+                print(f"Using device: {device}")
+
+        self._is_distributed = _dist_is_initialized()
 
         self.model = model.to(device)
+        if self._is_distributed:
+            self.model = DDP(self.model, device_ids=[torch.cuda.current_device()])
+
         self.device = device
         self.device_type = device.split(':')[0]
         self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if is_main_process():
+            self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.learning_rate = learning_rate
         self.batch_size = batch_size
@@ -724,13 +783,23 @@ class NextVisitTrainer:
         self.k_values = k_values
         self.metric_for_best_model = metric_for_best_model
 
+        # DistributedSampler for training data in multi-GPU mode
+        if self._is_distributed:
+            self.train_sampler = DistributedSampler(train_dataset, shuffle=True)
+            train_shuffle = False
+        else:
+            self.train_sampler = None
+            train_shuffle = True
+
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=train_shuffle,
+            sampler=self.train_sampler,
             collate_fn=collate_finetune,
             num_workers=num_workers,
             pin_memory=True,
+            drop_last=self._is_distributed,
         )
         self.val_loader = DataLoader(
             val_dataset,
@@ -742,7 +811,7 @@ class NextVisitTrainer:
         )
 
         self.optimizer = torch.optim.AdamW(
-            model.parameters(),
+            self.model.parameters(),
             lr=learning_rate,
             weight_decay=weight_decay,
         )
@@ -783,7 +852,8 @@ class NextVisitTrainer:
         if resume_from:
             self._load_training_state(resume_from)
 
-        if use_wandb:
+        if use_wandb and is_main_process():
+            raw_model = get_module(self.model)
             wandb.init(
                 project=wandb_project,
                 name=wandb_run_name or "next_visit",
@@ -792,60 +862,79 @@ class NextVisitTrainer:
                     "learning_rate": learning_rate,
                     "batch_size": batch_size,
                     "num_epochs": num_epochs,
-                    "vocab_size": model.vocab_size,
-                    "pooling": model.predictor.pooling,
+                    "vocab_size": raw_model.vocab_size,
+                    "pooling": raw_model.predictor.pooling,
                 },
             )
 
     def train(self):
         """Run the full training loop."""
-        print(f"\n{'='*60}")
-        print("Starting fine-tuning for task: next_visit")
-        print(f"{'='*60}")
-        print(f"  Train samples: {len(self.train_loader.dataset):,}")
-        print(f"  Val samples:   {len(self.val_loader.dataset):,}")
-        print(f"  Vocab size:    {self.model.vocab_size}")
-        print(f"  Batch size:    {self.batch_size}")
-        print(f"  Num epochs:    {self.num_epochs}")
-        print(f"  Start epoch:   {self.start_epoch}")
-        print(f"{'='*60}\n")
+        if is_main_process():
+            raw_model = get_module(self.model)
+            print(f"\n{'='*60}")
+            print("Starting fine-tuning for task: next_visit")
+            print(f"{'='*60}")
+            print(f"  Train samples: {len(self.train_loader.dataset):,}")
+            print(f"  Val samples:   {len(self.val_loader.dataset):,}")
+            print(f"  Vocab size:    {raw_model.vocab_size}")
+            print(f"  Batch size:    {self.batch_size}")
+            print(f"  Num epochs:    {self.num_epochs}")
+            print(f"  Start epoch:   {self.start_epoch}")
+            if self._is_distributed:
+                print(f"  DDP:           world_size={dist.get_world_size()}")
+            print(f"{'='*60}\n")
 
         for epoch in range(self.start_epoch, self.num_epochs):
+            if self.train_sampler is not None:
+                self.train_sampler.set_epoch(epoch)
+
             train_loss = self._train_epoch(epoch)
-            val_metrics = self.evaluate()
 
-            print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
-            print(f"  Train Loss: {train_loss:.4f}")
-            for k in self.k_values:
-                print(f"  Recall@{k}: {val_metrics[f'recall@{k}']:.4f}  NDCG@{k}: {val_metrics[f'ndcg@{k}']:.4f}")
+            # Evaluate and make decisions on rank 0; broadcast stop signal
+            should_stop = False
+            if is_main_process():
+                val_metrics = self.evaluate()
 
-            if self.use_wandb:
-                wandb.log({
-                    "epoch": epoch + 1,
-                    "train/loss_epoch": train_loss,
-                    **{f"val/{k}": v for k, v in val_metrics.items()},
-                })
+                print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
+                print(f"  Train Loss: {train_loss:.4f}")
+                for k in self.k_values:
+                    print(f"  Recall@{k}: {val_metrics[f'recall@{k}']:.4f}  NDCG@{k}: {val_metrics[f'ndcg@{k}']:.4f}")
 
-            current_metric = val_metrics[self.metric_for_best_model]
-            if current_metric > self.best_metric:
-                self.best_metric = current_metric
-                self.patience_counter = 0
-                self._save_checkpoint("best", epoch=epoch)
-                print(f"  New best {self.metric_for_best_model}: {self.best_metric:.4f}")
-            else:
-                self.patience_counter += 1
-                if self.patience_counter >= self.patience:
-                    print(f"\nEarly stopping triggered after {epoch + 1} epochs")
-                    break
+                if self.use_wandb:
+                    wandb.log({
+                        "epoch": epoch + 1,
+                        "train/loss_epoch": train_loss,
+                        **{f"val/{k}": v for k, v in val_metrics.items()},
+                    })
 
-            # Save periodic checkpoint and cleanup old ones (keep last 3)
-            self._save_checkpoint(f"epoch_{epoch + 1:04d}", epoch=epoch)
-            self._cleanup_old_checkpoints()
+                current_metric = val_metrics[self.metric_for_best_model]
+                if current_metric > self.best_metric:
+                    self.best_metric = current_metric
+                    self.patience_counter = 0
+                    self._save_checkpoint("best", epoch=epoch)
+                    print(f"  New best {self.metric_for_best_model}: {self.best_metric:.4f}")
+                else:
+                    self.patience_counter += 1
+                    if self.patience_counter >= self.patience:
+                        print(f"\nEarly stopping triggered after {epoch + 1} epochs")
+                        should_stop = True
+
+                self._save_checkpoint(f"epoch_{epoch + 1:04d}", epoch=epoch)
+                self._cleanup_old_checkpoints()
+
+            if self._is_distributed:
+                should_stop = _broadcast_bool(should_stop, torch.device(self.device))
+            if should_stop:
+                break
 
         self._save_checkpoint("final", epoch=epoch)
+
+        if self._is_distributed:
+            dist.barrier()
         self._load_checkpoint("best")
 
-        print(f"\nTraining complete! Best {self.metric_for_best_model}: {self.best_metric:.4f}")
+        if is_main_process():
+            print(f"\nTraining complete! Best {self.metric_for_best_model}: {self.best_metric:.4f}")
         return self.best_metric
 
     def _cleanup_old_checkpoints(self):
@@ -892,7 +981,7 @@ class NextVisitTrainer:
         total_loss = 0.0
         num_batches = 0
 
-        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}")
+        pbar = tqdm(self.train_loader, desc=f"Epoch {epoch + 1}", disable=not is_main_process())
 
         for batch_idx, batch in enumerate(pbar):
             input_ids = batch["input_ids"].to(self.device)
@@ -960,7 +1049,7 @@ class NextVisitTrainer:
         all_recalls = {k: [] for k in self.k_values}
         all_ndcgs = {k: [] for k in self.k_values}
 
-        for batch in tqdm(loader, desc="Evaluating"):
+        for batch in tqdm(loader, desc="Evaluating", disable=not is_main_process()):
             input_ids = batch["input_ids"].to(self.device)
             attention_mask = batch["attention_mask"].to(self.device)
             segment_attention_mask = batch["segment_attention_mask"].to(self.device)
@@ -995,31 +1084,34 @@ class NextVisitTrainer:
 
         metrics = {}
         for k in self.k_values:
-            metrics[f"recall@{k}"] = np.mean(all_recalls[k])
-            metrics[f"ndcg@{k}"] = np.mean(all_ndcgs[k])
+            metrics[f"recall@{k}"] = float(np.mean(all_recalls[k]))
+            metrics[f"ndcg@{k}"] = float(np.mean(all_ndcgs[k]))
 
         return metrics
 
     def _save_checkpoint(self, name: str, epoch: Optional[int] = None):
-        """Save a checkpoint."""
+        """Save a checkpoint (only rank 0 in distributed mode)."""
+        if not is_main_process():
+            return
+        raw_model = get_module(self.model)
         config_dict = {
-            "vocab_size": self.model.config.vocab_size,
-            "d_model": self.model.config.d_model,
-            "d_ff": self.model.config.d_ff,
-            "n_blocks": self.model.config.n_blocks,
-            "n_heads": self.model.config.n_heads,
+            "vocab_size": raw_model.config.vocab_size,
+            "d_model": raw_model.config.d_model,
+            "d_ff": raw_model.config.d_ff,
+            "n_blocks": raw_model.config.n_blocks,
+            "n_heads": raw_model.config.n_heads,
         }
 
         checkpoint = {
             "epoch": epoch,
-            "model_state_dict": self.model.state_dict(),
+            "model_state_dict": raw_model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scheduler_state_dict": self.scheduler.state_dict(),
             "global_step": self.global_step,
             "best_metric": self.best_metric,
             "patience_counter": self.patience_counter,
             "task": "next_visit",
-            "vocab_size": self.model.vocab_size,
+            "vocab_size": raw_model.vocab_size,
             "config": config_dict,
         }
 
@@ -1030,7 +1122,8 @@ class NextVisitTrainer:
         """Load a checkpoint."""
         path = self.output_dir / f"checkpoint_{name}.pt"
         checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint["model_state_dict"])
+        raw_model = get_module(self.model)
+        raw_model.load_state_dict(checkpoint["model_state_dict"])
 
 
 def run_next_visit(
