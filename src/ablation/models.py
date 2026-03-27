@@ -67,11 +67,12 @@ class MeanPoolCSEBlock(nn.Module):
         mean_pooled = (x * mask_exp).sum(dim=2) / mask_exp.sum(dim=2).clamp(min=1)  # (B, S, D)
 
         # CSE on mean-pooled set representations
-        cse_out = self.cse(mean_pooled, seg_mask, time=seg_time)
+        cse_out = self.cse(mean_pooled, seg_mask, time=seg_time)  # (B, S, D)
 
-        # Write CSE output to CLS position; token positions 1+ unchanged
-        out = x.clone()
-        out[:, :, 0, :] = cse_out
+        # Broadcast CSE output to ALL token positions as residual.
+        # Without SWE, this is the only way tokens receive cross-segment context.
+        # cse_out.unsqueeze(2): (B, S, 1, D) → broadcast to (B, S, L, D)
+        out = x + cse_out.unsqueeze(2)
         return out
 
 

@@ -102,6 +102,8 @@ def parse_args():
                         choices=["last_cls", "mean_cls", "attention"])
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--no-class-weights", action="store_true")
+    parser.add_argument("--resume", action="store_true",
+                        help="Resume each task/seed run from its existing output directory")
 
     # Logging
     parser.add_argument("--wandb", action="store_true")
@@ -209,6 +211,10 @@ def run_single_experiment(variant, task, seed, args):
         json.dump(run_config, f, indent=2)
 
     # Create trainer
+    resume_from = str(output_dir) if args.resume else None
+    if resume_from:
+        print(f"  Resume from: {resume_from}")
+
     trainer = FinetuneTrainer(
         model=model,
         train_dataset=train_dataset,
@@ -228,6 +234,7 @@ def run_single_experiment(variant, task, seed, args):
         wandb_project=args.wandb_project,
         wandb_run_name=f"{variant}_{task}_s{seed}",
         num_workers=args.num_workers,
+        resume_from=resume_from,
     )
 
     # Train
