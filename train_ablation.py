@@ -22,6 +22,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -321,7 +322,6 @@ def main():
         print(f"Resuming from epoch {start_epoch}")
     print(f"{'='*80}\n")
 
-    import json
     best_val_loss = float('inf')
     use_dual_loss = needs_heads and args.masking_strategy == "both"
 
