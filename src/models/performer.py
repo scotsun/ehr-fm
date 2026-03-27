@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
@@ -5,10 +6,34 @@ from . import FMConfig, FMEmbeddings
 from src.layers import T2V, FFNSwiGLUBlock, FFNLUBlock, ResidualConnection
 
 
+def _create_projection_matrix(
+    nb_features: int, d_k: int, device: torch.device
+) -> torch.Tensor:
+    """
+    Creates a random matrix with orthogonal rows scaled by chi-distributed norms,
+    as required by FAVOR+ (Choromanski et al., 2020).
+    Returns shape: (nb_features, d_k)
+    """
+    nb_full_blocks = nb_features // d_k
+    blocks = []
+    for _ in range(nb_full_blocks):
+        q, _ = torch.linalg.qr(torch.randn(d_k, d_k, device=device))
+        blocks.append(q.T)
+    remainder = nb_features - nb_full_blocks * d_k
+    if remainder > 0:
+        q, _ = torch.linalg.qr(torch.randn(d_k, d_k, device=device))
+        blocks.append(q.T[:remainder])
+    matrix = torch.cat(blocks, dim=0)  # (nb_features, d_k)
+    # Scale rows by the norms of d_k-dimensional Gaussian vectors (chi distribution)
+    norms = torch.randn(nb_features, d_k, device=device).norm(dim=1)
+    return matrix * norms.unsqueeze(1)
+
+
 class PerformerSelfAttention(nn.Module):
     """
-    Performer Self-Attention Module as a replacement for LongformerSelfAttention.
-    Implements FAVOR+ mechanism for efficient attention computation.
+    Performer Self-Attention with FAVOR+.
+    Approximates softmax attention in O(L * nb_features * d_k) via the kernel trick,
+    avoiding materializing the L x L attention matrix.
     """
 
     def __init__(self, config):
@@ -18,56 +43,110 @@ class PerformerSelfAttention(nn.Module):
         self.d_model = config.d_model
         self.epsilon = 1e-6
 
-        self.query = nn.Linear(self.d_model, self.d_model)
-        self.key = nn.Linear(self.d_model, self.d_model)
-        self.value = nn.Linear(self.d_model, self.d_model)
+        nb_features = getattr(config, "nb_features", None)
+        self.nb_features = (
+            nb_features
+            if nb_features is not None
+            else max(1, int(self.d_k * math.log(self.d_k)))
+        )
+        self.feature_redraw_interval = getattr(config, "feature_redraw_interval", 1000)
+        self._calls_since_last_redraw = 0
 
-        self.output = nn.Linear(self.d_model, self.d_model)
-
+        self.query = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.key = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.value = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.output = nn.Linear(self.d_model, self.d_model, bias=False)
         self.dropout = nn.Dropout(config.dropout)
 
-    def favor_positive_features(self, x):
+        # Projection matrix is a non-trainable buffer that moves with the model
+        self.register_buffer(
+            "projection_matrix",
+            _create_projection_matrix(
+                self.nb_features, self.d_k, device=torch.device("cpu")
+            ),
+        )
+
+    def _redraw_projection_matrix(self):
+        self.projection_matrix.copy_(
+            _create_projection_matrix(
+                self.nb_features, self.d_k, device=self.projection_matrix.device
+            )
+        )
+
+    def _favor_positive_features(self, x: torch.Tensor) -> torch.Tensor:
         """
-        Applies the softmax kernel approximation (FAVOR+)
+        FAVOR+ positive random feature map that approximates the softmax kernel:
+            phi(x) = ratio * exp(W * x / d_k^{1/4}  -  ||x||^2 / (2 * sqrt(d_k)))
+        Shape: (..., d_k) -> (..., nb_features)
         """
-        projected = torch.exp(x - torch.max(x, dim=-1, keepdim=True).values)
-        return projected / (torch.sum(projected, dim=-1, keepdim=True) + self.epsilon)
+        data_normalizer = self.d_k**-0.25
+        ratio = self.nb_features**-0.5
+        # Project scaled input through the random orthogonal matrix
+        projected = torch.einsum(
+            "...d,md->...m", data_normalizer * x, self.projection_matrix
+        )
+        # Subtract half the squared norm (consistently scaled) for the softmax approximation
+        norm_sq = (x**2).sum(dim=-1, keepdim=True) * (data_normalizer**2) / 2
+        # Detach max for numerical stability (lucidrains trick)
+        projected_max = projected.amax(dim=-1, keepdim=True).detach()
+        return ratio * (torch.exp(projected - projected_max - norm_sq) + self.epsilon)
 
     def forward(self, hidden_states, attention_mask=None):
-        batch_size, seq_len, hidden_dim = hidden_states.size()
+        batch_size, seq_len, _ = hidden_states.size()
 
-        # Linear projections for query, key, and value
-        queries = self.query(hidden_states)
-        keys = self.key(hidden_states)
-        values = self.value(hidden_states)
+        # Periodically redraw the projection matrix during training
+        if self.training:
+            self._calls_since_last_redraw += 1
+            if self._calls_since_last_redraw >= self.feature_redraw_interval:
+                self._redraw_projection_matrix()
+                self._calls_since_last_redraw = 0
 
-        # Reshape for multi-head attention
-        queries = queries.view(batch_size, seq_len, self.n_head, self.d_k).transpose(
-            1, 2
+        # Linear projections -> (B, H, L, d_k)
+        queries = (
+            self.query(hidden_states)
+            .view(batch_size, seq_len, self.n_head, self.d_k)
+            .transpose(1, 2)
         )
-        keys = keys.view(batch_size, seq_len, self.n_head, self.d_k).transpose(1, 2)
-        values = values.view(batch_size, seq_len, self.n_head, self.d_k).transpose(1, 2)
-
-        # Normalize queries and keys with FAVOR+
-        queries = self.favor_positive_features(queries)
-        keys = self.favor_positive_features(keys)
-
-        # Compute Performer attention weights
-        numerator = torch.einsum("bhld,bhmd->bhlm", queries, keys)  # Scaled dot product
-        denominator = torch.einsum("bhld,bhmd->bhlm", queries, torch.ones_like(keys))
-        attention_probs = numerator / (
-            denominator + self.epsilon
-        )  # Normalize attention weights
-
-        attention_probs = self.dropout(attention_probs)
-        context_layer = torch.einsum("bhlm,bhmd->bhld", attention_probs, values)
-
-        # Combine heads and project back to hidden_dim
-        context_layer = context_layer.transpose(1, 2).reshape(
-            batch_size, seq_len, hidden_dim
+        keys = (
+            self.key(hidden_states)
+            .view(batch_size, seq_len, self.n_head, self.d_k)
+            .transpose(1, 2)
         )
-        output = self.output(context_layer)
-        return output
+        values = (
+            self.value(hidden_states)
+            .view(batch_size, seq_len, self.n_head, self.d_k)
+            .transpose(1, 2)
+        )
+
+        # FAVOR+ feature maps -> (B, H, L, nb_features)
+        phi_q = self._favor_positive_features(queries)
+        phi_k = self._favor_positive_features(keys)
+
+        # Zero out padding key positions before accumulation
+        # attention_mask: (B, L), 1=keep, 0=pad
+        if attention_mask is not None:
+            phi_k = phi_k * attention_mask[:, None, :, None].float()
+
+        # Linear attention — O(L) — never forms the L x L matrix
+        # kv: (B, H, nb_features, d_k)
+        kv = torch.einsum("bhlm,bhld->bhmd", phi_k, values)
+        # out: (B, H, L, d_k)
+        out = torch.einsum("bhlm,bhmd->bhld", phi_q, kv)
+
+        # Normalizer: row-wise denominator for each query
+        k_sum = phi_k.sum(dim=2)  # (B, H, nb_features)
+        denom = (
+            torch.einsum("bhlm,bhm->bhl", phi_q, k_sum)
+            .unsqueeze(-1)
+            .clamp(min=self.epsilon)
+        )
+        out = out / denom
+
+        out = self.dropout(out)
+
+        # Merge heads -> (B, L, d_model)
+        out = out.transpose(1, 2).reshape(batch_size, seq_len, self.d_model)
+        return self.output(out)
 
 
 class PerformerBlock(nn.Module):
