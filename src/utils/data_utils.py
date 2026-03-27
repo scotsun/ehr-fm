@@ -417,6 +417,110 @@ def masking_last_set_1d(input_ids: torch.Tensor, tokenizer: Tokenizer):
     return out
 
 
+def random_masking_set_1d(
+    input_ids: torch.Tensor,
+    tokenizer: Tokenizer,
+    mask_probability: float = 0.3,
+):
+    """Randomly mask sets in a 1D BERT-style sequence.
+
+    A "set" is defined as a span that starts with a ``[CLS]`` token and ends
+    right before the next ``[CLS]`` token (or before padding). For each selected
+    set, we:
+
+    - Replace the first token after ``[CLS]`` with ``[MASK]`` (the query token).
+    - Replace all remaining tokens in that set span with ``[PAD]``.
+    - Keep the ``[CLS]`` token intact.
+
+    This mirrors :func:`random_masking_set` (2D set masking) while matching the
+    retrieval-style query used by :func:`masking_last_set_1d`.
+
+    Args:
+        input_ids: LongTensor of shape (B, L).
+        tokenizer: Tokenizer used for special token IDs.
+        mask_probability: Probability of selecting each set for masking.
+
+    Returns:
+        masked_input_ids: Tensor of shape (B, L) with selected sets masked.
+        labels: Tensor of shape (B, L) with original token IDs for masked set
+            tokens (excluding ``[CLS]`` and other special tokens) and ``-100``
+            elsewhere.
+        query_pos_mask: BoolTensor of shape (B, L) indicating the query token
+            positions (the token immediately after the selected ``[CLS]``).
+    """
+
+    if input_ids.ndim != 2:
+        raise ValueError(f"input_ids must be 2D (B, L); got {tuple(input_ids.shape)}")
+
+    B, L = input_ids.shape
+    device = input_ids.device
+
+    cls_id = tokenizer.token_to_id("[CLS]")
+    pad_id = tokenizer.token_to_id("[PAD]")
+    mask_id = tokenizer.token_to_id("[MASK]")
+
+    cls_mask = input_ids == cls_id
+    valid_token_mask = input_ids != pad_id
+
+    # Assign a set id to every position based on cumulative CLS count.
+    # Positions before the first CLS (if any) get a set id of -1.
+    set_ids = torch.cumsum(cls_mask.long(), dim=1) - 1
+    set_ids_valid = set_ids.clone()
+    set_ids_valid[set_ids_valid < 0] = -1
+    set_ids_valid[~valid_token_mask] = -1
+
+    max_set_id = set_ids_valid.max(dim=1).values
+    num_sets = torch.where(
+        max_set_id >= 0, max_set_id + 1, torch.zeros_like(max_set_id)
+    )
+    max_sets = int(num_sets.max().item()) if B > 0 else 0
+
+    # No sets -> no-op.
+    if max_sets == 0:
+        labels = input_ids.clone().fill_(-100)
+        query_pos_mask = torch.zeros_like(input_ids, dtype=torch.bool)
+        return input_ids, labels, query_pos_mask
+
+    # Candidate query positions are the tokens immediately after a CLS.
+    # Exclude positions that are padding or (pathologically) another CLS.
+    query_pos_mask = torch.zeros((B, L), device=device, dtype=torch.bool)
+    if L > 1:
+        query_pos_mask[:, 1:] = cls_mask[:, :-1] & valid_token_mask[:, 1:]
+    query_pos_mask &= (input_ids != cls_id) & (input_ids != pad_id)
+
+    # Determine which sets actually have a valid query token.
+    set_has_query = torch.zeros((B, max_sets), device=device, dtype=torch.bool)
+    q_b, q_pos = query_pos_mask.nonzero(as_tuple=True)
+    if q_b.numel() > 0:
+        q_set_ids = set_ids[q_b, q_pos]
+        set_has_query[q_b, q_set_ids] = True
+
+    # Sample sets to mask.
+    set_select = (
+        torch.rand((B, max_sets), device=device, dtype=torch.float32) < mask_probability
+    ) & set_has_query
+
+    # Map set selection back to token positions.
+    set_ids_clamped = set_ids_valid.clamp(min=0)
+    token_in_selected_set = torch.gather(set_select, 1, set_ids_clamped) & (
+        set_ids_valid >= 0
+    )
+
+    token_in_selected_set_noncls = token_in_selected_set & ~cls_mask & valid_token_mask
+    query_pos_mask = query_pos_mask & token_in_selected_set
+    pad_pos_mask = token_in_selected_set_noncls & ~query_pos_mask
+
+    labels = input_ids.clone()
+    labels[~token_in_selected_set_noncls] = -100
+    special_mask = torch.isin(labels, torch.tensor(SPECIAL_TOKEN_IDS, device=device))
+    labels[special_mask] = -100
+
+    input_ids[pad_pos_mask] = pad_id
+    input_ids[query_pos_mask] = mask_id
+
+    return input_ids, labels, query_pos_mask
+
+
 class Count(Dataset):
     def __init__(self, data: Seq | SeqSet, vocab_size: int):
         super().__init__()

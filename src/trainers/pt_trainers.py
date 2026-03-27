@@ -567,14 +567,10 @@ class BaseWithHeadsTrainer(Trainer):
                 mask_probability=trainer_args["msm_probability"],
             )
 
-            target_dist = (
-                observed_set_distribution(  # TODO: decide between masked-only or mixed
-                    labels=msm_labels,
-                    set_select_mask=set_select_mask,
-                    # labels=input_ids,
-                    # set_select_mask=set_attention_mask,
-                    tokenizer=self.tokenizer,
-                )
+            target_dist = observed_set_distribution(
+                labels=msm_labels,
+                set_select_mask=set_select_mask,
+                tokenizer=self.tokenizer,
             )
 
             with autocast(device_type="cuda", dtype=torch.float16):
@@ -590,8 +586,7 @@ class BaseWithHeadsTrainer(Trainer):
                     attention_mask=attention_mask,
                     set_attention_mask=set_attention_mask,
                     t=t,
-                    set_mask=set_select_mask,  # TODO: decide between masked-only or mixed
-                    # set_mask=set_attention_mask,
+                    set_mask=set_select_mask,
                 )
                 mlm_loss = criterions["cross_entropy"](
                     mlm_logits.view(-1, mlm_logits.size(-1)),
