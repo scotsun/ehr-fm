@@ -79,9 +79,9 @@ class PerformerBlock(nn.Module):
         super().__init__()
         self.attention = PerformerSelfAttention(config)
         self.ffn = (
-            FFNSwiGLUBlock(config.d_model, config.intermediate_size)
+            FFNSwiGLUBlock(config.d_model, config.d_ff)
             if config.ffn_type == "swiglu"
-            else FFNLUBlock(config.d_model, config.intermediate_size, config.ffn_type)
+            else FFNLUBlock(config.d_model, config.d_ff, config.ffn_type)
         )
         self.residual_connection1 = ResidualConnection(
             config.d_model, config.dropout, config.norm_type

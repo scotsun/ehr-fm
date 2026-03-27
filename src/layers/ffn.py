@@ -32,8 +32,8 @@ class FFNLUBlock(nn.Module):
         self,
         d_model: int,
         d_ff: int,
+        ffn_type: str = "relu",
         d_out: int | None = None,
-        activation: str = "relu",
         dropout: float = 0,
     ):
         super().__init__()
@@ -42,12 +42,12 @@ class FFNLUBlock(nn.Module):
         self.linear_up = nn.Linear(d_model, d_ff)
         self.linear_down = nn.Linear(d_ff, d_out)
         self.dropout = nn.Dropout(dropout)
-        if activation == "relu":
+        if ffn_type == "relu":
             self.activation = nn.ReLU()
-        elif activation == "gelu":
+        elif ffn_type == "gelu":
             self.activation = nn.GELU()
         else:
-            raise ValueError(f"activation must be relu or gelu, got {activation}")
+            raise ValueError(f"ffn_type must be relu or gelu, got {ffn_type}")
 
     def forward(self, x):
         x = self.linear_up(x)
