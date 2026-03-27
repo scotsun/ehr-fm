@@ -203,7 +203,6 @@ class LongformerMHABlock(LongformerSelfAttention):
                     is_index_global_attn_nonzero=is_index_global_attn_nonzero_orig,  # Corrected: pass original
                     is_local_index_no_global_attn_nonzero=is_local_index_no_global_attn_nonzero,
                     is_index_masked=is_index_masked,
-                    layer_head_mask=head_mask,
                 )
             )
 

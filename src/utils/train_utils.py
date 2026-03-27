@@ -140,6 +140,10 @@ def build_trainer(
             trainer_class = pt_trainers.LongformerTrainer
             signature = make_bert_signature(cfg)
             criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
+        case "fm-nystromformer":
+            trainer_class = pt_trainers.NystromformerTrainer
+            signature = make_bert_signature(cfg)
+            criterions = {"cross_entropy": CrossEntropyLoss(ignore_index=-100)}
         case "fm-base-with_heads":
             trainer_class = pt_trainers.BaseWithHeadsTrainer
             signature = make_fm_signature(cfg)
