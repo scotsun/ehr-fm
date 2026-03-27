@@ -265,6 +265,32 @@ class NystromformerTrainer(BertTrainer):
         )
 
 
+class PerformerTrainer(BertTrainer):
+    def __init__(
+        self,
+        model,
+        tokenizer,
+        optimizer,
+        criterions,
+        early_stopping,
+        verbose_period,
+        device,
+        model_signature,
+        trainer_args,
+    ):
+        super().__init__(
+            model,
+            tokenizer,
+            optimizer,
+            criterions,
+            early_stopping,
+            verbose_period,
+            device,
+            model_signature,
+            trainer_args,
+        )
+
+
 class BaseTrainer(Trainer):
     def __init__(
         self,

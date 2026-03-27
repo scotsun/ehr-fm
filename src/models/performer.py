@@ -1,9 +1,7 @@
----
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
 from src.layers import T2V, FFNSwiGLUBlock, FFNLUBlock, ResidualConnection
-from math import sqrt
 
 
 class PerformerSelfAttention(nn.Module):
@@ -11,17 +9,18 @@ class PerformerSelfAttention(nn.Module):
     Performer Self-Attention Module as a replacement for LongformerSelfAttention.
     Implements FAVOR+ mechanism for efficient attention computation.
     """
+
     def __init__(self, config):
         super().__init__()
         self.num_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.embed_dim = config.hidden_size
         self.epsilon = 1e-6
-        
+
         self.query = nn.Linear(self.embed_dim, self.embed_dim)
         self.key = nn.Linear(self.embed_dim, self.embed_dim)
         self.value = nn.Linear(self.embed_dim, self.embed_dim)
-        
+
         self.output = nn.Linear(self.embed_dim, self.embed_dim)
 
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
@@ -30,7 +29,6 @@ class PerformerSelfAttention(nn.Module):
         """
         Applies the softmax kernel approximation (FAVOR+)
         """
-        projection_dim = x.size(-1)
         projected = torch.exp(x - torch.max(x, dim=-1, keepdim=True).values)
         return projected / (torch.sum(projected, dim=-1, keepdim=True) + self.epsilon)
 
@@ -43,9 +41,15 @@ class PerformerSelfAttention(nn.Module):
         values = self.value(hidden_states)
 
         # Reshape for multi-head attention
-        queries = queries.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        keys = keys.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        values = values.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        queries = queries.view(
+            batch_size, seq_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
+        keys = keys.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
+            1, 2
+        )
+        values = values.view(
+            batch_size, seq_len, self.num_heads, self.head_dim
+        ).transpose(1, 2)
 
         # Normalize queries and keys with FAVOR+
         queries = self.favor_positive_features(queries)
@@ -54,13 +58,17 @@ class PerformerSelfAttention(nn.Module):
         # Compute Performer attention weights
         numerator = torch.einsum("bhld,bhmd->bhlm", queries, keys)  # Scaled dot product
         denominator = torch.einsum("bhld,bhmd->bhlm", queries, torch.ones_like(keys))
-        attention_probs = numerator / (denominator + self.epsilon)  # Normalize attention weights
+        attention_probs = numerator / (
+            denominator + self.epsilon
+        )  # Normalize attention weights
 
         attention_probs = self.dropout(attention_probs)
         context_layer = torch.einsum("bhlm,bhmd->bhld", attention_probs, values)
 
         # Combine heads and project back to hidden_dim
-        context_layer = context_layer.transpose(1, 2).reshape(batch_size, seq_len, hidden_dim)
+        context_layer = context_layer.transpose(1, 2).reshape(
+            batch_size, seq_len, hidden_dim
+        )
         output = self.output(context_layer)
         return output
 
@@ -69,13 +77,16 @@ class PerformerBlock(nn.Module):
     """
     A single block with Performer Self-Attention and Feed-Forward
     """
+
     def __init__(self, config):
         super().__init__()
         self.attention = PerformerSelfAttention(config)
         self.ffn = (
             FFNSwiGLUBlock(config.hidden_size, config.intermediate_size)
             if config.ffn_type == "swiglu"
-            else FFNLUBlock(config.hidden_size, config.intermediate_size, config.ffn_type)
+            else FFNLUBlock(
+                config.hidden_size, config.intermediate_size, config.ffn_type
+            )
         )
         self.residual_connection1 = ResidualConnection(
             config.hidden_size, config.hidden_dropout_prob, config.norm_type
@@ -96,6 +107,7 @@ class FMPerformer(PreTrainedModel):
     """
     Feature Mapping (FM) Model with Performer Attention
     """
+
     config_class = None  # Replace with your FMConfig
     model_type = "fm-performer"
 
@@ -133,5 +145,3 @@ class FMPerformer(PreTrainedModel):
         # Compute logits
         logits = self.lm_head(h)
         return logits, h
-
----
