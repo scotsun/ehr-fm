@@ -78,6 +78,8 @@ def parse_args():
                        help="Number of BERT layers")
     parser.add_argument("--n_heads", type=int, default=12,
                        help="Number of attention heads")
+    parser.add_argument("--intermediate_size", type=int, default=512,
+                       help="FFN intermediate size")
     parser.add_argument("--dropout", type=float, default=0.2,
                        help="Dropout rate")
 
@@ -686,6 +688,7 @@ def main():
         n_graph_layers=args.n_graph_layers,
         n_bert_layers=args.n_bert_layers,
         n_heads=args.n_heads,
+        intermediate_size=args.intermediate_size,
         graph_dropout=args.dropout,
         bert_dropout=args.dropout,
         attention_dropout=args.dropout,

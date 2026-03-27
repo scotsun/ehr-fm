@@ -77,7 +77,7 @@ def create_finetune_model(pretrained_path, num_classes, vocab_size, args, is_mul
         n_graph_layers=args.n_graph_layers,
         n_bert_layers=args.n_bert_layers,
         n_bert_heads=args.n_heads,
-        intermediate_size=512,  # Match pretrain config
+        intermediate_size=args.intermediate_size,
         max_visits=args.max_visits,
         n_visit_types=5,
         max_age=103,
@@ -458,6 +458,7 @@ def parse_args():
     parser.add_argument("--n_graph_layers", type=int, default=3)
     parser.add_argument("--n_bert_layers", type=int, default=6)
     parser.add_argument("--n_heads", type=int, default=12)
+    parser.add_argument("--intermediate_size", type=int, default=512)
     parser.add_argument("--max_visits", type=int, default=50)
     parser.add_argument("--max_codes_per_visit", type=int, default=100)
     parser.add_argument("--dropout", type=float, default=0.1)
