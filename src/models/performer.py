@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import PreTrainedModel
+from . import FMConfig, FMEmbeddings
 from src.layers import T2V, FFNSwiGLUBlock, FFNLUBlock, ResidualConnection
 
 
@@ -12,18 +13,18 @@ class PerformerSelfAttention(nn.Module):
 
     def __init__(self, config):
         super().__init__()
-        self.num_heads = config.num_attention_heads
-        self.head_dim = config.hidden_size // config.num_attention_heads
-        self.embed_dim = config.hidden_size
+        self.n_head = config.n_heads
+        self.d_k = config.d_model // config.n_heads
+        self.d_model = config.d_model
         self.epsilon = 1e-6
 
-        self.query = nn.Linear(self.embed_dim, self.embed_dim)
-        self.key = nn.Linear(self.embed_dim, self.embed_dim)
-        self.value = nn.Linear(self.embed_dim, self.embed_dim)
+        self.query = nn.Linear(self.d_model, self.d_model)
+        self.key = nn.Linear(self.d_model, self.d_model)
+        self.value = nn.Linear(self.d_model, self.d_model)
 
-        self.output = nn.Linear(self.embed_dim, self.embed_dim)
+        self.output = nn.Linear(self.d_model, self.d_model)
 
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+        self.dropout = nn.Dropout(config.dropout)
 
     def favor_positive_features(self, x):
         """
@@ -41,15 +42,11 @@ class PerformerSelfAttention(nn.Module):
         values = self.value(hidden_states)
 
         # Reshape for multi-head attention
-        queries = queries.view(
-            batch_size, seq_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
-        keys = keys.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(
+        queries = queries.view(batch_size, seq_len, self.n_head, self.d_k).transpose(
             1, 2
         )
-        values = values.view(
-            batch_size, seq_len, self.num_heads, self.head_dim
-        ).transpose(1, 2)
+        keys = keys.view(batch_size, seq_len, self.n_head, self.d_k).transpose(1, 2)
+        values = values.view(batch_size, seq_len, self.n_head, self.d_k).transpose(1, 2)
 
         # Normalize queries and keys with FAVOR+
         queries = self.favor_positive_features(queries)
@@ -82,17 +79,15 @@ class PerformerBlock(nn.Module):
         super().__init__()
         self.attention = PerformerSelfAttention(config)
         self.ffn = (
-            FFNSwiGLUBlock(config.hidden_size, config.intermediate_size)
+            FFNSwiGLUBlock(config.d_model, config.intermediate_size)
             if config.ffn_type == "swiglu"
-            else FFNLUBlock(
-                config.hidden_size, config.intermediate_size, config.ffn_type
-            )
+            else FFNLUBlock(config.d_model, config.intermediate_size, config.ffn_type)
         )
         self.residual_connection1 = ResidualConnection(
-            config.hidden_size, config.hidden_dropout_prob, config.norm_type
+            config.d_model, config.dropout, config.norm_type
         )
         self.residual_connection2 = ResidualConnection(
-            config.hidden_size, config.hidden_dropout_prob, config.norm_type
+            config.d_model, config.dropout, config.norm_type
         )
 
     def forward(self, x, attention_mask=None):
@@ -108,14 +103,15 @@ class FMPerformer(PreTrainedModel):
     Feature Mapping (FM) Model with Performer Attention
     """
 
-    config_class = None  # Replace with your FMConfig
+    config_class = FMConfig
     model_type = "fm-performer"
 
     def __init__(self, config):
         super().__init__(config)
 
         # Embedding layer
-        self.embeddings = T2V(config.d_model, config.t2v_scale)
+        self.embeddings = FMEmbeddings(config)
+        self.t2v = T2V(config.d_model, config.t2v_scale)
 
         # Initialize Performer blocks
         self.blocks = nn.ModuleList(
@@ -136,8 +132,9 @@ class FMPerformer(PreTrainedModel):
             self.lm_head.weight = self.embeddings.embeddings.weight
 
     def forward(self, input_ids, attention_mask, t):
-        # Encode the inputs with the Performer Layers
         h = self.embeddings(input_ids)
+        h = h + self.t2v(t)
+        # Encode the inputs with the Performer Layers
         for block in self.blocks:
             h = block(h, attention_mask)
         h = self.last_norm(h)
