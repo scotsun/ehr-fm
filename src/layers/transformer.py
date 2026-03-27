@@ -44,23 +44,23 @@ class MultiHeadAttentionBlock(nn.Module):
                 )
 
     @staticmethod
-    def attention(query, key, value, mask, dropout=0.0):
+    def attention(query, key, value, attn_mask, dropout=0.0, train=True):
         # this can be replaced
         d_k = query.shape[-1]
         # transpose matmul
         attention_scores = einsum("bhqd, bhkd->bhqk", query, key) / math.sqrt(d_k)
-        if mask is not None:
+        if attn_mask is not None:
             # (batch, 1, 1, seq_len) which will broadcast to all `heads` and `queries`
-            mask = mask[:, None, None, :]
-            attention_scores = attention_scores.masked_fill(mask == 0, -1e9)
+            attn_mask = attn_mask[:, None, None, :]
+            attention_scores = attention_scores.masked_fill(attn_mask == 0, -1e9)
         attention_scores = attention_scores.softmax(dim=-1)
-        attention_scores = torch.dropout(attention_scores, p=dropout)
+        attention_scores = torch.dropout(attention_scores, p=dropout, train=train)
         # matmul
         mh_out = einsum("bhqk, bhkd->bhqd", attention_scores, value)
         return mh_out
 
     @staticmethod
-    def efficient_attention(query, key, value, attn_mask, dropout=0.0):
+    def efficient_attention(query, key, value, attn_mask, dropout=0.0, train=True):
         attn_mask = einsum("bq,bk -> bqk", attn_mask, attn_mask)[:, None, :, :]
         with sdpa_kernel([SDPBackend.EFFICIENT_ATTENTION]):
             mh_out = F.scaled_dot_product_attention(
@@ -73,7 +73,7 @@ class MultiHeadAttentionBlock(nn.Module):
             )
         return mh_out
 
-    def forward(self, q, k, v, mask, t=None):
+    def forward(self, q, k, v, attn_mask, t=None):
         query = self.w_q(q)  # (-1, seq_len, d_model)
         key = self.w_k(k)  # (-1, seq_len, d_model)
         value = self.w_v(v)  # (-1, seq_len, d_model)
@@ -87,7 +87,9 @@ class MultiHeadAttentionBlock(nn.Module):
             query, key = self.rope_q(query, t), self.rope_k(key, t)
 
         effective_dropout = self.dropout if self.training else 0.0
-        mh_out = self._attn_func(query, key, value, mask, effective_dropout)
+        mh_out = self._attn_func(
+            query, key, value, attn_mask, effective_dropout, self.training
+        )
         # (-1, h, seq_len, d_k) -> (-1, seq_len, h, d_k) -> (-1, seq_len, d_model)
         mh_out = (
             mh_out.transpose(1, 2).contiguous().view(mh_out.shape[0], -1, self.d_model)
