@@ -44,7 +44,7 @@ class FMBase(PreTrainedModel):
             self.lm_head.weight = self.embeddings.embeddings.weight
 
     def forward(self, input_ids, attention_mask, set_attention_mask, t):
-        h, mid_h = self.encode(input_ids, attention_mask, set_attention_mask, t)
+        h = self.encode(input_ids, attention_mask, set_attention_mask, t)
         logits = self.lm_head(h)
         # (batch, max_seq, max_set_size, d_model)
         return logits, h
