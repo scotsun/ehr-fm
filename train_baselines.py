@@ -339,6 +339,7 @@ def create_model(model_type, vocab_size, args):
             n_token_types=8,
             edge_hidden_size=64,
             max_visits=50,
+            use_gradient_checkpointing=True,
         )
         return HEART(config)
 
