@@ -130,6 +130,7 @@ def create_finetune_model(model_type, pretrained_path, num_classes, vocab_size, 
             n_token_types=8,
             edge_hidden_size=64,
             max_visits=50,  # Must match pretrained model
+            use_gradient_checkpointing=True,
         )
         model = HEARTForSequenceClassification(
             config=config,
