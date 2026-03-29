@@ -274,7 +274,7 @@ class SWEOnlyForClassification(nn.Module):
         cls_tokens = hidden_states[:, :, 0, :]
 
         # Bi-GRU aggregation
-        lengths = segment_attention_mask.sum(dim=1).long().cpu()
+        lengths = segment_attention_mask.sum(dim=1).long().clamp(min=1).cpu()
         packed = nn.utils.rnn.pack_padded_sequence(
             cls_tokens, lengths, batch_first=True, enforce_sorted=False
         )
