@@ -1,46 +1,78 @@
 import torch
 import torch.nn as nn
-import torch.distributed as dist
-import mlflow
 
-from tqdm import tqdm
-from torch.optim import Optimizer
-from torch.utils.data import DataLoader
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.amp import autocast
-from mlflow.models import ModelSignature
-
+from dataclasses import dataclass
+from torch.amp import GradScaler, autocast
+from torch.utils.data import DataLoader, Dataset
 from sklearn.metrics import roc_auc_score, average_precision_score
 
-from utils.dist_utils import is_main_process, _dist_is_initialized
-
-from . import EarlyStopping, Trainer
-
-# NOTE: Trainer is DDP-aware, but SetFit as a fewshot method, we do not need DDP
+from src.models.downstream_modules import Downstream
+from src.setfit.loss import CosineSimilarityLoss
 
 
-class SetFitSTFTTrainer(Trainer):
-    def __init__(
-        self,
-        model: nn.Module,
-        pooler: nn.Module,
-        contrastive_criterion: nn.Module,
-        optimizer: Optimizer,
-        early_stopping: EarlyStopping | None,
-        verbose_period: int,
-        device: torch.device,
-        model_signature: ModelSignature,
-    ) -> None:
-        super().__init__(
-            model=model,
-            optimizer=optimizer,
-            early_stopping=early_stopping,
-            verbose_period=verbose_period,
-            device=device,
-            model_signature=model_signature,
+@dataclass
+class SetFitConfig:
+    stft_epochs: int = 1
+    taskhead_epochs: int = 5
+    stft_batch_size: int = 32
+    task_batch_size: int = 32
+    stft_lr: float = 1e-4
+    task_lr: float = 1e-3
+    weight_decay: float = 1e-4
+    d_model: int = 256
+    d_hidden: int = 512
+    embedding_dim: int = 128
+    num_workers: int = 0
+    cls_token_id: int = 2
+    set_pool: str = "cls"
+    pooler_model_type: str = "mlp"
+    taskhead_model_type: str = "mlp"
+
+
+class SetFitTwoStageRunner:
+    """
+    Two-stage SetFit runner.
+
+    Stage 1: contrastive ST-FT on SetFit pair dataset.
+    Stage 2: task-head fine-tuning on FewShot dataset.
+
+    Both pooler and task-head are Downstream modules.
+    """
+
+    def __init__(self, backbone: nn.Module, device: torch.device, cfg: SetFitConfig):
+        self.backbone = backbone.to(device)
+        self.device = device
+        self.cfg = cfg
+
+        self.pooler = Downstream(
+            d_model=cfg.d_model,
+            d_hidden=cfg.d_hidden,
+            d_out=cfg.embedding_dim,
+            model_type=cfg.pooler_model_type,
+            set_pool=cfg.set_pool,
+        ).to(device)
+
+        self.task_head = Downstream(
+            d_model=cfg.d_model,
+            d_hidden=cfg.d_hidden,
+            d_out=1,
+            model_type=cfg.taskhead_model_type,
+            set_pool=cfg.set_pool,
+        ).to(device)
+
+        self.contrastive_criterion = CosineSimilarityLoss()
+        self.task_criterion = nn.BCEWithLogitsLoss()
+
+        self.stft_optimizer = torch.optim.AdamW(
+            list(self.backbone.parameters()) + list(self.pooler.parameters()),
+            lr=cfg.stft_lr,
+            weight_decay=cfg.weight_decay,
         )
-        self.pooler = pooler.to(device)
-        self.contrastive_criterion = contrastive_criterion
+        self.task_optimizer = torch.optim.AdamW(
+            self.task_head.parameters(),
+            lr=cfg.task_lr,
+            weight_decay=cfg.weight_decay,
+        )
 
     def _autocast_kwargs(self) -> dict:
         amp_device_type = self.device.type
@@ -48,213 +80,172 @@ class SetFitSTFTTrainer(Trainer):
         dtype = torch.float16 if amp_device_type == "cuda" else torch.bfloat16
         return {"device_type": amp_device_type, "dtype": dtype, "enabled": enabled}
 
-    def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
-        # dataloader(setfit dataset)
-        model: nn.Module = self.model
-        model.train()
+    def _split_pair_inputs(self, batch: dict, suffix: str) -> dict:
+        return {
+            k[: -len(suffix)]: v.to(self.device)
+            for k, v in batch.items()
+            if k.endswith(suffix)
+        }
+
+    def _resolve_masks(
+        self,
+        hidden: torch.Tensor,
+        inputs: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if hidden.ndim == 4:
+            token_mask = inputs["attention_mask"].bool()
+            set_mask = inputs.get("set_attention_mask")
+            if set_mask is not None:
+                set_mask = set_mask.bool()
+            else:
+                set_mask = token_mask.any(dim=-1)
+            return token_mask, set_mask
+
+        if hidden.ndim == 3:
+            attn_mask = inputs.get("attention_mask")
+            if self.cfg.set_pool == "cls-1d":
+                if "input_ids" not in inputs:
+                    raise KeyError("input_ids is required when set_pool='cls-1d'.")
+                token_mask = inputs["input_ids"].eq(self.cfg.cls_token_id)
+                if attn_mask is not None:
+                    token_mask = token_mask & attn_mask.bool()
+                return token_mask, None
+
+            # For 1D backbones, this class currently requires cls-1d pooling.
+            raise ValueError(
+                "For hidden shape (B, L, D), set_pool must be 'cls-1d' for Downstream."
+            )
+
+        raise ValueError(f"Unexpected hidden shape: {tuple(hidden.shape)}")
+
+    def _encode(self, inputs: dict) -> torch.Tensor:
+        return self.backbone(**inputs)[-1]
+
+    def _downstream(self, downstream: Downstream, hidden: torch.Tensor, inputs: dict):
+        token_mask, set_mask = self._resolve_masks(hidden, inputs)
+        return downstream(hidden, token_mask, set_mask)
+
+    def _stft_epoch(self, dataloader: DataLoader, scaler: GradScaler, epoch: int):
+        self.backbone.train()
         self.pooler.train()
-        scaler = self.scaler
-        optimizer = self.optimizer
-        contrastive_criterion = self.contrastive_criterion
-        device = self.device
 
-        with tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose) as bar:
-            bar.set_description(f"Epoch {epoch_id}")
-            for batch_id, batch in enumerate(bar):
-                optimizer.zero_grad()
+        running_loss = 0.0
+        for step, batch in enumerate(dataloader):
+            self.stft_optimizer.zero_grad()
 
-                inputs_a = {
-                    k.split("_")[0]: v.to(device)
-                    for k, v in batch.items()
-                    if k.endswith("_a")
-                }
-                inputs_b = {
-                    k.split("_")[0]: v.to(device)
-                    for k, v in batch.items()
-                    if k.endswith("_b")
-                }
-                pair_labels = batch["pair_label"].to(device)
-
-                with autocast(**self._autocast_kwargs()):
-                    h_a = model(**inputs_a)[-1]
-                    z_a = self.pooler(h_a)
-                    h_b = model(**inputs_b)[-1]
-                    z_b = self.pooler(h_b)
-
-                    con_loss = contrastive_criterion(z_a, z_b, pair_labels)
-
-                scaler.scale(con_loss).backward()
-
-                # --- optimizer step ---
-                scaler.step(optimizer)
-                scaler.update()
-
-                bar.set_postfix(con_loss=float(con_loss))
-
-                cur_step = epoch_id * len(dataloader) + batch_id
-                if is_main_process() and cur_step % 100 == 0:
-                    mlflow.log_metrics(
-                        {"train_con_loss": float(con_loss)},
-                        step=cur_step,
-                    )
-        return
-
-    @torch.no_grad()
-    def evaluate(self, dataloader: DataLoader, verbose: bool):
-        model: nn.Module = self.model
-        model.eval()
-        self.pooler.eval()
-        device = self.device
-        contrastive_criterion = self.contrastive_criterion
-
-        counter = torch.zeros(2, device=device)
-        for batch in tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose):
-            inputs_a = {
-                k.split("_")[0]: v.to(device)
-                for k, v in batch.items()
-                if k.endswith("_a")
-            }
-            inputs_b = {
-                k.split("_")[0]: v.to(device)
-                for k, v in batch.items()
-                if k.endswith("_b")
-            }
-            pair_labels = batch["pair_label"].to(device)
+            inputs_a = self._split_pair_inputs(batch, "_a")
+            inputs_b = self._split_pair_inputs(batch, "_b")
+            labels = batch["pair_label"].to(self.device).float()
 
             with autocast(**self._autocast_kwargs()):
-                h_a = model(**inputs_a)[-1]
-                z_a = self.pooler(h_a)
-                h_b = model(**inputs_b)[-1]
-                z_b = self.pooler(h_b)
+                h_a = self._encode(inputs_a)
+                h_b = self._encode(inputs_b)
+                z_a = self._downstream(self.pooler, h_a, inputs_a)
+                z_b = self._downstream(self.pooler, h_b, inputs_b)
+                loss = self.contrastive_criterion(z_a, z_b, labels)
 
-                con_loss = contrastive_criterion(z_a, z_b, pair_labels)
+            scaler.scale(loss).backward()
+            scaler.step(self.stft_optimizer)
+            scaler.update()
+            running_loss += loss.item()
 
-            counter[0] += 1
-            counter[1] += con_loss.item()
+            if (step + 1) % 20 == 0:
+                avg = running_loss / (step + 1)
+                print(f"[ST-FT] epoch={epoch} step={step + 1} loss={avg:.4f}")
 
-        if _dist_is_initialized() and dist.get_world_size() > 1:
-            dist.all_reduce(counter, op=dist.ReduceOp.SUM)
-        return (counter[1] / counter[0]).item()
+        return running_loss / max(len(dataloader), 1)
 
-    def _valid(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
-        val_con_loss = self.evaluate(dataloader, verbose)
-        if verbose:
-            print(f"epoch {epoch_id}/val_con_loss: {round(val_con_loss, 3)}")
-
-        valid_metrics = {
-            "callback_metric": val_con_loss,
-            "logged_metrics": {
-                "val_con_loss": val_con_loss,
-            },
-        }
-        return valid_metrics
-
-
-class SetFitTaskHeadTrainer(Trainer):
-    def __init__(
-        self,
-        model: nn.Module,
-        task_head: nn.Module,
-        criterion: nn.Module,
-        optimizer: Optimizer,
-        early_stopping: EarlyStopping | None,
-        verbose_period: int,
-        device: torch.device,
-        model_signature: ModelSignature,
-    ) -> None:
-        super().__init__(
-            model=model,
-            optimizer=optimizer,
-            early_stopping=early_stopping,
-            verbose_period=verbose_period,
-            device=device,
-            model_signature=model_signature,
-        )
-        for p in model.parameters():  # freeze backbone
-            p.requires_grad = False
-        self.task_head = task_head.to(device)
-        self.criterion = criterion
-
-    def _autocast_kwargs(self) -> dict:
-        amp_device_type = self.device.type
-        enabled = amp_device_type in {"cuda", "cpu"}
-        dtype = torch.float16 if amp_device_type == "cuda" else torch.bfloat16
-        return {"device_type": amp_device_type, "dtype": dtype, "enabled": enabled}
-
-    def _train(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
-        # dataloader(fewshot dataset)
-        model = self.model
-        model.train()
+    def _task_epoch(self, dataloader: DataLoader, scaler: GradScaler, epoch: int):
+        self.backbone.eval()
         self.task_head.train()
-        scaler = self.scaler
-        optimizer = self.optimizer
-        criterion = self.criterion
-        device = self.device
 
+        running_loss = 0.0
         label_key = dataloader.dataset.label_key
-        with tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose) as bar:
-            bar.set_description(f"Epoch {epoch_id}")
-            for batch_id, batch in enumerate(bar):
-                optimizer.zero_grad()
 
-                inputs = {k: v.to(device) for k, v in batch.items() if k != label_key}
-                y = batch[label_key].to(device)
+        for step, batch in enumerate(dataloader):
+            self.task_optimizer.zero_grad()
 
-                with autocast(**self._autocast_kwargs()):
-                    h = model(**inputs)[-1]
-                    yh = self.task_head(h)
-                    loss = criterion(yh, y)
+            inputs = {k: v.to(self.device) for k, v in batch.items() if k != label_key}
+            y = batch[label_key].to(self.device).float().view(-1, 1)
 
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
+            with torch.no_grad():
+                hidden = self._encode(inputs)
 
-                bar.set_postfix(loss=float(loss))
-                cur_step = epoch_id * len(dataloader) + batch_id
-                if is_main_process() and cur_step % 100 == 0:
-                    mlflow.log_metrics(
-                        {"train_loss": float(loss)},
-                        step=cur_step,
-                    )
-        return
+            with autocast(**self._autocast_kwargs()):
+                logits = self._downstream(self.task_head, hidden, inputs)
+                loss = self.task_criterion(logits, y)
+
+            scaler.scale(loss).backward()
+            scaler.step(self.task_optimizer)
+            scaler.update()
+            running_loss += loss.item()
+
+            if (step + 1) % 20 == 0:
+                avg = running_loss / (step + 1)
+                print(f"[TaskHead] epoch={epoch} step={step + 1} loss={avg:.4f}")
+
+        return running_loss / max(len(dataloader), 1)
 
     @torch.no_grad()
-    def evaluate(self, dataloader: DataLoader, verbose: bool):
-        # dataloader(fewshot dataset)
-        model: nn.Module | DDP = self.model
-        model.eval()
+    def evaluate_task_head(self, dataloader: DataLoader) -> tuple[float, float]:
+        self.backbone.eval()
         self.task_head.eval()
-        device = self.device
 
         label_key = dataloader.dataset.label_key
-        ys, yhs = [], []
-        for batch in tqdm(dataloader, unit="batch", mininterval=0, disable=not verbose):
-            inputs = {k: v.to(device) for k, v in batch.items() if k != label_key}
-            y = batch[label_key]
+        all_y = []
+        all_prob = []
 
-            h = model(**inputs)[-1]
-            yh = self.task_head(h)
+        for batch in dataloader:
+            inputs = {k: v.to(self.device) for k, v in batch.items() if k != label_key}
+            y = batch[label_key].to(self.device).float().view(-1)
 
-            ys.append(y.cpu())
-            yhs.append(yh.cpu())
-        ys, yhs = torch.cat(ys), torch.cat(yhs)
-        ys_np = ys.squeeze(-1).numpy()
-        probs = torch.sigmoid(yhs).squeeze(-1).numpy()
-        return (
-            roc_auc_score(ys_np, probs),
-            average_precision_score(ys_np, probs),
+            hidden = self._encode(inputs)
+            logits = self._downstream(self.task_head, hidden, inputs).view(-1)
+            probs = torch.sigmoid(logits)
+
+            all_y.append(y)
+            all_prob.append(probs)
+
+        y = torch.cat(all_y)
+        prob = torch.cat(all_prob)
+
+        auroc = roc_auc_score(y.cpu().numpy(), prob.cpu().numpy())
+        ap = average_precision_score(y.cpu().numpy(), prob.cpu().numpy())
+
+        return auroc, ap
+
+    def fit(self, setfit_dataset: Dataset, fewshot_dataset: Dataset):
+        stft_loader = DataLoader(
+            setfit_dataset,
+            batch_size=self.cfg.stft_batch_size,
+            shuffle=True,
+            num_workers=self.cfg.num_workers,
+        )
+        task_loader = DataLoader(
+            fewshot_dataset,
+            batch_size=self.cfg.task_batch_size,
+            shuffle=True,
+            num_workers=self.cfg.num_workers,
         )
 
-    def _valid(self, dataloader: DataLoader, verbose: bool, epoch_id: int):
-        valid_auc, valid_ap = self.evaluate(dataloader, verbose)
-        if verbose:
-            print(f"epoch {epoch_id}/valid_auc={round(valid_auc, 3)}")
+        stft_scaler = GradScaler(device=self.device.type)
+        task_scaler = GradScaler(device=self.device.type)
 
-        valid_metrics = {
-            "callback_metric": valid_auc,
-            "logged_metrics": {
-                "val_auc": valid_auc,
-                "val_ap": valid_ap,
-            },
-        }
-        return valid_metrics
+        print("=== Stage 1: SetFit ST-FT ===")
+        for epoch in range(self.cfg.stft_epochs):
+            loss = self._stft_epoch(stft_loader, stft_scaler, epoch)
+            print(f"[ST-FT] epoch={epoch} avg_loss={loss:.4f}")
+
+        print("=== Stage 2: Task-Head Fine-Tuning ===")
+        for epoch in range(self.cfg.taskhead_epochs):
+            loss = self._task_epoch(task_loader, task_scaler, epoch)
+            auroc, ap = self.evaluate_task_head(task_loader)
+            print(
+                f"[TaskHead] epoch={epoch} avg_loss={loss:.4f} "
+                f"train_auroc={auroc:.4f} train_ap={ap:.4f}"
+            )
+
+
+# Example usage:
+# runner = SetFitTwoStageRunner(backbone=model, device=device, cfg=TwoStageConfig(...))
+# runner.fit(setfit_dataset=setfit_dataset, fewshot_dataset=fewshot_dataset)

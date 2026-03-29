@@ -84,6 +84,8 @@ class Downstream(nn.Module):
         match model_type:
             case "mlp":
                 self.net = FFNSwiGLUBlock(d_model, d_hidden, d_out)
+            case "mlp-last":
+                self.net = FFNSwiGLUBlock(d_model, d_hidden, d_out)
             case "gru":
                 self.net = BiGRU(d_model, d_hidden, d_out)
             case _:
