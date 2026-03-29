@@ -187,22 +187,26 @@ class EdgeModule(nn.Module):
         Returns:
             edge_embs: (B, L, L, edge_hidden_size) — pairwise relation embeddings
         """
-        # Type-specific linear transform (Paper Eq. 5): r_n = Linear_τ(v_n)
-        types_safe = token_types.clamp(0, self.n_types - 1)
-        left_trans = self.left_transform[types_safe]    # (B, L, r, D)
-        right_trans = self.right_transform[types_safe]  # (B, L, r, D)
+        # Force FP32 for edge computation — FP16 einsum over D=768 dims can overflow
+        with torch.amp.autocast('cuda', enabled=False):
+            token_embs = token_embs.float()
 
-        # einsum: for each (b,l), compute transform[b,l] @ token[b,l] → (r,)
-        left_embs = torch.einsum('bld,blrd->blr', token_embs, left_trans)   # (B, L, r)
-        right_embs = torch.einsum('bld,blrd->blr', token_embs, right_trans)  # (B, L, r)
+            # Type-specific linear transform (Paper Eq. 5): r_n = Linear_τ(v_n)
+            types_safe = token_types.clamp(0, self.n_types - 1)
+            left_trans = self.left_transform[types_safe]    # (B, L, r, D)
+            right_trans = self.right_transform[types_safe]  # (B, L, r, D)
 
-        # Decomposed pairwise combination (Paper Eq. 6): r_{n←m} = Linear(r_n || r_m)
-        # Linear(cat(a,b)) = W_l@a + W_r@b + bias — avoids (B, L, L, 2r) intermediate
-        left_out = self.output_left(left_embs)    # (B, L, E) — includes bias
-        right_out = self.output_right(right_embs)  # (B, L, E) — no bias
+            # einsum: for each (b,l), compute transform[b,l] @ token[b,l] → (r,)
+            left_embs = torch.einsum('bld,blrd->blr', token_embs, left_trans)   # (B, L, r)
+            right_embs = torch.einsum('bld,blrd->blr', token_embs, right_trans)  # (B, L, r)
 
-        # Broadcast addition produces (B, L, L, E) without materializing concat
-        edge_embs = left_out.unsqueeze(2) + right_out.unsqueeze(1)  # (B, L, L, E)
+            # Decomposed pairwise combination (Paper Eq. 6): r_{n←m} = Linear(r_n || r_m)
+            # Linear(cat(a,b)) = W_l@a + W_r@b + bias — avoids (B, L, L, 2r) intermediate
+            left_out = self.output_left(left_embs)    # (B, L, E) — includes bias
+            right_out = self.output_right(right_embs)  # (B, L, E) — no bias
+
+            # Broadcast addition produces (B, L, L, E) without materializing concat
+            edge_embs = left_out.unsqueeze(2) + right_out.unsqueeze(1)  # (B, L, L, E)
 
         return edge_embs
 
@@ -289,14 +293,14 @@ class MultiHeadEdgeAttention(nn.Module):
         # Stream 2: edge context — weighted sum of edge embeddings
         edge_context = torch.einsum('bhnm,bnmd->bhnd', attn, k_s_edge.float())  # (B, H, L, E)
 
-        # Reshape and combine
+        # Reshape and combine — stay in FP32 to prevent overflow on FP16 cast
         context = context.transpose(1, 2).contiguous().view(B, -1, self.n_heads * self.d_k)
         edge_context = edge_context.transpose(1, 2).contiguous().view(B, -1, self.n_heads * self.d_edge)
-        edge_context = self.W_edge_output(edge_context.to(original_dtype))  # (B, L, D)
 
-        # Concatenate and project (Eq. 8 output)
-        combined = torch.cat([context.to(original_dtype), edge_context], dim=-1)  # (B, L, 2D)
-        return self.W_output(combined)  # (B, L, D)
+        with torch.amp.autocast('cuda', enabled=False):
+            edge_context = self.W_edge_output(edge_context)  # (B, L, D) in FP32
+            combined = torch.cat([context, edge_context], dim=-1)  # (B, L, 2D) in FP32
+            return self.W_output(combined)  # (B, L, D) in FP32
 
 
 class EdgeTransformerBlock(nn.Module):
